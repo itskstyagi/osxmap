@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#ecece8">
+    <meta name="description" content="A local-first monochrome 3D city explorer built from open map data.">
+    <title>Monument / City Explorer</title>
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+    <link rel="stylesheet" href="./styles.css?v=20260723-5">
+    <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+    <script type="module" src="./app.js?v=20260723-7"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="search-strip">
+        <section class="search-panel" aria-label="City search">
+          <form id="search-form" class="search-form">
+            <span class="search-icon" aria-hidden="true"></span>
+            <input id="search-input" placeholder="Search city, country" aria-label="Search city and country" aria-autocomplete="list" aria-expanded="false" autocomplete="off">
+            <span id="search-loader" class="mini-loader is-hidden" aria-label="Loading"></span>
+            <button type="submit" class="go-button" aria-label="Explore city">EXPLORE</button>
+          </form>
+          <div id="suggestions" class="suggestions is-hidden" role="listbox"></div>
+          <div class="search-meta"><span id="status-dot" class="status-dot pulse"></span><span id="region-label">Detecting search region</span><span class="meta-separator">/</span><span>Open data only</span></div>
+        </section>
+      </header>
+
+      <section class="map-region">
+        <div id="map" class="map-canvas" aria-label="Interactive 3D city map"></div>
+        <div id="stream-card" class="stream-card is-hidden" aria-live="polite">
+          <div class="stream-heading"><span id="stream-title">ENRICHING CITY</span><b id="stream-count">0/0</b></div>
+          <div class="stream-track"><i id="stream-progress"></i></div>
+          <div class="stream-detail"><span id="stream-buildings">0 buildings</span><span id="stream-source">cache / open data</span></div>
+        </div>
+        <section id="intro-card" class="intro-card"><p>01 / SEARCH</p><h1>Every city,<br>drawn from open data.</h1><span>Enter a place to stream its built form from the center outward.</span></section>
+        <nav class="map-controls" aria-label="Map controls"><button type="button" data-map-action="in" aria-label="Zoom in">+</button><button type="button" data-map-action="out" aria-label="Zoom out">-</button><button type="button" data-map-action="pitch" aria-label="Toggle map pitch">3D</button><button type="button" data-map-action="reset" aria-label="Reset city view">R</button></nav>
+        <div class="height-key" aria-hidden="true"><span>LOW</span><i></i><span>HIGH</span></div>
+        <footer class="attribution-note">OVERTURE / OPENSTREETMAP / NOMINATIM</footer>
+      </section>
+    </main>
+  </body>
+</html>
