@@ -40,7 +40,7 @@ https://ui.example.com/?city=Noida&country=India
 `country` is optional and is included in the city lookup when present. The
 misspelled `counrty` parameter is accepted for links created with that spelling.
 
-## Initial Location
+## Initial Location And Geography Tools
 
 Unless a shared-city URL is provided, the browser requests its public IP from
 `api.ipify.org` and resolves the city through `ip-api.services.brahmai.in`.
@@ -49,3 +49,10 @@ request fails, the browser's existing country detection remains the fallback.
 
 The UI loads MapLibre GL and the OpenFreeMap base style from their public CDN
 and hosts; self-host those resources for production or offline deployments.
+
+The geography panel keeps city search separate from place lookup. It supports
+OSM-first place search, explicit browser-location use, map-click pins,
+geodesic pin-area measurement, and driving-route highlights. Pins, areas, and
+OSM routes are stored by the local backend for this single-machine workspace.
+`Clear additions` removes the visible workspace objects while retaining
+provider place records and reusable OSM route records.

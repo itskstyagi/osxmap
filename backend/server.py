@@ -7,6 +7,7 @@ without a Node runtime, MongoDB driver, or Python package installation.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -16,12 +17,15 @@ import sqlite3
 import subprocess
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -35,6 +39,7 @@ DEFAULT_HEIGHT = 9.0
 NEIGHBOR_RADIUS = 150.0
 MAX_TILE_PAYLOAD = 14_000_000
 OPENBUILDINGMAP_CATALOG_TTL_SECONDS = 600
+OPENBUILDINGMAP_LOG_DIR = BACKEND_DIR / "logs" / "openbuildingmap"
 PROCESS_ENV_KEYS = set(os.environ)
 
 
@@ -73,6 +78,7 @@ class Config:
     )
     allowed_origins: str = os.getenv("ALLOWED_ORIGINS", "*")
     overpass_endpoint: str = os.getenv("OVERPASS_ENDPOINT", "https://overpass-api.de/api/interpreter")
+    overpass_backoff_seconds: int = max(1, int(os.getenv("OVERPASS_BACKOFF_SECONDS", "120")))
     overture_release: str = os.getenv("OVERTURE_RELEASE", "2026-06-17.0")
     overture_path: str = os.getenv("OVERTURE_BUILDINGS_PATH", "")
     disable_overture: bool = os.getenv("DISABLE_OVERTURE", "0") == "1"
@@ -83,15 +89,21 @@ class Config:
     geocode_ttl_days: int = int(os.getenv("GEOCODE_TTL_DAYS", "30"))
     suggestion_ttl_days: int = int(os.getenv("SUGGESTION_TTL_DAYS", "7"))
     max_buildings_per_tile: int = int(os.getenv("MAX_BUILDINGS_PER_TILE", "20000"))
+    serp_api_key: str = os.getenv("SERP_API_KEY", "")
+    osm_router_base_url: str = os.getenv("OSM_ROUTER_BASE_URL", "https://router.project-osrm.org").rstrip("/")
+    osm_router_profile: str = os.getenv("OSM_ROUTER_PROFILE", "driving")
+    osm_router_timeout_seconds: int = max(1, int(os.getenv("OSM_ROUTER_TIMEOUT_SECONDS", "12")))
+    enable_serp_directions_fallback: bool = os.getenv("ENABLE_SERP_DIRECTIONS_FALLBACK", "0") == "1"
 
 
 CONFIG = Config()
 
 
 class ServiceError(Exception):
-    def __init__(self, message: str, status: int = 500):
+    def __init__(self, message: str, status: int = 500, retry_after: int | None = None):
         super().__init__(message)
         self.status = status
+        self.retry_after = max(1, math.ceil(retry_after)) if retry_after else None
 
 
 class SerialQueue:
@@ -114,11 +126,15 @@ class SerialQueue:
 
 
 NOMINATIM_QUEUE = SerialQueue(1.05)
+SERP_QUEUE = SerialQueue()
+SERP_PLACE_QUEUE = SerialQueue()
 OVERPASS_QUEUE = SerialQueue(3.0)
 DUCKDB_QUEUE = SerialQueue()
 OPENBUILDINGMAP_QUEUE = SerialQueue()
 OPENBUILDINGMAP_CATALOG: dict[str, Any] = {"expires": 0.0, "files": []}
 OPENBUILDINGMAP_CATALOG_LOCK = threading.Lock()
+OVERPASS_UNAVAILABLE_UNTIL = 0.0
+OVERPASS_UNAVAILABLE_LOCK = threading.Lock()
 
 
 class Cache:
@@ -127,6 +143,9 @@ class Cache:
         self.connection = sqlite3.connect(path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.lock = threading.RLock()
+        self.connection.execute("PRAGMA busy_timeout = 5000")
+        self.connection.execute("PRAGMA foreign_keys = ON")
+        self.connection.execute("PRAGMA journal_mode = WAL")
         self._initialize()
 
     def _initialize(self) -> None:
@@ -158,6 +177,115 @@ class Cache:
                 CREATE INDEX IF NOT EXISTS raw_tiles_expiry ON raw_tiles(expires_at);
                 """
             )
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)"
+            )
+            applied = {row["version"] for row in self.connection.execute("SELECT version FROM schema_migrations")}
+            if 1 not in applied:
+                self.connection.executescript(
+                    """
+                    CREATE TABLE places (
+                      place_id TEXT PRIMARY KEY,
+                      provider TEXT NOT NULL,
+                      provider_id TEXT NOT NULL,
+                      name TEXT NOT NULL,
+                      normalized_name TEXT NOT NULL,
+                      address TEXT NOT NULL,
+                      country_code TEXT NOT NULL,
+                      latitude REAL NOT NULL,
+                      longitude REAL NOT NULL,
+                      bbox_json TEXT NOT NULL,
+                      provider_payload_json TEXT NOT NULL,
+                      created_at INTEGER NOT NULL,
+                      updated_at INTEGER NOT NULL
+                    );
+                    CREATE INDEX places_name ON places(normalized_name);
+                    CREATE INDEX places_coordinates ON places(latitude, longitude);
+
+                    CREATE TABLE place_lookups (
+                      lookup_key TEXT PRIMARY KEY,
+                      request_json TEXT NOT NULL,
+                      results_json TEXT NOT NULL,
+                      created_at INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE workspace_pins (
+                      pin_id TEXT PRIMARY KEY,
+                      label TEXT NOT NULL UNIQUE,
+                      name TEXT NOT NULL,
+                      place_id TEXT,
+                      latitude REAL NOT NULL,
+                      longitude REAL NOT NULL,
+                      source TEXT NOT NULL,
+                      created_at INTEGER NOT NULL,
+                      FOREIGN KEY(place_id) REFERENCES places(place_id)
+                    );
+
+                    CREATE TABLE workspace_areas (
+                      area_id TEXT PRIMARY KEY,
+                      label TEXT NOT NULL,
+                      geometry_json TEXT NOT NULL,
+                      summary_json TEXT NOT NULL,
+                      created_at INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE routes (
+                      route_id TEXT PRIMARY KEY,
+                      request_key TEXT NOT NULL UNIQUE,
+                      provider TEXT NOT NULL,
+                      profile TEXT NOT NULL,
+                      waypoints_json TEXT NOT NULL,
+                      geometry_json TEXT NOT NULL,
+                      summary_json TEXT NOT NULL,
+                      source_version TEXT NOT NULL,
+                      created_at INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE osm_route_failures (
+                      request_key TEXT PRIMARY KEY,
+                      profile TEXT NOT NULL,
+                      waypoints_json TEXT NOT NULL,
+                      reason TEXT NOT NULL,
+                      created_at INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE workspace_state (
+                      state_key TEXT PRIMARY KEY,
+                      value_json TEXT NOT NULL,
+                      updated_at INTEGER NOT NULL
+                    );
+                    """
+                )
+                self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (1, int(time.time())))
+            if 2 not in applied:
+                self.connection.executescript(
+                    """
+                    CREATE TABLE provider_responses (
+                      response_id TEXT PRIMARY KEY,
+                      provider TEXT NOT NULL,
+                      request_key TEXT NOT NULL,
+                      request_json TEXT NOT NULL,
+                      response_json TEXT NOT NULL,
+                      received_at INTEGER NOT NULL
+                    );
+                    CREATE INDEX provider_responses_request ON provider_responses(provider, request_key, received_at DESC);
+                    """
+                )
+                self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (2, int(time.time())))
+            if 3 not in applied:
+                self.connection.executescript(
+                    """
+                    CREATE TABLE place_aliases (
+                      source_place_id TEXT PRIMARY KEY,
+                      canonical_place_id TEXT NOT NULL,
+                      created_at INTEGER NOT NULL,
+                      FOREIGN KEY(canonical_place_id) REFERENCES places(place_id)
+                    );
+                    CREATE INDEX place_aliases_canonical ON place_aliases(canonical_place_id);
+                    """
+                )
+                self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (3, int(time.time())))
+            self._deduplicate_places()
 
     @staticmethod
     def _expiry(days: int) -> int:
@@ -218,6 +346,272 @@ class Cache:
                 (source, tile_id, zlib.compress(encoded), json.dumps(stats, separators=(",", ":")), self._expiry(ttl_days or CONFIG.tile_ttl_days)),
             )
 
+    def get_place_lookup(self, lookup_key: str) -> list[dict[str, Any]] | None:
+        with self.lock:
+            row = self.connection.execute("SELECT results_json FROM place_lookups WHERE lookup_key = ?", (lookup_key,)).fetchone()
+        return self._canonicalize_places(json.loads(row["results_json"])) if row else None
+
+    def put_place_lookup(self, lookup_key: str, request: dict[str, Any], results: list[dict[str, Any]]) -> None:
+        results = self._canonicalize_places(results)
+        with self.lock, self.connection:
+            self.connection.execute(
+                "INSERT INTO place_lookups(lookup_key, request_json, results_json, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(lookup_key) DO UPDATE SET request_json=excluded.request_json, results_json=excluded.results_json, created_at=excluded.created_at",
+                (lookup_key, json.dumps(request, separators=(",", ":")), json.dumps(results, separators=(",", ":")), int(time.time())),
+            )
+
+    def get_provider_response(self, provider: str, request_key: str) -> Any | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT response_json FROM provider_responses WHERE provider = ? AND request_key = ? "
+                "ORDER BY received_at DESC, response_id DESC LIMIT 1",
+                (provider, request_key),
+            ).fetchone()
+        return json.loads(row["response_json"]) if row else None
+
+    def put_provider_response(self, provider: str, request_key: str, request: dict[str, Any], response: Any) -> None:
+        with self.lock, self.connection:
+            self.connection.execute(
+                "INSERT INTO provider_responses(response_id, provider, request_key, request_json, response_json, received_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    f"provider-response-{uuid.uuid4().hex}", provider, request_key,
+                    json.dumps(redact_provider_payload(request), separators=(",", ":")),
+                    json.dumps(redact_provider_payload(response), separators=(",", ":")), int(time.time()),
+                ),
+            )
+
+    @staticmethod
+    def _place_from_row(row: sqlite3.Row, include_payload: bool = False) -> dict[str, Any]:
+        place = {
+            "id": row["place_id"], "provider": row["provider"], "providerId": row["provider_id"],
+            "name": row["name"], "address": row["address"], "countryCode": row["country_code"],
+            "lat": row["latitude"], "lon": row["longitude"], "bbox": json.loads(row["bbox_json"]),
+        }
+        if include_payload:
+            place["providerPayload"] = json.loads(row["provider_payload_json"])
+        return place
+
+    @staticmethod
+    def _same_place_name(first: str, second: str) -> bool:
+        if first == second:
+            return True
+        shorter, longer = sorted((first, second), key=len)
+        short_words = shorter.split()
+        if len(short_words) < 2 or not longer.startswith(shorter + " "):
+            return False
+        return longer[len(shorter) + 1:].split()[0] in {
+            "society", "residency", "residential", "apartment", "apartments", "housing", "enclave", "colony",
+        }
+
+    @staticmethod
+    def _normalized_place_name(value: str) -> str:
+        return " ".join(unicodedata.normalize("NFKC", value).strip().casefold().split())
+
+    @classmethod
+    def _same_place(cls, row: sqlite3.Row, place: dict[str, Any]) -> bool:
+        if not cls._same_place_name(row["normalized_name"], cls._normalized_place_name(place["name"])):
+            return False
+        latitude = float(place["lat"])
+        longitude = float(place["lon"])
+        north_south = (float(row["latitude"]) - latitude) * 111_320
+        east_west = (float(row["longitude"]) - longitude) * 111_320 * math.cos(math.radians((float(row["latitude"]) + latitude) / 2))
+        return math.hypot(north_south, east_west) <= 35
+
+    def _canonical_place(self, place_id: str, include_payload: bool = False) -> dict[str, Any] | None:
+        alias = self.connection.execute(
+            "SELECT canonical_place_id FROM place_aliases WHERE source_place_id = ?", (place_id,)
+        ).fetchone()
+        canonical_id = alias["canonical_place_id"] if alias else place_id
+        row = self.connection.execute(
+            "SELECT place_id, provider, provider_id, name, address, country_code, latitude, longitude, bbox_json, provider_payload_json "
+            "FROM places WHERE place_id = ?", (canonical_id,)
+        ).fetchone()
+        return self._place_from_row(row, include_payload) if row else None
+
+    def _nearby_place_rows(self, place: dict[str, Any]) -> list[sqlite3.Row]:
+        latitude = float(place["lat"])
+        longitude = float(place["lon"])
+        latitude_delta = 35 / 111_320
+        longitude_delta = latitude_delta / max(0.1, abs(math.cos(math.radians(latitude))))
+        return self.connection.execute(
+            "SELECT place_id, provider, provider_id, name, normalized_name, address, country_code, latitude, longitude, bbox_json, provider_payload_json "
+            "FROM places WHERE place_id != ? AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?",
+            (place["id"], latitude - latitude_delta, latitude + latitude_delta, longitude - longitude_delta, longitude + longitude_delta),
+        ).fetchall()
+
+    def _merge_place_alias(self, source_place_id: str, canonical_place_id: str) -> None:
+        if source_place_id == canonical_place_id:
+            return
+        self.connection.execute(
+            "INSERT INTO place_aliases(source_place_id, canonical_place_id, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(source_place_id) DO UPDATE SET canonical_place_id=excluded.canonical_place_id",
+            (source_place_id, canonical_place_id, int(time.time())),
+        )
+        self.connection.execute("UPDATE workspace_pins SET place_id = ? WHERE place_id = ?", (canonical_place_id, source_place_id))
+        self.connection.execute("DELETE FROM places WHERE place_id = ?", (source_place_id,))
+
+    def _deduplicate_places(self) -> None:
+        rows = self.connection.execute(
+            "SELECT place_id, provider, provider_id, name, normalized_name, address, country_code, latitude, longitude, bbox_json, provider_payload_json "
+            "FROM places ORDER BY created_at, place_id"
+        ).fetchall()
+        canonicals: list[sqlite3.Row] = []
+        for row in rows:
+            candidate = self._place_from_row(row)
+            match = next((current for current in canonicals if self._same_place(current, candidate)), None)
+            if match:
+                self._merge_place_alias(row["place_id"], match["place_id"])
+            else:
+                canonicals.append(row)
+
+    def _canonicalize_places(self, places: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        resolved: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        with self.lock:
+            for place in places:
+                canonical = self._canonical_place(str(place.get("id") or "")) if isinstance(place, dict) else None
+                value = canonical or place
+                if not isinstance(value, dict) or not isinstance(value.get("id"), str) or value["id"] in seen:
+                    continue
+                seen.add(value["id"])
+                resolved.append(value)
+        return resolved
+
+    def put_places(self, places: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        now = int(time.time())
+        canonical_places: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        with self.lock, self.connection:
+            for place in places:
+                canonical = self._canonical_place(place["id"], include_payload=True)
+                if canonical is None:
+                    match = next((row for row in self._nearby_place_rows(place) if self._same_place(row, place)), None)
+                    if match:
+                        self._merge_place_alias(place["id"], match["place_id"])
+                        canonical = self._canonical_place(match["place_id"], include_payload=True)
+                if canonical is not None:
+                    if canonical["id"] not in seen:
+                        seen.add(canonical["id"])
+                        canonical_places.append(canonical)
+                    continue
+                self.connection.execute(
+                    "INSERT INTO places(place_id, provider, provider_id, name, normalized_name, address, country_code, latitude, longitude, bbox_json, provider_payload_json, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(place_id) DO UPDATE SET name=excluded.name, normalized_name=excluded.normalized_name, address=excluded.address, country_code=excluded.country_code, latitude=excluded.latitude, longitude=excluded.longitude, bbox_json=excluded.bbox_json, provider_payload_json=excluded.provider_payload_json, updated_at=excluded.updated_at",
+                    (
+                        place["id"], place["provider"], place["providerId"], place["name"], normalize_query(place["name"]), place["address"],
+                        place["countryCode"], place["lat"], place["lon"], json.dumps(place["bbox"], separators=(",", ":")),
+                        json.dumps(place.get("providerPayload") or {}, separators=(",", ":")), now, now,
+                    ),
+                )
+                if place["id"] not in seen:
+                    seen.add(place["id"])
+                    canonical_places.append(place)
+        return canonical_places
+
+    def search_places(self, normalized_query: str, limit: int = 8) -> list[dict[str, Any]]:
+        """Return stored places whose normalized name contains the query substring."""
+        pattern = f"%{normalized_query}%"
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT place_id, provider, provider_id, name, address, country_code, latitude, longitude, bbox_json "
+                "FROM places WHERE normalized_name LIKE ? ORDER BY updated_at DESC, place_id LIMIT ?",
+                (pattern, limit),
+            ).fetchall()
+        return [self._place_from_row(row) for row in rows]
+
+    def list_pins(self) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.connection.execute("SELECT pin_id, label, name, place_id, latitude, longitude, source, created_at FROM workspace_pins ORDER BY created_at, pin_id").fetchall()
+        return [{"id": row["pin_id"], "label": row["label"], "name": row["name"], "placeId": row["place_id"], "lat": row["latitude"], "lon": row["longitude"], "source": row["source"], "createdAt": row["created_at"]} for row in rows]
+
+    def add_pin(self, name: str, lat: float, lon: float, place_id: str | None, source: str) -> dict[str, Any]:
+        with self.lock, self.connection:
+            count = self.connection.execute("SELECT COUNT(*) AS count FROM workspace_pins").fetchone()["count"]
+            label = pin_label(count)
+            pin_id = f"pin-{uuid.uuid4().hex}"
+            created_at = int(time.time())
+            self.connection.execute(
+                "INSERT INTO workspace_pins(pin_id, label, name, place_id, latitude, longitude, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (pin_id, label, name[:160], place_id, lat, lon, source, created_at),
+            )
+        return {"id": pin_id, "label": label, "name": name[:160], "placeId": place_id, "lat": lat, "lon": lon, "source": source, "createdAt": created_at}
+
+    def delete_pin(self, pin_id: str) -> bool:
+        with self.lock, self.connection:
+            return self.connection.execute("DELETE FROM workspace_pins WHERE pin_id = ?", (pin_id,)).rowcount > 0
+
+    def list_areas(self) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.connection.execute("SELECT area_id, label, geometry_json, summary_json, created_at FROM workspace_areas ORDER BY created_at, area_id").fetchall()
+        return [{"id": row["area_id"], "label": row["label"], "geometry": json.loads(row["geometry_json"]), "summary": json.loads(row["summary_json"]), "createdAt": row["created_at"]} for row in rows]
+
+    def add_area(self, label: str, geometry: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+        area_id = f"area-{uuid.uuid4().hex}"
+        created_at = int(time.time())
+        with self.lock, self.connection:
+            self.connection.execute(
+                "INSERT INTO workspace_areas(area_id, label, geometry_json, summary_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (area_id, label[:160], json.dumps(geometry, separators=(",", ":")), json.dumps(summary, separators=(",", ":")), created_at),
+            )
+        return {"id": area_id, "label": label[:160], "geometry": geometry, "summary": summary, "createdAt": created_at}
+
+    def delete_area(self, area_id: str) -> bool:
+        with self.lock, self.connection:
+            return self.connection.execute("DELETE FROM workspace_areas WHERE area_id = ?", (area_id,)).rowcount > 0
+
+    def get_route(self, request_key: str) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.connection.execute("SELECT route_id, provider, profile, waypoints_json, geometry_json, summary_json, source_version, created_at FROM routes WHERE request_key = ?", (request_key,)).fetchone()
+        if not row:
+            return None
+        return {"id": row["route_id"], "provider": row["provider"], "profile": row["profile"], "waypoints": json.loads(row["waypoints_json"]), "geometry": json.loads(row["geometry_json"]), "summary": json.loads(row["summary_json"]), "sourceVersion": row["source_version"], "createdAt": row["created_at"], "stored": True}
+
+    def get_route_by_id(self, route_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.connection.execute("SELECT route_id, provider, profile, waypoints_json, geometry_json, summary_json, source_version, created_at FROM routes WHERE route_id = ?", (route_id,)).fetchone()
+        if not row:
+            return None
+        return {"id": row["route_id"], "provider": row["provider"], "profile": row["profile"], "waypoints": json.loads(row["waypoints_json"]), "geometry": json.loads(row["geometry_json"]), "summary": json.loads(row["summary_json"]), "sourceVersion": row["source_version"], "createdAt": row["created_at"], "stored": True}
+
+    def put_route(self, request_key: str, profile: str, waypoints: list[list[float]], geometry: dict[str, Any], summary: dict[str, Any], provider: str = "public-osrm", source_version: str = "unknown-public") -> dict[str, Any]:
+        route_id = f"route-{uuid.uuid4().hex}"
+        created_at = int(time.time())
+        with self.lock, self.connection:
+            self.connection.execute(
+                "INSERT INTO routes(route_id, request_key, provider, profile, waypoints_json, geometry_json, summary_json, source_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (route_id, request_key, provider, profile, json.dumps(waypoints, separators=(",", ":")), json.dumps(geometry, separators=(",", ":")), json.dumps(summary, separators=(",", ":")), source_version, created_at),
+            )
+        return {"id": route_id, "provider": provider, "profile": profile, "waypoints": waypoints, "geometry": geometry, "summary": summary, "sourceVersion": source_version, "createdAt": created_at, "stored": False}
+
+    def put_osm_route_failure(self, request_key: str, profile: str, waypoints: list[list[float]], reason: str) -> None:
+        with self.lock, self.connection:
+            self.connection.execute(
+                "INSERT INTO osm_route_failures(request_key, profile, waypoints_json, reason, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(request_key) DO UPDATE SET reason=excluded.reason, created_at=excluded.created_at",
+                (request_key, profile, json.dumps(waypoints, separators=(",", ":")), reason[:160], int(time.time())),
+            )
+
+    def get_workspace_state(self) -> dict[str, Any]:
+        with self.lock:
+            row = self.connection.execute("SELECT value_json FROM workspace_state WHERE state_key = 'active'").fetchone()
+        return json.loads(row["value_json"]) if row else {}
+
+    def put_workspace_state(self, value: dict[str, Any]) -> None:
+        with self.lock, self.connection:
+            self.connection.execute(
+                "INSERT INTO workspace_state(state_key, value_json, updated_at) VALUES ('active', ?, ?) "
+                "ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+                (json.dumps(value, separators=(",", ":")), int(time.time())),
+            )
+
+    def clear_workspace(self) -> None:
+        with self.lock, self.connection:
+            self.connection.execute("DELETE FROM workspace_pins")
+            self.connection.execute("DELETE FROM workspace_areas")
+            self.connection.execute("DELETE FROM workspace_state")
+
     def close(self) -> None:
         with self.lock:
             self.connection.close()
@@ -227,11 +621,102 @@ CACHE = Cache(CONFIG.database_path)
 
 
 def normalize_query(value: str) -> str:
-    return " ".join(value.strip().lower().split())
+    return " ".join(unicodedata.normalize("NFKC", value).strip().casefold().split())
+
+
+def pin_label(index: int) -> str:
+    """Return compact stable workspace labels: A..Z, AA..AZ, and so on."""
+    value = index + 1
+    label = ""
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        label = chr(65 + remainder) + label
+    return label
+
+
+def valid_coordinate(lon: Any, lat: Any) -> tuple[float, float] | None:
+    try:
+        longitude = float(lon)
+        latitude = float(lat)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(longitude) or not math.isfinite(latitude) or not -180 <= longitude <= 180 or not -90 <= latitude <= 90:
+        return None
+    return longitude, latitude
+
+
+def request_hash(value: dict[str, Any]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def serp_request_key(params: dict[str, Any]) -> str:
+    """Return a stable local key without ever including the SerpApi credential."""
+    safe_params = {key: value for key, value in params.items() if key.lower() != "api_key"}
+    if "q" in safe_params:
+        safe_params["q"] = normalize_query(str(safe_params["q"]))
+    return request_hash({"provider": "serpapi", "params": safe_params})
+
+
+def redact_provider_payload(value: Any) -> Any:
+    """Preserve useful provider data without retaining credentials in local storage."""
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlsplit(value)
+        params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        safe_query = urllib.parse.urlencode([
+            (name, "[redacted]" if name.lower() in {"api_key", "authorization", "token", "access_token"} else content)
+            for name, content in params
+        ])
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, safe_query, parsed.fragment))
+    if isinstance(value, list):
+        return [redact_provider_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key.lower() in {"api_key", "authorization", "token", "access_token"}:
+            result[key] = "[redacted]"
+            continue
+        result[key] = redact_provider_payload(item)
+    return result
+
+
+def fetch_serp_response(params: dict[str, Any]) -> Any:
+    """Read a complete cached SerpApi response before issuing a billable request."""
+    request = {key: value for key, value in params.items() if key.lower() != "api_key"}
+    key = serp_request_key(request)
+
+    def task() -> Any:
+        stored = CACHE.get_provider_response("serpapi", key)
+        if stored is not None:
+            return stored
+        if not CONFIG.serp_api_key:
+            raise ServiceError("SerpApi is not configured and this request is not stored locally.", 503)
+        payload = fetch_json(
+            "https://serpapi.com/search.json?" + urllib.parse.urlencode({**request, "api_key": CONFIG.serp_api_key}),
+            {"Accept": "application/json"}, 20,
+        )
+        CACHE.put_provider_response("serpapi", key, request, payload)
+        return payload
+
+    return SERP_QUEUE.run(task)
 
 
 def country_param(value: str) -> str:
     return value.lower() if re.fullmatch(r"[A-Za-z]{2}", value or "") else ""
+
+
+def retry_after_seconds(value: str | None, fallback: int = 60) -> int:
+    try:
+        return max(1, int(value or ""))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value or "")
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(1, math.ceil((retry_at - datetime.now(timezone.utc)).total_seconds()))
+        except (TypeError, ValueError):
+            return fallback
 
 
 def fetch_json(url: str, headers: dict[str, str], timeout: float, method: str = "GET", body: bytes | None = None) -> Any:
@@ -240,6 +725,12 @@ def fetch_json(url: str, headers: dict[str, str], timeout: float, method: str = 
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
+        if error.code == 429:
+            raise ServiceError(
+                f"{urllib.parse.urlparse(url).netloc} is rate limiting requests.",
+                503,
+                retry_after_seconds(error.headers.get("Retry-After")),
+            ) from error
         raise ServiceError(f"{urllib.parse.urlparse(url).netloc} returned {error.code}") from error
     except (urllib.error.URLError, TimeoutError) as error:
         reason = getattr(error, "reason", str(error))
@@ -313,6 +804,139 @@ def suggest_locations(query: str, country_code: str) -> list[dict[str, Any]]:
     return results
 
 
+def place_from_nominatim(item: dict[str, Any]) -> dict[str, Any] | None:
+    location = location_result(item)
+    if not location:
+        return None
+    osm_type = str(item.get("osm_type") or "place")
+    osm_id = str(item.get("osm_id") or f"{location['lat']:.6f},{location['lon']:.6f}")
+    address = item.get("address") or {}
+    name = str(item.get("name") or location["shortName"] or location["name"]).strip()
+    if not name:
+        return None
+    return {
+        "id": f"openstreetmap:{osm_type}:{osm_id}",
+        "provider": "openstreetmap",
+        "providerId": f"{osm_type}:{osm_id}",
+        "name": name[:160],
+        "address": str(item.get("display_name") or "")[:500],
+        "countryCode": str(address.get("country_code") or "").upper(),
+        "lat": location["lat"],
+        "lon": location["lon"],
+        "bbox": location["bbox"],
+        "providerPayload": redact_provider_payload(item),
+    }
+
+
+def search_nominatim_places(query: str, country_code: str, lat: float | None, lon: float | None) -> list[dict[str, Any]]:
+    def task() -> list[dict[str, Any]]:
+        params = {"q": query, "format": "jsonv2", "addressdetails": "1", "limit": "8"}
+        country = country_param(country_code)
+        if country and "," not in query:
+            params["countrycodes"] = country
+        if lat is not None and lon is not None:
+            # A viewbox biases relevance without excluding a query that names another city.
+            params["viewbox"] = f"{lon - 0.25:.4f},{lat + 0.25:.4f},{lon + 0.25:.4f},{lat - 0.25:.4f}"
+        url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode(params)
+        payload = fetch_json(url, {"User-Agent": CONFIG.user_agent, "Referer": "http://localhost/", "Accept": "application/json"}, 12)
+        return [place for item in payload if isinstance(item, dict) for place in [place_from_nominatim(item)] if place]
+
+    return NOMINATIM_QUEUE.run(task)
+
+
+def place_from_serp(item: dict[str, Any]) -> dict[str, Any] | None:
+    coordinates = item.get("gps_coordinates") or {}
+    point = valid_coordinate(coordinates.get("longitude"), coordinates.get("latitude"))
+    if not point:
+        return None
+    lon, lat = point
+    place_id = str(item.get("place_id") or item.get("data_cid") or item.get("data_id") or "").strip()
+    if not place_id:
+        place_id = f"{lat:.6f},{lon:.6f}:{normalize_query(str(item.get('title') or 'place'))}"
+    name = str(item.get("title") or "").strip()
+    if not name:
+        return None
+    return {
+        "id": f"serpapi-google-maps:{place_id}",
+        "provider": "serpapi-google-maps",
+        "providerId": place_id,
+        "name": name[:160],
+        "address": str(item.get("address") or "")[:500],
+        "countryCode": str(item.get("country_code") or "").upper(),
+        "lat": lat,
+        "lon": lon,
+        "bbox": [lon, lat, lon, lat],
+        "providerPayload": redact_provider_payload(item),
+    }
+
+
+def search_serp_places(query: str, lat: float | None, lon: float | None, country_code: str) -> list[dict[str, Any]]:
+    normalized = normalize_query(query)
+
+    def task() -> list[dict[str, Any]]:
+        cached_places = CACHE.search_places(normalized)
+        if cached_places:
+            return cached_places
+        params = {"engine": "google_maps", "type": "search", "q": query, "hl": "en"}
+        if lat is not None and lon is not None:
+            params["ll"] = f"@{lat:.6f},{lon:.6f},14z"
+        if country_param(country_code):
+            params["gl"] = country_param(country_code)
+        payload = fetch_serp_response(params)
+        if not isinstance(payload, dict):
+            raise ServiceError("The map provider returned an invalid response.", 503)
+        metadata = payload.get("search_metadata") or {}
+        if not isinstance(metadata, dict) or metadata.get("status") not in {None, "Success"}:
+            raise ServiceError(str(payload.get("error") or "The map provider could not resolve this place."), 503)
+        candidates: list[dict[str, Any]] = []
+        primary = payload.get("place_results")
+        if isinstance(primary, dict):
+            candidates.append(primary)
+        candidates.extend(item for item in payload.get("local_results") or [] if isinstance(item, dict))
+        places: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            place = place_from_serp(candidate)
+            if place and place["id"] not in seen:
+                seen.add(place["id"])
+                places.append(place)
+        places = places[:8]
+        return CACHE.put_places(places)
+
+    return SERP_PLACE_QUEUE.run(task)
+
+
+def public_place(place: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in place.items() if key != "providerPayload"}
+
+
+def lookup_places(query: str, country_code: str, lat: float | None, lon: float | None) -> tuple[list[dict[str, Any]], bool]:
+    normalized = normalize_query(query)
+    if len(normalized) < 2:
+        return [], True
+    context = {
+        "query": normalized,
+        "countryCode": country_param(country_code),
+        "lat": round(lat, 2) if lat is not None else None,
+        "lon": round(lon, 2) if lon is not None else None,
+    }
+    lookup_key = request_hash(context)
+    stored = CACHE.get_place_lookup(lookup_key)
+    if stored is not None:
+        return stored, True
+    cached_places = CACHE.search_places(normalized)
+    if cached_places:
+        CACHE.put_place_lookup(lookup_key, context, cached_places)
+        return cached_places, True
+    places = search_nominatim_places(query, country_code, lat, lon)
+    if not places:
+        places = search_serp_places(query, lat, lon, country_code)
+    places = CACHE.put_places(places)
+    results = [public_place(place) for place in places]
+    CACHE.put_place_lookup(lookup_key, context, results)
+    return results, False
+
+
 def detect_country(lat: float | None, lon: float | None) -> dict[str, str]:
     if lat is not None and lon is not None and math.isfinite(lat) and math.isfinite(lon):
         key = f"country:{lat:.2f},{lon:.2f}"
@@ -333,6 +957,137 @@ def detect_country(lat: float | None, lon: float | None) -> dict[str, str]:
     return {"country": "", "countryCode": payload.get("country") or "", "method": "ip"}
 
 
+def route_waypoints(value: Any) -> list[list[float]]:
+    if not isinstance(value, list) or not 2 <= len(value) <= 12:
+        raise ServiceError("A route needs between two and twelve waypoints.", 400)
+    points: list[list[float]] = []
+    for item in value:
+        if isinstance(item, dict):
+            point = valid_coordinate(item.get("lon"), item.get("lat"))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            point = valid_coordinate(item[0], item[1])
+        else:
+            point = None
+        if not point:
+            raise ServiceError("Every route waypoint needs a valid longitude and latitude.", 400)
+        points.append([point[0], point[1]])
+    if len({(round(lon, 7), round(lat, 7)) for lon, lat in points}) < 2:
+        raise ServiceError("Route origin and destination must be different.", 400)
+    return points
+
+
+def valid_linestring(geometry: Any) -> dict[str, Any] | None:
+    if not isinstance(geometry, dict) or geometry.get("type") != "LineString" or not isinstance(geometry.get("coordinates"), list):
+        return None
+    coordinates = []
+    for position in geometry["coordinates"]:
+        if not isinstance(position, (list, tuple)) or len(position) < 2:
+            return None
+        point = valid_coordinate(position[0], position[1])
+        if not point:
+            return None
+        coordinates.append([point[0], point[1]])
+    return {"type": "LineString", "coordinates": coordinates} if len(coordinates) >= 2 else None
+
+
+def valid_polygon(geometry: Any) -> dict[str, Any] | None:
+    if not isinstance(geometry, dict) or geometry.get("type") != "Polygon" or not isinstance(geometry.get("coordinates"), list):
+        return None
+    rings: list[list[list[float]]] = []
+    for ring in geometry["coordinates"]:
+        if not isinstance(ring, list) or len(ring) < 4:
+            return None
+        points = []
+        for position in ring:
+            if not isinstance(position, (list, tuple)) or len(position) < 2:
+                return None
+            point = valid_coordinate(position[0], position[1])
+            if not point:
+                return None
+            points.append([point[0], point[1]])
+        if points[0] != points[-1]:
+            return None
+        rings.append(points)
+    return {"type": "Polygon", "coordinates": rings} if rings else None
+
+
+def osrm_route(profile: str, waypoints: list[list[float]]) -> dict[str, Any] | None:
+    if profile != CONFIG.osm_router_profile or profile != "driving":
+        raise ServiceError("Only the configured driving profile is available from the public OSM router.", 400)
+    coordinate_path = ";".join(f"{lon:.6f},{lat:.6f}" for lon, lat in waypoints)
+    params = urllib.parse.urlencode({"overview": "full", "geometries": "geojson", "steps": "true", "alternatives": "false"})
+    payload = fetch_json(
+        f"{CONFIG.osm_router_base_url}/route/v1/{urllib.parse.quote(profile, safe='')}/{coordinate_path}?{params}",
+        {"Accept": "application/json", "User-Agent": CONFIG.user_agent}, CONFIG.osm_router_timeout_seconds,
+    )
+    if payload.get("code") == "NoRoute":
+        return None
+    if payload.get("code") != "Ok":
+        raise ServiceError(str(payload.get("message") or "The OSM router could not calculate this route."), 503)
+    route = (payload.get("routes") or [None])[0]
+    if not isinstance(route, dict):
+        raise ServiceError("The OSM router returned no route.", 503)
+    geometry = valid_linestring(route.get("geometry"))
+    if not geometry:
+        raise ServiceError("The OSM router returned invalid route geometry.", 503)
+    try:
+        distance = float(route["distance"])
+        duration = float(route["duration"])
+    except (KeyError, TypeError, ValueError):
+        raise ServiceError("The OSM router returned an invalid route summary.", 503) from None
+    if not math.isfinite(distance) or not math.isfinite(duration) or distance < 0 or duration < 0:
+        raise ServiceError("The OSM router returned an invalid route summary.", 503)
+    return {"geometry": geometry, "summary": {"distanceMeters": distance, "durationSeconds": duration, "approximateGeometry": False}}
+
+
+def serp_directions_fallback(waypoints: list[list[float]]) -> dict[str, Any]:
+    """Return distance only; SerpApi does not document a reusable route polyline."""
+    start_lon, start_lat = waypoints[0]
+    end_lon, end_lat = waypoints[-1]
+    params = {
+        "engine": "google_maps_directions", "start_coords": f"{start_lat:.6f},{start_lon:.6f}",
+        "end_coords": f"{end_lat:.6f},{end_lon:.6f}", "travel_mode": "0", "hl": "en",
+    }
+    payload = fetch_serp_response(params)
+    if not isinstance(payload, dict):
+        raise ServiceError("The fallback provider returned an invalid response.", 503)
+    route = (payload.get("directions") or [None])[0]
+    if not isinstance(route, dict):
+        raise ServiceError("No route is available from either configured provider.", 404)
+    try:
+        distance = float(route["distance"])
+        duration = float(route["duration"])
+    except (KeyError, TypeError, ValueError):
+        raise ServiceError("The fallback provider returned an invalid route summary.", 503) from None
+    # Straight-line connector — SerpApi does not return a reusable road polyline.
+    return {
+        "id": f"temporary-serp-{uuid.uuid4().hex}", "provider": "serpapi-google-maps", "profile": "driving",
+        "waypoints": waypoints, "geometry": {"type": "LineString", "coordinates": [waypoints[0], waypoints[-1]]},
+        "summary": {"distanceMeters": distance, "durationSeconds": duration, "approximateGeometry": True},
+        "sourceVersion": "external-temporary", "createdAt": int(time.time()),
+    }
+
+
+def get_route(waypoints: list[list[float]], profile: str) -> dict[str, Any]:
+    request = {"provider": "public-osrm", "profile": profile, "waypoints": [[round(lon, 6), round(lat, 6)] for lon, lat in waypoints]}
+    key = request_hash(request)
+    stored = CACHE.get_route(key)
+    if stored:
+        return stored
+    result = osrm_route(profile, waypoints)
+    if result is not None:
+        return CACHE.put_route(key, profile, waypoints, result["geometry"], result["summary"])
+    CACHE.put_osm_route_failure(key, profile, waypoints, "no_route")
+    if CONFIG.enable_serp_directions_fallback:
+        serp = serp_directions_fallback(waypoints)
+        return CACHE.put_route(key, profile, waypoints, serp["geometry"], serp["summary"], provider="serpapi-google-maps", source_version="external-temporary")
+    raise ServiceError("No OSM driving route was found for these points.", 404)
+
+
+def workspace_snapshot() -> dict[str, Any]:
+    return {"pins": CACHE.list_pins(), "areas": CACHE.list_areas(), "state": CACHE.get_workspace_state()}
+
+
 def meters(value: Any) -> float:
     if not isinstance(value, (str, int, float)):
         return 0.0
@@ -348,6 +1103,22 @@ def meters(value: Any) -> float:
     if re.search(r"\b(m|meter|metre)s?\b|^[-+]?\d+(?:\.\d+)?$", text):
         return amount
     return 0.0
+
+
+def estimated_level_range(value: Any) -> tuple[float, float] | None:
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            low, high = float(value[0]), float(value[1])
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(value, str):
+        match = re.fullmatch(r"\s*HBET\s*:\s*(\d{1,3})\s*-\s*(\d{1,3})\s*", value, re.IGNORECASE)
+        if not match:
+            return None
+        low, high = float(match.group(1)), float(match.group(2))
+    else:
+        return None
+    return (low, high) if 0 < low <= high <= 200 else None
 
 
 def close_ring(points: list[Any]) -> list[list[float]] | None:
@@ -439,6 +1210,7 @@ def raw_feature(element: dict[str, Any]) -> dict[str, Any] | None:
             "realHeight": meters(tags.get("height")),
             "levels": levels,
             "minHeight": meters(tags.get("min_height")),
+            "name": str(tags.get("name") or "")[:160],
         },
     }
 
@@ -500,11 +1272,13 @@ def normalize_raw_features(features: list[dict[str, Any]]) -> list[dict[str, Any
                 continue
         elif geometry.get("type") not in {"Polygon", "MultiPolygon", "LineString", "MultiLineString"}:
             continue
+        level_range = estimated_level_range(props.get("estimatedLevelRange"))
         normalized = {
             "sourceId": str(props.get("sourceId") or ""), "kind": str(props.get("kind") or ""),
             "buildingType": str(props.get("buildingType") or ""), "roadClass": str(props.get("roadClass") or ""),
             "dataSource": str(props.get("dataSource") or props.get("source") or ""), "realHeight": number(props.get("realHeight")),
             "levels": number(props.get("levels")), "minHeight": number(props.get("minHeight")), "poiCategory": str(props.get("poiCategory") or ""), "name": str(props.get("name") or "")[:160],
+            "estimatedLevelRange": list(level_range) if level_range else [], "community": str(props.get("community") or "")[:160],
         }
         key = f"{normalized['dataSource']}:{normalized['sourceId']}:{normalized['kind']}"
         if normalized["sourceId"] and key in seen:
@@ -525,7 +1299,27 @@ def number(value: Any) -> float:
 def fetch_overpass_features(bbox: list[float]) -> list[dict[str, Any]]:
     west, south, east, north = bbox
 
+    def remaining_cooldown() -> int:
+        with OVERPASS_UNAVAILABLE_LOCK:
+            return max(0, math.ceil(OVERPASS_UNAVAILABLE_UNTIL - time.monotonic()))
+
+    def pause(seconds: int) -> int:
+        global OVERPASS_UNAVAILABLE_UNTIL
+        with OVERPASS_UNAVAILABLE_LOCK:
+            OVERPASS_UNAVAILABLE_UNTIL = max(OVERPASS_UNAVAILABLE_UNTIL, time.monotonic() + seconds)
+            return max(1, math.ceil(OVERPASS_UNAVAILABLE_UNTIL - time.monotonic()))
+
+    def rate_limit_error(seconds: int) -> ServiceError:
+        return ServiceError("OpenStreetMap data is temporarily rate limited.", 503, seconds)
+
+    cooldown = remaining_cooldown()
+    if cooldown:
+        raise rate_limit_error(cooldown)
+
     def task() -> list[dict[str, Any]]:
+        cooldown = remaining_cooldown()
+        if cooldown:
+            raise rate_limit_error(cooldown)
         query = f"""[out:json][timeout:25][maxsize:67108864];
 (
   nwr[\"building\"]({south},{west},{north},{east});
@@ -539,26 +1333,13 @@ out geom;
 );
 out center;"""
         body = urllib.parse.urlencode({"data": query}).encode("utf-8")
-        payload = fetch_json(CONFIG.overpass_endpoint, {"User-Agent": CONFIG.user_agent, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "Accept": "application/json"}, 40, "POST", body)
+        try:
+            payload = fetch_json(CONFIG.overpass_endpoint, {"User-Agent": CONFIG.user_agent, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "Accept": "application/json"}, 40, "POST", body)
+        except ServiceError as error:
+            if not error.retry_after:
+                raise
+            raise rate_limit_error(pause(max(error.retry_after, CONFIG.overpass_backoff_seconds))) from error
         return [feature for element in payload.get("elements", []) for feature in (raw_feature(element), poi_feature(element)) if feature]
-
-    return OVERPASS_QUEUE.run(task)
-
-
-def fetch_overpass_places(bbox: list[float]) -> list[dict[str, Any]]:
-    west, south, east, north = bbox
-
-    def task() -> list[dict[str, Any]]:
-        query = f"""[out:json][timeout:25][maxsize:67108864];
-(
-  nwr[\"amenity\"~\"^(hospital|clinic|doctors|pharmacy|fuel|school|college|university|kindergarten|library|police|fire_station|bus_station)$\"]({south},{west},{north},{east});
-  nwr[\"tourism\"~\"^(hotel|motel|hostel|guest_house|museum|attraction)$\"]({south},{west},{north},{east});
-  nwr[\"shop\"~\"^(supermarket|convenience)$\"]({south},{west},{north},{east});
-);
-out center;"""
-        body = urllib.parse.urlencode({"data": query}).encode("utf-8")
-        payload = fetch_json(CONFIG.overpass_endpoint, {"User-Agent": CONFIG.user_agent, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "Accept": "application/json"}, 40, "POST", body)
-        return [feature for element in payload.get("elements", []) for feature in [poi_feature(element)] if feature]
 
     return OVERPASS_QUEUE.run(task)
 
@@ -657,6 +1438,9 @@ def openbuildingmap_feature(row: dict[str, Any], filename: str) -> dict[str, Any
     if not geometry:
         return None
     identifier = row_value(row, "fid", "id", "building_id", "osm_id")
+    height_value = row_value(row, "height", "height_m", "height_metres", "building:height")
+    level_range = estimated_level_range(height_value)
+    community = row_value(row, "society", "project", "project_name", "complex", "complex_name", "community", "community_name", "development")
     return {
         "type": "Feature",
         "geometry": geometry,
@@ -666,11 +1450,45 @@ def openbuildingmap_feature(row: dict[str, Any], filename: str) -> dict[str, Any
             "buildingType": str(row_value(row, "building", "building_type", "type", "class", "subtype") or "unknown"),
             "roadClass": "",
             "dataSource": "openbuildingmap",
-            "realHeight": meters(row_value(row, "height", "height_m", "height_metres", "building:height")),
+            "realHeight": meters(height_value),
             "levels": number(row_value(row, "building:levels", "building_levels", "levels", "num_floors")),
             "minHeight": meters(row_value(row, "min_height", "minheight", "building:min_height")),
+            "name": str(row_value(row, "name", "building_name", "label") or "")[:160],
+            "estimatedLevelRange": list(level_range) if level_range else [],
+            "community": str(community or "")[:160],
         },
     }
+
+
+def log_openbuildingmap_result(operation: str, url: str, result: Any) -> None:
+    timestamp = datetime.now(timezone.utc)
+    filename = f"{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}-{operation}-{time.time_ns()}.json"
+    path = OPENBUILDINGMAP_LOG_DIR / filename
+    record = {
+        "fetchedAt": timestamp.isoformat(),
+        "operation": operation,
+        "url": url,
+        "result": result,
+    }
+    try:
+        OPENBUILDINGMAP_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[openbuildingmap] Saved {operation} result to {path}")
+    except (OSError, TypeError) as error:
+        print(f"[openbuildingmap] Could not save {operation} result: {error}")
+
+
+def fetch_openbuildingmap_json(operation: str, url: str, timeout: float) -> Any:
+    try:
+        payload = fetch_json(url, {"Accept": "application/json"}, timeout)
+    except ServiceError as error:
+        log_openbuildingmap_result(operation, url, {"error": str(error), "status": error.status, "retryAfter": error.retry_after})
+        raise
+    except Exception as error:
+        log_openbuildingmap_result(operation, url, {"error": str(error), "type": type(error).__name__})
+        raise
+    log_openbuildingmap_result(operation, url, payload)
+    return payload
 
 
 def openbuildingmap_files() -> list[dict[str, str]]:
@@ -681,7 +1499,7 @@ def openbuildingmap_files() -> list[dict[str, str]]:
             return OPENBUILDINGMAP_CATALOG["files"]
 
         def task() -> list[dict[str, str]]:
-            payload = fetch_json(f"{CONFIG.openbuildingmap_api_url}/files", {"Accept": "application/json"}, 10)
+            payload = fetch_openbuildingmap_json("files", f"{CONFIG.openbuildingmap_api_url}/files", 100)
             files = []
             for item in payload.get("files", []):
                 filename = str(item.get("filename") or "")
@@ -710,7 +1528,8 @@ def fetch_openbuildingmap_buildings(x: int, y: int, z: int) -> list[dict[str, An
         while len(features) < CONFIG.max_buildings_per_tile:
             params = urllib.parse.urlencode({"quadkey": target, "limit": min(limit, CONFIG.max_buildings_per_tile - len(features)), "offset": offset})
             filename = urllib.parse.quote(item["filename"], safe="")
-            payload = OPENBUILDINGMAP_QUEUE.run(lambda: fetch_json(f"{CONFIG.openbuildingmap_api_url}/query/{filename}?{params}", {"Accept": "application/json"}, 20))
+            url = f"{CONFIG.openbuildingmap_api_url}/query/{filename}?{params}"
+            payload = OPENBUILDINGMAP_QUEUE.run(lambda: fetch_openbuildingmap_json("query", url, 20))
             rows = payload.get("rows", [])
             if not isinstance(rows, list):
                 break
@@ -798,10 +1617,8 @@ def tile_stats(features: list[dict[str, Any]]) -> dict[str, int]:
 def get_source_tile(x: int, y: int, z: int, source: str) -> dict[str, Any]:
     key = quadkey(x, y, z)
     if source == "openbuildingmap":
-        tile_id = f"obm-v1:{key}"
+        tile_id = f"obm-v2:{key}"
     elif source == "openstreetmap":
-        tile_id = f"pois-v1:{key}"
-    elif source == "openstreetmap-places":
         tile_id = f"pois-v1:{key}"
     else:
         tile_id = f"{CONFIG.overture_release}:{key}"
@@ -814,8 +1631,6 @@ def get_source_tile(x: int, y: int, z: int, source: str) -> dict[str, Any]:
             raw = fetch_openbuildingmap_buildings(x, y, z)
         elif source == "openstreetmap":
             raw = fetch_overpass_features(bbox)
-        elif source == "openstreetmap-places":
-            raw = fetch_overpass_places(bbox)
         else:
             raw = fetch_overture_buildings(bbox)
         features = normalize_raw_features(raw)
@@ -834,12 +1649,13 @@ def source_tile_with_fallback(x: int, y: int, z: int) -> dict[str, Any]:
             primary = get_source_tile(x, y, z, "openbuildingmap")
             if primary["features"]:
                 try:
-                    places = get_source_tile(x, y, z, "openstreetmap-places")
-                    primary["features"].extend(places["features"])
-                    primary["cached"] = primary["cached"] and places["cached"]
-                    primary["stale"] = primary["stale"] or places["stale"]
-                except Exception as places_error:
-                    print(f"[tiles] Place marker fallback failed for {quadkey(x, y, z)}: {places_error}")
+                    reference = get_source_tile(x, y, z, "openstreetmap")
+                    primary["features"].extend(feature for feature in reference["features"] if feature.get("properties", {}).get("kind") == "poi")
+                    primary["calibrationFeatures"] = [feature for feature in reference["features"] if feature.get("properties", {}).get("kind") == "building"]
+                    primary["cached"] = primary["cached"] and reference["cached"]
+                    primary["stale"] = primary["stale"] or reference["stale"]
+                except Exception as reference_error:
+                    print(f"[tiles] OSM height reference failed for {quadkey(x, y, z)}: {reference_error}")
                 return primary
         except Exception as mirror_error:
             print(f"[tiles] OpenBuildingMap mirror failed for {quadkey(x, y, z)}: {mirror_error}")
@@ -853,7 +1669,7 @@ def source_tile_with_fallback(x: int, y: int, z: int) -> dict[str, Any]:
                     return fallback
             except Exception as overture_error:
                 print(f"[tiles] Overture fallback failed for {quadkey(x, y, z)}: {overture_error}")
-        raise ServiceError("Authoritative building enrichment is temporarily unavailable.", 503) from osm_error
+        raise ServiceError("Authoritative building enrichment is temporarily unavailable.", 503, getattr(osm_error, "retry_after", None)) from osm_error
 
 
 def geometry_metrics(geometry: dict[str, Any]) -> dict[str, Any]:
@@ -978,15 +1794,76 @@ def predict(model: dict[str, Any], vector: list[float], building_type: str, prio
     return min(350, max(3, local_estimate * local_weight + prior * (1 - local_weight)))
 
 
-def apply_heights(features: list[dict[str, Any]], city_center: list[float]) -> tuple[list[dict[str, Any]], int]:
+def matching_reference(entry: dict[str, Any], references: list[dict[str, Any]]) -> tuple[float, str] | None:
+    area = entry["metrics"]["area"]
+    maximum_distance = min(30.0, max(8.0, math.sqrt(area) * 0.4))
+    best: tuple[float, tuple[float, str]] | None = None
+    for reference in references:
+        reference_area = reference["metrics"]["area"]
+        area_ratio = min(area, reference_area) / max(area, reference_area)
+        if area_ratio < 0.45:
+            continue
+        distance = distance_meters(entry["metrics"]["center"], reference["metrics"]["center"])
+        if distance > maximum_distance:
+            continue
+        score = distance / maximum_distance + (1 - area_ratio)
+        if best is None or score < best[0]:
+            best = (score, reference["label"])
+    return best[1] if best and best[0] <= 0.75 else None
+
+
+def hbet_estimate(entry: dict[str, Any], known_grid: Grid) -> tuple[float, str] | None:
+    properties = entry["feature"]["properties"]
+    level_range = estimated_level_range(properties.get("estimatedLevelRange"))
+    if not level_range:
+        return None
+    low_levels, high_levels = level_range
+    low_height, high_height = low_levels * 2.4, high_levels * 4.0
+    source = str(properties.get("dataSource") or "")
+    building_type = str(properties.get("buildingType") or "unknown").lower()
+    community = normalize_query(str(properties.get("community") or ""))
+    area = entry["metrics"]["area"]
+    neighboring_heights = []
+    for candidate in known_grid.near(entry["metrics"]["center"]):
+        candidate_properties = candidate["feature"]["properties"]
+        if candidate is entry or str(candidate_properties.get("dataSource") or "") != source:
+            continue
+        candidate_community = normalize_query(str(candidate_properties.get("community") or ""))
+        distance = distance_meters(entry["metrics"]["center"], candidate["metrics"]["center"])
+        if community:
+            if candidate_community != community:
+                continue
+        elif candidate_community or distance > 80:
+            continue
+        candidate_type = str(candidate_properties.get("buildingType") or "unknown").lower()
+        if building_type != "unknown" and candidate_type != "unknown" and candidate_type != building_type:
+            continue
+        area_ratio = min(area, candidate["metrics"]["area"]) / max(area, candidate["metrics"]["area"])
+        if area_ratio < 0.55:
+            continue
+        height = candidate["label"][0]
+        if low_height <= height <= high_height:
+            neighboring_heights.append(height)
+    if neighboring_heights:
+        return min(high_height, max(low_height, median(neighboring_heights))), "hbet-range-neighbor"
+    return (low_levels + high_levels) / 2 * 3.1, "hbet-range-midpoint"
+
+
+def apply_heights(features: list[dict[str, Any]], city_center: list[float], calibration_features: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], int]:
     output = copy.deepcopy(features)
     buildings = [feature for feature in output if feature.get("properties", {}).get("kind") == "building" and feature.get("geometry", {}).get("type") in {"Polygon", "MultiPolygon"}]
     if not buildings:
         return output, 0
     entries = [{"feature": feature, "metrics": geometry_metrics(feature["geometry"]), "label": known_height(feature["properties"])} for feature in buildings]
-    known = sorted((entry for entry in entries if entry["label"]), key=lambda entry: str(entry["feature"]["properties"].get("sourceId", "")))
+    calibration_entries = [
+        {"feature": feature, "metrics": geometry_metrics(feature["geometry"]), "label": known_height(feature["properties"])}
+        for feature in calibration_features or []
+        if feature.get("properties", {}).get("kind") == "building" and feature.get("geometry", {}).get("type") in {"Polygon", "MultiPolygon"}
+    ]
+    reference_entries = [entry for entry in calibration_entries if entry["label"]]
+    known = sorted((entry for entry in [*entries, *reference_entries] if entry["label"]), key=lambda entry: str(entry["feature"]["properties"].get("sourceId", "")))
     known_grid = Grid(known, city_center[1])
-    all_grid = Grid(entries, city_center[1])
+    all_grid = Grid([*entries, *calibration_entries], city_center[1])
     model = None
     if len(known) >= 3:
         examples = [{"vector": raw_vector(entry, known_grid, all_grid, city_center, True), "buildingType": str(entry["feature"]["properties"].get("buildingType") or "unknown").lower(), "height": entry["label"][0]} for entry in known]
@@ -995,6 +1872,14 @@ def apply_heights(features: list[dict[str, Any]], city_center: list[float]) -> t
         properties = entry["feature"]["properties"]
         if entry["label"]:
             properties.update({"height": round(entry["label"][0], 1), "heightSource": entry["label"][1], "inferred": False})
+            continue
+        reference = matching_reference(entry, reference_entries)
+        if reference:
+            properties.update({"height": round(reference[0], 1), "heightSource": f"osm-reference-{reference[1]}", "inferred": False})
+            continue
+        hbet = hbet_estimate(entry, known_grid)
+        if hbet:
+            properties.update({"height": round(max(hbet[0], number(properties.get("minHeight")) + 0.5), 1), "heightSource": hbet[1], "inferred": True})
             continue
         vector = raw_vector(entry, known_grid, all_grid, city_center)
         local_median = vector[2]
@@ -1024,8 +1909,8 @@ def render_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
         output = {
             "sourceId": str(props.get("sourceId") or ""), "kind": str(props.get("kind") or ""), "buildingType": str(props.get("buildingType") or ""),
             "roadClass": str(props.get("roadClass") or ""), "source": str(props.get("dataSource") or props.get("source") or ""),
-            "height": number(props.get("height")), "minHeight": number(props.get("minHeight")), "heightSource": str(props.get("heightSource") or ""), "inferred": 1 if props.get("inferred") else 0,
-            "poiCategory": str(props.get("poiCategory") or ""), "name": str(props.get("name") or "")[:160],
+            "height": number(props.get("height")), "minHeight": number(props.get("minHeight")), "levels": number(props.get("levels")), "heightSource": str(props.get("heightSource") or ""), "inferred": 1 if props.get("inferred") else 0,
+            "poiCategory": str(props.get("poiCategory") or ""), "name": str(props.get("name") or "")[:160], "community": str(props.get("community") or "")[:160], "estimatedLevelRange": list(estimated_level_range(props.get("estimatedLevelRange")) or ()),
         }
         key = f"{output['source']}:{output['sourceId']}:{output['kind']}"
         if output["sourceId"] and key in seen:
@@ -1037,7 +1922,7 @@ def render_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def get_tile(x: int, y: int, z: int, city_center: list[float]) -> dict[str, Any]:
     source_tile = source_tile_with_fallback(x, y, z)
-    enriched, model_size = apply_heights(source_tile["features"], city_center)
+    enriched, model_size = apply_heights(source_tile["features"], city_center, source_tile.get("calibrationFeatures"))
     features = render_features(enriched)
     return {"features": features, "source": source_tile["source"], "cached": source_tile["cached"], "stale": source_tile["stale"], "stats": {**tile_stats(features), "inferredCount": sum(feature["properties"]["inferred"] == 1 for feature in features), "modelSampleSize": model_size}}
 
@@ -1065,29 +1950,57 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def send_json(self, status: int, body: dict[str, Any] | list[Any] | None, headers: dict[str, str] | None = None) -> None:
         payload = b"" if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Access-Control-Allow-Origin", self.cors_origin())
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Vary", "Origin")
-        if body is not None:
-            self.send_header("Content-Type", "application/geo+json" if headers and headers.pop("geojson", None) else "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-        for key, value in (headers or {}).items():
-            self.send_header(key, value)
-        self.end_headers()
-        if payload:
-            self.wfile.write(payload)
+        response_headers = dict(headers or {})
+        try:
+            self.send_response(status)
+            self.send_header("Access-Control-Allow-Origin", self.cors_origin())
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Vary", "Origin")
+            if body is not None:
+                self.send_header("Content-Type", "application/geo+json" if response_headers.pop("geojson", None) else "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+            for key, value in response_headers.items():
+                self.send_header(key, value)
+            self.end_headers()
+            if payload:
+                self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # Browsers abort stale tile requests while the server is still fetching data.
+            return
 
     def do_OPTIONS(self) -> None:
         self.send_json(204, None)
+
+    def read_json_body(self, maximum_bytes: int = 32_768) -> dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length") or "")
+        except ValueError:
+            raise ServiceError("A valid Content-Length header is required.", 400) from None
+        if length < 1 or length > maximum_bytes:
+            raise ServiceError(f"Request bodies must be between 1 and {maximum_bytes} bytes.", 413)
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ServiceError("Request body must be valid JSON.", 400) from None
+        if not isinstance(body, dict):
+            raise ServiceError("Request body must be a JSON object.", 400)
+        return body
+
+    def handle_error(self, error: Exception) -> None:
+        if isinstance(error, ServiceError):
+            headers = {"Retry-After": str(error.retry_after)} if error.retry_after else None
+            self.send_json(error.status, {"error": str(error)}, headers)
+            return
+        print(f"Unhandled API error: {error}")
+        self.send_json(500, {"error": "The data service failed."})
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
         try:
             if parsed.path == "/api/health":
-                self.send_json(200, {"ok": True, "cache": "sqlite", "tileZoom": TILE_ZOOM, "overtureRelease": CONFIG.overture_release, "openBuildingMap": bool(CONFIG.openbuildingmap_api_url)})
+                self.send_json(200, {"ok": True, "cache": "sqlite", "tileZoom": TILE_ZOOM, "overtureRelease": CONFIG.overture_release, "openBuildingMap": bool(CONFIG.openbuildingmap_api_url), "routing": {"provider": "public-osrm", "profile": CONFIG.osm_router_profile, "serpFallbackEnabled": CONFIG.enable_serp_directions_fallback}})
                 return
             if parsed.path == "/api/suggest":
                 value = query.get("q", [""])[0].strip()[:160]
@@ -1104,6 +2017,35 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/country":
                 self.send_json(200, detect_country(parse_number(query.get("lat", [None])[0]), parse_number(query.get("lon", [None])[0])))
+                return
+            if parsed.path == "/api/context":
+                lat = parse_number(query.get("lat", [None])[0])
+                lon = parse_number(query.get("lon", [None])[0])
+                if (lat is None) != (lon is None) or (lat is not None and not valid_coordinate(lon, lat)):
+                    raise ServiceError("Context coordinates must include a valid longitude and latitude.", 400)
+                country = detect_country(lat, lon)
+                self.send_json(200, {"country": country, "precision": "browser" if lat is not None else "ip", "lat": lat, "lon": lon})
+                return
+            if parsed.path == "/api/places":
+                value = query.get("q", [""])[0].strip()[:160]
+                if len(value) < 2:
+                    raise ServiceError("Enter at least two characters to find a place.", 400)
+                lat = parse_number(query.get("lat", [None])[0])
+                lon = parse_number(query.get("lon", [None])[0])
+                if (lat is None) != (lon is None) or (lat is not None and not valid_coordinate(lon, lat)):
+                    raise ServiceError("Place context coordinates must include a valid longitude and latitude.", 400)
+                results, stored = lookup_places(value, query.get("countryCode", [""])[0], lat, lon)
+                self.send_json(200, {"results": results, "stored": stored})
+                return
+            if parsed.path == "/api/workspace":
+                self.send_json(200, workspace_snapshot())
+                return
+            route_match = re.fullmatch(r"/api/routes/(route-[A-Za-z0-9]+)", parsed.path)
+            if route_match:
+                route = CACHE.get_route_by_id(route_match.group(1))
+                if not route:
+                    raise ServiceError("Route not found.", 404)
+                self.send_json(200, {"route": route})
                 return
             match = re.fullmatch(r"/api/tiles/(\d+)/(\d+)/(\d+)\.geojson", parsed.path)
             if match:
@@ -1122,11 +2064,79 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_json(204, None, headers) if not tile["features"] else self.send_json(200, {"type": "FeatureCollection", "features": tile["features"]}, {**headers, "geojson": "1"})
                 return
             raise ServiceError("Not found.", 404)
-        except ServiceError as error:
-            self.send_json(error.status, {"error": str(error)})
         except Exception as error:
-            print(f"Unhandled API error: {error}")
-            self.send_json(500, {"error": "The data service failed."})
+            self.handle_error(error)
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        try:
+            body = self.read_json_body()
+            if parsed.path == "/api/pins":
+                point = valid_coordinate(body.get("lon"), body.get("lat"))
+                if not point:
+                    raise ServiceError("A pin needs a valid longitude and latitude.", 400)
+                name = str(body.get("name") or "Pinned location").strip()
+                if not name:
+                    raise ServiceError("A pin needs a name.", 400)
+                source = str(body.get("source") or "map-click")
+                if source not in {"map-click", "place", "browser"}:
+                    raise ServiceError("Unsupported pin source.", 400)
+                place_id = body.get("placeId")
+                if place_id is not None and not isinstance(place_id, str):
+                    raise ServiceError("Pin placeId must be a string.", 400)
+                pin = CACHE.add_pin(name, point[1], point[0], place_id, source)
+                self.send_json(201, {"pin": pin})
+                return
+            if parsed.path == "/api/areas":
+                geometry = valid_polygon(body.get("geometry"))
+                if not geometry:
+                    raise ServiceError("An area must be a valid closed GeoJSON polygon.", 400)
+                label = str(body.get("label") or "Measured area").strip()
+                summary_value = body.get("summary")
+                summary: dict[str, Any] = dict(summary_value) if isinstance(summary_value, dict) else {}
+                area = CACHE.add_area(label, geometry, summary)
+                self.send_json(201, {"area": area})
+                return
+            if parsed.path == "/api/routes":
+                waypoints = route_waypoints(body.get("waypoints"))
+                profile = str(body.get("profile") or CONFIG.osm_router_profile)
+                route = get_route(waypoints, profile)
+                self.send_json(200, {"route": route})
+                return
+            if parsed.path == "/api/workspace/state":
+                state = body.get("state")
+                if not isinstance(state, dict):
+                    raise ServiceError("Workspace state must be a JSON object.", 400)
+                safe_state = {key: value for key, value in state.items() if key in {"originPinId", "destinationPinId", "routeId", "context"}}
+                CACHE.put_workspace_state(safe_state)
+                self.send_json(200, {"state": CACHE.get_workspace_state()})
+                return
+            raise ServiceError("Not found.", 404)
+        except Exception as error:
+            self.handle_error(error)
+
+    def do_DELETE(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        try:
+            if parsed.path == "/api/workspace":
+                CACHE.clear_workspace()
+                self.send_json(204, None)
+                return
+            pin_match = re.fullmatch(r"/api/pins/(pin-[A-Za-z0-9]+)", parsed.path)
+            if pin_match:
+                if not CACHE.delete_pin(pin_match.group(1)):
+                    raise ServiceError("Pin not found.", 404)
+                self.send_json(204, None)
+                return
+            area_match = re.fullmatch(r"/api/areas/(area-[A-Za-z0-9]+)", parsed.path)
+            if area_match:
+                if not CACHE.delete_area(area_match.group(1)):
+                    raise ServiceError("Area not found.", 404)
+                self.send_json(204, None)
+                return
+            raise ServiceError("Not found.", 404)
+        except Exception as error:
+            self.handle_error(error)
 
 
 def main() -> None:

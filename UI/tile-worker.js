@@ -47,7 +47,9 @@ async function processQueue() {
       if (!response.ok && response.status !== 204) {
         const body = await response.json().catch(() => ({}));
         const requestError = new Error(body.error || `Tile request failed (${response.status})`);
-        requestError.retryable = response.status === 500;
+        const retryAfter = Number.parseInt(response.headers.get('Retry-After') || '', 10);
+        requestError.retryable = response.status === 429 || response.status >= 500;
+        requestError.retryAfter = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 0;
         throw requestError;
       }
       const payload = response.status === 204 ? { features: [] } : await response.json();
@@ -63,7 +65,8 @@ async function processQueue() {
     } catch (error) {
       if (tile.generation === generation && error.name !== 'AbortError') {
         if ((error instanceof TypeError || error.retryable) && tile.attempt < 3) {
-          await new Promise((resolve) => setTimeout(resolve, 600 * 2 ** tile.attempt));
+          const delay = error.retryAfter ? Math.min(error.retryAfter * 1000, 300000) : 600 * 2 ** tile.attempt;
+          await new Promise((resolve) => setTimeout(resolve, delay));
           if (tile.generation === generation) queue.unshift({ ...tile, attempt: tile.attempt + 1 });
         } else {
           queued.delete(tile.key);
