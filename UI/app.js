@@ -306,7 +306,7 @@ function addLocalLayers(map, theme) {
 
 class CityExplorer {
   constructor() {
-    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'intro-card', 'place-form', 'place-input', 'place-results', 'use-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-origin', 'route-destination', 'pin-list', 'area-list', 'geo-status'].map((id) => [id, document.getElementById(id)]));
+    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'intro-card', 'place-form', 'place-input', 'place-results', 'use-location', 'use-approximate-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-origin', 'route-destination', 'pin-list', 'area-list', 'geo-status'].map((id) => [id, document.getElementById(id)]));
     this.theme = localStorage.getItem('theme') || 'dark';
     this.country = { country: '', countryCode: '', method: 'detecting' };
     this.selected = null;
@@ -343,6 +343,7 @@ class CityExplorer {
     el['search-input'].addEventListener('focus', () => { if (this.selected?.name !== el['search-input'].value) this.selected = null; });
     el['place-form'].addEventListener('submit', (event) => this.searchPlaces(event));
     el['use-location'].addEventListener('click', () => this.useBrowserLocation());
+    el['use-approximate-location'].addEventListener('click', () => this.useApproximateLocation());
     el['pin-mode'].addEventListener('click', () => this.togglePinMode());
     el['show-area'].addEventListener('click', () => this.createPinArea());
     el['clear-additions'].addEventListener('click', () => this.clearAdditions());
@@ -411,37 +412,32 @@ class CityExplorer {
   }
 
   async detectCountry() {
-    const fallback = async () => {
-      try { this.country = await jsonRequest('/api/country'); } catch { this.country = { country: '', countryCode: localeCountry(), method: 'locale' }; }
-      this.geo.context = { ...this.geo.context, source: this.country.method || 'locale', countryCode: this.country.countryCode || '' };
-      this.renderRegion();
-    };
-    if (!navigator.geolocation) return fallback();
-    navigator.geolocation.getCurrentPosition(async ({ coords }) => {
-      try {
-        this.country = await jsonRequest(`/api/country?lat=${coords.latitude}&lon=${coords.longitude}`);
-        this.geo.context = { lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy, source: 'browser', countryCode: this.country.countryCode || '' };
-      } catch { await fallback(); }
-      this.renderRegion();
-    }, fallback, { timeout: 5000, maximumAge: 86400000 });
+    this.country = { country: '', countryCode: localeCountry(), method: 'locale' };
+    this.geo.context = { ...this.geo.context, source: 'locale', countryCode: this.country.countryCode || '' };
+    this.renderRegion();
   }
 
   renderRegion() {
-    this.elements['region-label'].textContent = `Search region: ${this.country.country || this.country.countryCode || 'worldwide'}`;
+    this.elements['region-label'].textContent = `Search region: ${this.country.country || this.country.countryCode || 'worldwide'} / location optional`;
     this.elements['status-dot'].classList.remove('pulse');
   }
 
   async initializeLocation() {
     if (this.initializeLocationFromUrl()) return;
+    this.detectCountry();
+  }
+
+  async useApproximateLocation() {
+    this.setGeoStatus('Finding an approximate location through the configured IP providers...');
     try {
       const detected = await ipLocation();
-      if (this.selected || this.elements['search-input'].value.trim()) return;
       this.country = detected.country;
       this.geo.context = { lat: detected.location.lat, lon: detected.location.lon, accuracy: null, source: 'ip', countryCode: detected.country.countryCode || '' };
       this.renderRegion();
       this.chooseLocation(detected.location);
-    } catch {
-      this.detectCountry();
+      this.setGeoStatus('Using an approximate IP-based location.');
+    } catch (error) {
+      this.setGeoStatus(error.message || 'Approximate location is unavailable.', true);
     }
   }
 

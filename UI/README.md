@@ -17,17 +17,17 @@ The interface defaults to dark mode. Set `localStorage.theme` to `light` or
 `dark` before loading the page to store a theme preference; the UI intentionally
 does not expose a theme toggle.
 
-## Separate API Host
+## Local API Host
 
-The default API is `http://127.0.0.1:8787`. Point the UI at another backend
-host with the `api` query parameter:
+The default API is `http://127.0.0.1:8787`. Monument accepts only loopback API
+origins. A local hosting page can set an alternate local port before `app.js`:
 
 ```text
-https://ui.example.com/?api=https://api.example.com
+window.MONUMENT_API_URL = 'http://127.0.0.1:8787';
 ```
 
-Hosting systems can instead define `window.MONUMENT_API_URL` before `app.js`
-loads. The Python backend must permit the UI origin through `ALLOWED_ORIGINS`.
+Shared URLs and local storage cannot change the API origin. The Python backend
+must remain bound to a loopback host.
 
 ## Shared City Links
 
@@ -40,12 +40,14 @@ https://ui.example.com/?city=Noida&country=India
 `country` is optional and is included in the city lookup when present. The
 misspelled `counrty` parameter is accepted for links created with that spelling.
 
-## Initial Location And Geography Tools
+## Location And Geography Tools
 
-Unless a shared-city URL is provided, the browser requests its public IP from
-`api.ipify.org` and resolves the city through `ip-api.services.brahmai.in`.
-The detected city is loaded directly from its returned coordinates. If either
-request fails, the browser's existing country detection remains the fallback.
+The application starts without collecting a location. `USE MY LOCATION` asks
+for browser permission. `USE APPROX. LOCATION` explicitly requests a public IP
+from `api.ipify.org` and resolves it through `ip-api.services.brahmai.in`.
+Both providers receive the request information needed to perform that lookup.
+The browser locale supplies only an initial country bias until a user chooses a
+location, city, or place.
 
 The UI loads MapLibre GL and the OpenFreeMap base style from their public CDN
 and hosts; self-host those resources for production or offline deployments.

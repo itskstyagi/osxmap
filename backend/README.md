@@ -30,14 +30,14 @@ shell environment variables always take precedence over both files.
 ## UI Deployment
 
 The static UI is in `../UI` and should be served locally alongside the local
-API. Configure the API origin with a loopback query parameter when needed:
+API. Configure an alternate loopback origin before `app.js` when needed:
 
 ```text
-http://127.0.0.1:8080/?api=http://127.0.0.1:8787
+window.MONUMENT_API_URL = 'http://127.0.0.1:8787';
 ```
 
-Or set `window.MONUMENT_API_URL` before loading `UI/app.js`. Do not expose this
-backend on a network: it intentionally has no authentication or user accounts.
+Do not expose this backend on a network: it intentionally has no authentication
+or user accounts.
 
 ## API
 

@@ -1042,20 +1042,15 @@ def lookup_places(query: str, country_code: str, lat: float | None, lon: float |
 
 def detect_country(lat: float | None, lon: float | None) -> dict[str, str]:
     if lat is not None and lon is not None and math.isfinite(lat) and math.isfinite(lon):
-        key = f"country:{lat:.2f},{lon:.2f}"
-        cached = CACHE.get_geocode(key)
-        if cached:
-            return cached
-
         def task() -> dict[str, str]:
             url = "https://nominatim.openstreetmap.org/reverse?" + urllib.parse.urlencode({"lat": lat, "lon": lon, "format": "jsonv2", "zoom": 3})
             payload = fetch_json(url, {"User-Agent": CONFIG.user_agent, "Referer": "http://localhost/", "Accept": "application/json"}, 10)
             address = payload.get("address") or {}
             return {"country": address.get("country") or "", "countryCode": (address.get("country_code") or "").upper(), "method": "browser"}
 
-        result = NOMINATIM_QUEUE.run(task)
-        CACHE.put_geocode(key, result)
-        return result
+        # Browser coordinates establish request context only; do not retain them
+        # in the local geocode cache unless the user creates a pin.
+        return NOMINATIM_QUEUE.run(task)
     payload = fetch_json("https://api.country.is/", {"User-Agent": CONFIG.user_agent, "Accept": "application/json"}, 5)
     return {"country": "", "countryCode": payload.get("country") or "", "method": "ip"}
 

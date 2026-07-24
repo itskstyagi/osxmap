@@ -2,6 +2,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from backend import server
 
@@ -154,6 +155,15 @@ class OpenBuildingMapGeometryTests(unittest.TestCase):
         finally:
             for _ in held_slots:
                 server.REQUEST_GATE.release()
+
+    def test_browser_country_context_is_not_cached(self) -> None:
+        payload = {"address": {"country": "India", "country_code": "in"}}
+        with mock.patch.object(server.CACHE, "get_geocode") as get_cached, mock.patch.object(server.CACHE, "put_geocode") as put_cached, mock.patch.object(server, "fetch_json", return_value=payload):
+            result = server.detect_country(28.6139, 77.2090)
+
+        self.assertEqual(result["countryCode"], "IN")
+        get_cached.assert_not_called()
+        put_cached.assert_not_called()
 
 
 if __name__ == "__main__":
