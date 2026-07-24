@@ -1943,7 +1943,21 @@ def source_tile_with_fallback(x: int, y: int, z: int) -> dict[str, Any]:
         except Exception as mirror_error:
             print(f"[tiles] OpenBuildingMap mirror failed for {quadkey(x, y, z)}: {mirror_error}")
     try:
-        return get_source_tile(x, y, z, "openstreetmap")
+        osm = get_source_tile(x, y, z, "openstreetmap")
+        if any(feature.get("properties", {}).get("kind") == "building" for feature in osm["features"]):
+            return osm
+        osm_pois = [feature for feature in osm["features"] if feature.get("properties", {}).get("kind") == "poi"]
+        if not CONFIG.disable_overture:
+            try:
+                fallback = get_source_tile(x, y, z, "overture")
+                if fallback["features"]:
+                    fallback["features"].extend(osm_pois)
+                    fallback["cached"] = fallback["cached"] and osm["cached"]
+                    fallback["stale"] = fallback["stale"] or osm["stale"]
+                    return fallback
+            except Exception as overture_error:
+                print(f"[tiles] Overture fallback failed for empty OSM tile {quadkey(x, y, z)}: {overture_error}")
+        return osm
     except Exception as osm_error:
         if not CONFIG.disable_overture:
             try:

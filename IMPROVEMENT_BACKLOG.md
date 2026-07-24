@@ -55,7 +55,7 @@ values.
 
 | ID | Status | Finding | Evidence and locations | Target state |
 | --- | --- | --- | --- | --- |
-| DP-01 | Not started | Fall back to Overture when Overpass succeeds but returns no usable buildings. | Overture is attempted only on an OSM exception, not an empty OSM result. `backend/server.py:1675-1701` | Retain OSM POIs, but try Overture for an empty OSM-building tile. |
+| DP-01 | In progress | Fall back to Overture when Overpass succeeds but returns no usable buildings. | Overture is attempted only on an OSM exception, not an empty OSM result. `backend/server.py:1675-1701` | Retain OSM POIs, but try Overture for an empty OSM-building tile. |
 | DP-02 | Not started | Serve a previous OpenBuildingMap catalog during refresh failure. | The catalog lock is held during a remote call; a refresh failure discards use of an otherwise valid in-memory catalog. `backend/server.py:1523-1545` | Use stale-with-hard-limit catalog data and a single-flight refresh outside the critical path. |
 | DP-03 | Not started | Prevent overlapping OpenBuildingMap source files from duplicating buildings. | All matching ancestor quadkey files are queried; IDs are filename-prefixed. `backend/server.py:1548-1569` | Select most-specific non-overlapping files and deduplicate using stable source IDs or normalized geometry. |
 | DP-04 | Not started | Replace process-random fallback OpenBuildingMap identifiers. | Missing record IDs use Python `hash()`, which changes per process. `backend/server.py:1500-1519` | Use a stable digest of normalized source attributes and geometry. |

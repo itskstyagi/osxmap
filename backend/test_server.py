@@ -1,6 +1,7 @@
 import struct
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -164,6 +165,19 @@ class OpenBuildingMapGeometryTests(unittest.TestCase):
         self.assertEqual(result["countryCode"], "IN")
         get_cached.assert_not_called()
         put_cached.assert_not_called()
+
+    def test_uses_overture_when_osm_tile_has_no_buildings(self) -> None:
+        osm_poi = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [77.0, 28.0]}, "properties": {"kind": "poi"}}
+        overture_building = {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": []}, "properties": {"kind": "building"}}
+        osm = {"features": [osm_poi], "source": "openstreetmap", "cached": True, "stale": False}
+        overture = {"features": [overture_building], "source": "overture", "cached": False, "stale": False}
+        config = replace(server.CONFIG, openbuildingmap_api_url="", disable_overture=False)
+
+        with mock.patch.object(server, "CONFIG", config), mock.patch.object(server, "get_source_tile", side_effect=[osm, overture]):
+            result = server.source_tile_with_fallback(1, 2, 14)
+
+        self.assertEqual(result["source"], "overture")
+        self.assertEqual([feature["properties"]["kind"] for feature in result["features"]], ["building", "poi"])
 
 
 if __name__ == "__main__":
