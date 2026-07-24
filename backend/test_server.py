@@ -192,6 +192,75 @@ class OpenBuildingMapGeometryTests(unittest.TestCase):
 
         self.assertEqual(files, [{"filename": "building.12.gpkg", "quadkey": "12"}])
 
+    def test_dijkstra_route_records_each_examined_osm_road_segment(self) -> None:
+        ways = [
+            {"tags": {"highway": "residential"}, "geometry": [{"lon": 77.0, "lat": 28.0}, {"lon": 77.001, "lat": 28.0}]},
+            {"tags": {"highway": "residential"}, "geometry": [{"lon": 77.001, "lat": 28.0}, {"lon": 77.002, "lat": 28.0}]},
+            {"tags": {"highway": "residential"}, "geometry": [{"lon": 77.001, "lat": 28.0}, {"lon": 77.001, "lat": 28.001}]},
+        ]
+        with mock.patch.object(server, "fetch_osm_driving_ways", return_value=ways):
+            result = server.dijkstra_osm_route([[77.0, 28.0], [77.002, 28.0]])
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["summary"]["algorithm"], "dijkstra")
+        self.assertEqual(result["geometry"]["coordinates"][0], [77.0, 28.0])
+        self.assertEqual(result["geometry"]["coordinates"][-1], [77.002, 28.0])
+        self.assertGreaterEqual(len(result["summary"]["search"]["exploredEdges"]), 3)
+
+    def test_accepts_multi_stop_route_plans_up_to_the_supported_limit(self) -> None:
+        plan = [[77.0 + index / 10_000, 28.0] for index in range(server.MAX_ROUTE_WAYPOINTS)]
+
+        self.assertEqual(server.route_waypoints(plan), plan)
+        with self.assertRaises(server.ServiceError):
+            server.route_waypoints(plan + [[77.1, 28.0]])
+
+    def test_dijkstra_connects_each_leg_of_an_ordered_route_plan(self) -> None:
+        ways = [
+            {"tags": {"highway": "residential"}, "geometry": [{"lon": 77.0, "lat": 28.0}, {"lon": 77.001, "lat": 28.0}]},
+            {"tags": {"highway": "residential"}, "geometry": [{"lon": 77.001, "lat": 28.0}, {"lon": 77.002, "lat": 28.0}]},
+            {"tags": {"highway": "residential"}, "geometry": [{"lon": 77.002, "lat": 28.0}, {"lon": 77.003, "lat": 28.0}]},
+        ]
+        with mock.patch.object(server, "fetch_osm_driving_ways", return_value=ways):
+            result = server.dijkstra_osm_route([[77.0, 28.0], [77.001, 28.0], [77.003, 28.0]])
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["geometry"]["coordinates"], [[77.0, 28.0], [77.001, 28.0], [77.002, 28.0], [77.003, 28.0]])
+
+    def test_serp_place_search_keeps_every_coordinate_result(self) -> None:
+        payload = {
+            "search_metadata": {"status": "Success"},
+            "place_results": {"place_id": "primary", "title": "Primary", "gps_coordinates": {"longitude": 77.0, "latitude": 28.0}},
+            "local_results": [
+                {"place_id": "one", "title": "First", "gps_coordinates": {"longitude": 77.1, "latitude": 28.1}},
+                {"place_id": "two", "title": "Second", "gps_coordinates": {"longitude": 77.2, "latitude": 28.2}},
+            ],
+        }
+        with mock.patch.object(server, "fetch_serp_response", return_value=payload), mock.patch.object(server.CACHE, "put_places", side_effect=lambda places: places):
+            results = server.search_serp_places("example", None, None, "")
+
+        self.assertEqual([place["name"] for place in results], ["Primary", "First", "Second"])
+
+    def test_forced_serp_lookup_skips_local_and_osm_lookup_paths(self) -> None:
+        place = {"id": "serpapi-google-maps:example", "provider": "serpapi-google-maps", "providerId": "example", "name": "Example", "address": "", "countryCode": "", "lat": 28.0, "lon": 77.0, "bbox": [77.0, 28.0, 77.0, 28.0]}
+        with mock.patch.object(server, "search_serp_places", return_value=[place]) as serp, mock.patch.object(server.CACHE, "get_place_lookup") as lookup, mock.patch.object(server.CACHE, "search_places") as local:
+            results, stored = server.lookup_places("Example", "", None, None, "serp")
+
+        self.assertEqual(results, [place])
+        self.assertFalse(stored)
+        serp.assert_called_once_with("Example", None, None, "")
+        lookup.assert_not_called()
+        local.assert_not_called()
+
+    def test_local_place_suggestions_use_only_the_local_store(self) -> None:
+        place = {"id": "openstreetmap:node:1", "provider": "openstreetmap", "providerId": "node:1", "name": "Example", "address": "", "countryCode": "", "lat": 28.0, "lon": 77.0, "bbox": [77.0, 28.0, 77.0, 28.0]}
+        with mock.patch.object(server.CACHE, "search_places", return_value=[place]) as search:
+            results = server.local_place_suggestions("exam")
+
+        self.assertEqual(results, [place])
+        search.assert_called_once_with("exam", limit=8)
+
 
 if __name__ == "__main__":
     unittest.main()

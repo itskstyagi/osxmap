@@ -5,8 +5,9 @@ const ACCENT = '#315efb';
 const PREVIEW_LAYER = 'local-buildings-preview';
 const FOCUS_SOURCE = 'local-city-focus';
 const GEOGRAPHY_SOURCE = 'local-geography';
-const STORED_PLACES_SOURCE = 'local-stored-places';
+const SEARCH_RESULTS_SOURCE = 'local-search-results';
 const EMPTY_COLLECTION = { type: 'FeatureCollection', features: [] };
+const MAX_ROUTE_STOPS = 50;
 
 function numeric(value) {
   const parsed = Number(value);
@@ -139,6 +140,41 @@ function geometryPositions(geometry) {
   return [];
 }
 
+function partialLineString(geometry, progress) {
+  const coordinates = geometry?.type === 'LineString' && Array.isArray(geometry.coordinates) ? geometry.coordinates : [];
+  if (coordinates.length < 2) return null;
+  const clamped = Math.max(0, Math.min(1, progress));
+  if (clamped === 0) return null;
+  if (clamped === 1) return geometry;
+  const lengths = [];
+  let total = 0;
+  for (let index = 1; index < coordinates.length; index += 1) {
+    const [lonA, latA] = coordinates[index - 1];
+    const [lonB, latB] = coordinates[index];
+    const length = Math.hypot((lonB - lonA) * Math.cos(((latA + latB) * Math.PI) / 360), latB - latA);
+    lengths.push(length);
+    total += length;
+  }
+  if (!total) return { type: 'LineString', coordinates: [coordinates[0], coordinates[1]] };
+  const target = total * clamped;
+  const result = [coordinates[0]];
+  let travelled = 0;
+  for (let index = 1; index < coordinates.length; index += 1) {
+    const length = lengths[index - 1];
+    if (travelled + length <= target) {
+      result.push(coordinates[index]);
+      travelled += length;
+      continue;
+    }
+    const ratio = length ? (target - travelled) / length : 0;
+    const [lonA, latA] = coordinates[index - 1];
+    const [lonB, latB] = coordinates[index];
+    result.push([lonA + (lonB - lonA) * ratio, latA + (latB - latA) * ratio]);
+    break;
+  }
+  return result.length > 1 ? { type: 'LineString', coordinates: result } : { type: 'LineString', coordinates: [coordinates[0], coordinates[1]] };
+}
+
 function polygonAreaSquareMeters(coordinates) {
   if (!Array.isArray(coordinates) || coordinates.length < 4) return 0;
   let total = 0;
@@ -251,7 +287,7 @@ function addLocalLayers(map, theme) {
   map.addSource('local-city', { type: 'geojson', data: EMPTY_COLLECTION, generateId: true, tolerance: 0.7, buffer: 32, maxzoom: 18 });
   map.addSource(FOCUS_SOURCE, { type: 'geojson', data: EMPTY_COLLECTION });
   map.addSource(GEOGRAPHY_SOURCE, { type: 'geojson', data: EMPTY_COLLECTION });
-  map.addSource(STORED_PLACES_SOURCE, { type: 'geojson', data: EMPTY_COLLECTION });
+  map.addSource(SEARCH_RESULTS_SOURCE, { type: 'geojson', data: EMPTY_COLLECTION });
   const firstSymbol = map.getStyle().layers?.find((layer) => layer.type === 'symbol')?.id;
   map.addLayer({ id: 'local-park', type: 'fill', source: 'local-city', filter: ['==', ['get', 'kind'], 'park'], paint: { 'fill-color': '#dcdcd7', 'fill-opacity': 0.7 } });
   if (map.getSource('openmaptiles')) map.addLayer({
@@ -294,19 +330,24 @@ function addLocalLayers(map, theme) {
   });
   map.addLayer({ id: 'geo-area-fill', type: 'fill', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'area'], paint: { 'fill-color': ACCENT, 'fill-opacity': 0.14 } });
   map.addLayer({ id: 'geo-area-outline', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'area'], paint: { 'line-color': ACCENT, 'line-width': 2, 'line-opacity': 0.95 } });
+  map.addLayer({ id: 'geo-route-search-casing', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-search'], paint: { 'line-color': '#ffffff', 'line-width': 5, 'line-opacity': ['coalesce', ['get', 'opacity'], 0.72] } });
+  map.addLayer({ id: 'geo-route-search', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-search'], paint: { 'line-color': '#7080a2', 'line-width': 2.5, 'line-opacity': ['coalesce', ['get', 'opacity'], 0.72], 'line-dasharray': [1.5, 1.5] } });
   map.addLayer({ id: 'geo-route-casing', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route'], paint: { 'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9 } });
   map.addLayer({ id: 'geo-route', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route'], paint: { 'line-color': ACCENT, 'line-width': 4, 'line-opacity': 1 } });
   map.addLayer({ id: 'geo-pin', type: 'circle', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'pin'], paint: { 'circle-radius': 7, 'circle-color': ACCENT, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
   map.addLayer({ id: 'geo-pin-label', type: 'symbol', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'pin'], layout: { 'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'], 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff' } });
-  map.addLayer({ id: 'local-stored-place-halo', type: 'circle', source: STORED_PLACES_SOURCE, minzoom: 7, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 7, 15, 14], 'circle-color': '#4b5563', 'circle-opacity': 0.14 } });
-  map.addLayer({ id: 'local-stored-place', type: 'circle', source: STORED_PLACES_SOURCE, minzoom: 7, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 3.5, 15, 6], 'circle-color': '#4b5563', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.25, 'circle-opacity': 0.9 } });
-  map.addLayer({ id: 'local-stored-place-label', type: 'symbol', source: STORED_PLACES_SOURCE, minzoom: 13, layout: { 'text-field': ['get', 'name'], 'text-size': 10, 'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'], 'text-offset': [0, 1.1], 'text-anchor': 'top', 'text-max-width': 14 }, paint: { 'text-color': '#374151', 'text-halo-color': '#ffffff', 'text-halo-width': 1.25 } });
+  map.addLayer({ id: 'geo-route-stop-halo', type: 'circle', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-stop'], paint: { 'circle-radius': 13, 'circle-color': ACCENT, 'circle-opacity': 0.18 } });
+  map.addLayer({ id: 'geo-route-stop', type: 'circle', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-stop'], paint: { 'circle-radius': 9, 'circle-color': ACCENT, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
+  map.addLayer({ id: 'geo-route-stop-label', type: 'symbol', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-stop'], layout: { 'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'], 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff' } });
+  map.addLayer({ id: 'local-search-result-halo', type: 'circle', source: SEARCH_RESULTS_SOURCE, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 8, 15, 15], 'circle-color': '#e6953f', 'circle-opacity': 0.18 } });
+  map.addLayer({ id: 'local-search-result', type: 'circle', source: SEARCH_RESULTS_SOURCE, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 4, 15, 6.5], 'circle-color': '#e6953f', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.25, 'circle-opacity': 0.95 } });
+  map.addLayer({ id: 'local-search-result-label', type: 'symbol', source: SEARCH_RESULTS_SOURCE, minzoom: 13, layout: { 'text-field': ['get', 'name'], 'text-size': 10, 'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'], 'text-offset': [0, 1.1], 'text-anchor': 'top', 'text-max-width': 14 }, paint: { 'text-color': '#374151', 'text-halo-color': '#ffffff', 'text-halo-width': 1.25 } });
   applyMonochrome(map, theme);
 }
 
 class CityExplorer {
   constructor() {
-    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'intro-card', 'place-form', 'place-input', 'place-results', 'use-location', 'use-approximate-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-origin', 'route-destination', 'pin-list', 'area-list', 'geo-status'].map((id) => [id, document.getElementById(id)]));
+    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'intro-card', 'use-location', 'use-approximate-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-stops', 'route-stop-count', 'route-plan-hint', 'add-route-stop', 'trace-route', 'pin-list', 'area-list', 'geo-status', 'toggle-geo-tools', 'geo-content'].map((id) => [id, document.getElementById(id)]));
     this.theme = localStorage.getItem('theme') || 'dark';
     this.country = { country: '', countryCode: '', method: 'detecting' };
     this.selected = null;
@@ -322,12 +363,15 @@ class CityExplorer {
     this.previewVisible = true;
     this.suggestionController = null;
     this.suggestionTimer = null;
-    this.placeSearchController = null;
-    this.storedPlacesController = null;
-    this.storedPlacesBounds = '';
-    this.storedPlaces = [];
+    this.routeStopControllers = new Map();
+    this.routeStopTimers = new Map();
+    this.searchResults = [];
     this.pinMode = false;
-    this.geo = { pins: [], areas: [], route: null, state: {}, context: { lat: null, lon: null, source: 'unknown', accuracy: null } };
+    this.geoToolsOpen = false;
+    this.geo = { pins: [], areas: [], routeStops: [{ query: '', place: null, suggestions: [] }, { query: '', place: null, suggestions: [] }], route: null, routeAnimation: null, state: {}, context: { lat: null, lon: null, source: 'unknown', accuracy: null } };
+    this.activeRouteStopIndex = 0;
+    this.routeAnimationFrame = null;
+    this.routeAnimationVersion = 0;
     this.worker = new Worker(new URL('./tile-worker.js', import.meta.url), { type: 'module' });
     this.setTheme(this.theme);
     this.bindUi();
@@ -341,16 +385,33 @@ class CityExplorer {
     el['search-form'].addEventListener('submit', (event) => this.submitSearch(event));
     el['search-input'].addEventListener('input', () => this.queueSuggestions());
     el['search-input'].addEventListener('focus', () => { if (this.selected?.name !== el['search-input'].value) this.selected = null; });
-    el['place-form'].addEventListener('submit', (event) => this.searchPlaces(event));
+    el['toggle-geo-tools'].addEventListener('click', () => this.setGeoToolsOpen(!this.geoToolsOpen));
     el['use-location'].addEventListener('click', () => this.useBrowserLocation());
     el['use-approximate-location'].addEventListener('click', () => this.useApproximateLocation());
     el['pin-mode'].addEventListener('click', () => this.togglePinMode());
     el['show-area'].addEventListener('click', () => this.createPinArea());
     el['clear-additions'].addEventListener('click', () => this.clearAdditions());
-    el['route-form'].addEventListener('submit', (event) => this.findRoute(event));
+    el['route-form'].addEventListener('submit', (event) => {
+      if (event.submitter?.id === 'trace-route') this.findRoute(event);
+      else {
+        event.preventDefault();
+        this.searchRouteStop(this.activeRouteStopIndex);
+      }
+    });
+    el['add-route-stop'].addEventListener('click', () => this.addRouteStop());
     document.querySelectorAll('[data-map-action]').forEach((button) => button.addEventListener('click', () => this.operate(button.dataset.mapAction)));
     document.addEventListener('keydown', (event) => this.handleShortcut(event));
     this.worker.onmessage = ({ data }) => this.handleWorkerMessage(data);
+    this.setGeoToolsOpen(false);
+  }
+
+  setGeoToolsOpen(open) {
+    this.geoToolsOpen = open;
+    const panel = this.elements['geo-content'].closest('.geo-panel');
+    const toggle = this.elements['toggle-geo-tools'];
+    panel.classList.toggle('is-collapsed', !open);
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.querySelector('b').textContent = open ? 'CLOSE' : 'OPEN';
   }
 
   createMap() {
@@ -362,8 +423,7 @@ class CityExplorer {
       this.map.getSource('local-city')?.setData({ type: 'FeatureCollection', features: [...this.features.values()] });
       this.map.getSource(FOCUS_SOURCE)?.setData(this.selected ? this.focusFeature(this.selected) : EMPTY_COLLECTION);
       this.renderGeography();
-      this.renderStoredPlaces();
-      this.loadStoredPlaces();
+      this.renderSearchResults();
       if (this.map.getLayer(PREVIEW_LAYER) && !this.previewBuildingEventsBound) {
         this.map.on('click', PREVIEW_LAYER, (event) => this.showBuilding(event));
         this.map.on('mousemove', PREVIEW_LAYER, (event) => this.hoverBuilding(event));
@@ -380,13 +440,12 @@ class CityExplorer {
     this.map.on('click', 'local-poi-marker', (event) => this.showPoi(event));
     this.map.on('mouseenter', 'local-poi-marker', () => { this.map.getCanvas().style.cursor = 'pointer'; });
     this.map.on('mouseleave', 'local-poi-marker', () => { this.map.getCanvas().style.cursor = ''; });
-    this.map.on('click', 'local-stored-place', (event) => this.selectStoredPlace(event));
-    this.map.on('mouseenter', 'local-stored-place', () => { this.map.getCanvas().style.cursor = 'pointer'; });
-    this.map.on('mouseleave', 'local-stored-place', () => { this.map.getCanvas().style.cursor = ''; });
+    this.map.on('click', 'local-search-result', (event) => this.selectSearchResult(event));
+    this.map.on('mouseenter', 'local-search-result', () => { this.map.getCanvas().style.cursor = 'pointer'; });
+    this.map.on('mouseleave', 'local-search-result', () => { this.map.getCanvas().style.cursor = ''; });
     this.map.on('movestart', () => { if (this.selected && this.map.getZoom() >= 13) this.setPreviewVisible(true); });
     this.map.on('moveend', () => {
       if (this.selected && this.map.getZoom() >= 13) this.worker.postMessage({ type: 'append', tiles: visibleTiles(this.map) });
-      this.loadStoredPlaces();
     });
     this.map.on('dblclick', (event) => {
       if (!this.selected) return;
@@ -395,7 +454,7 @@ class CityExplorer {
     });
     this.map.on('click', (event) => {
       if (!this.pinMode) return;
-      const interactiveLayers = [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred', 'local-poi-marker', 'local-stored-place', 'geo-pin', 'geo-area-fill', 'geo-route']
+      const interactiveLayers = [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred', 'local-poi-marker', 'local-search-result', 'geo-pin', 'geo-route-stop', 'geo-area-fill', 'geo-route', 'geo-route-search']
         .filter((layer) => this.map.getLayer(layer));
       if (interactiveLayers.length && this.map.queryRenderedFeatures(event.point, { layers: interactiveLayers }).length) return;
       this.addMapPin(event.lngLat.lng, event.lngLat.lat);
@@ -435,7 +494,8 @@ class CityExplorer {
       this.geo.context = { lat: detected.location.lat, lon: detected.location.lon, accuracy: null, source: 'ip', countryCode: detected.country.countryCode || '' };
       this.renderRegion();
       this.chooseLocation(detected.location);
-      this.setGeoStatus('Using an approximate IP-based location.');
+      this.chooseRouteStop(this.activeRouteStopIndex, { id: 'approximate-location', name: `Approximate location / ${detected.location.name}`, lat: detected.location.lat, lon: detected.location.lon, countryCode: detected.country.countryCode || '' });
+      this.setGeoStatus('Added an approximate IP-based location to the route plan.');
     } catch (error) {
       this.setGeoStatus(error.message || 'Approximate location is unavailable.', true);
     }
@@ -589,6 +649,7 @@ class CityExplorer {
   setStream(stream) {
     this.stream = stream;
     const el = this.elements;
+    this.updateIntroCard();
     el['stream-card'].classList.toggle('is-hidden', !stream.active);
     el['stream-card'].classList.toggle('is-loading', stream.active && stream.loaded < stream.total);
     if (!stream.active) return;
@@ -597,7 +658,11 @@ class CityExplorer {
     el['stream-progress'].style.width = `${Math.min(100, (stream.loaded / Math.max(stream.total, 1)) * 100)}%`;
     el['stream-buildings'].textContent = stream.preview && stream.buildings === 0 ? 'basemap preview' : `${stream.buildings.toLocaleString()} buildings${stream.inferred ? ` / ${stream.inferred.toLocaleString()} inferred` : ''}`;
     el['stream-source'].textContent = stream.source || 'No detailed tile data';
-    el['intro-card'].classList.toggle('is-hidden', Boolean(this.selected));
+  }
+
+  updateIntroCard() {
+    const hasRouteStop = this.routePlan().some((stop) => Boolean(stop.place));
+    this.elements['intro-card'].classList.toggle('is-hidden', Boolean(this.selected) || hasRouteStop);
   }
 
   setLoading(loading) { this.elements['search-loader'].classList.toggle('is-hidden', !loading); }
@@ -680,51 +745,38 @@ class CityExplorer {
     new window.maplibregl.Popup({ closeButton: false, className: 'mono-popup', offset: 12 }).setLngLat(event.lngLat).setDOMContent(content).addTo(this.map);
   }
 
-  storedPlaceFeatures() {
+  searchResultFeatures() {
     return {
       type: 'FeatureCollection',
-      features: this.storedPlaces.map((place) => ({
+      features: this.searchResults.map((place) => ({
         type: 'Feature', geometry: { type: 'Point', coordinates: [place.lon, place.lat] },
         properties: { id: place.id, provider: place.provider, name: place.name, address: place.address || '', countryCode: place.countryCode || '' },
       })),
     };
   }
 
-  renderStoredPlaces() {
-    this.map?.getSource(STORED_PLACES_SOURCE)?.setData(this.storedPlaceFeatures());
+  renderSearchResults() {
+    this.map?.getSource(SEARCH_RESULTS_SOURCE)?.setData(this.searchResultFeatures());
   }
 
-  async loadStoredPlaces() {
-    if (!this.map?.isStyleLoaded()) return;
-    const bounds = this.map.getBounds();
-    const params = new URLSearchParams({
-      west: bounds.getWest().toFixed(5), south: bounds.getSouth().toFixed(5),
-      east: bounds.getEast().toFixed(5), north: bounds.getNorth().toFixed(5),
-    });
-    const key = params.toString();
-    if (key === this.storedPlacesBounds) return;
-    this.storedPlacesBounds = key;
-    this.storedPlacesController?.abort();
-    this.storedPlacesController = new AbortController();
-    try {
-      const response = await jsonRequest(`/api/places/stored?${params}`, this.storedPlacesController.signal);
-      if (key !== this.storedPlacesBounds) return;
-      this.storedPlaces = Array.isArray(response.places) ? response.places : [];
-      this.renderStoredPlaces();
-    } catch (error) {
-      if (error.name !== 'AbortError' && key === this.storedPlacesBounds) this.storedPlaces = [];
-    }
-  }
-
-  selectStoredPlace(event) {
+  selectSearchResult(event) {
     const feature = event.features?.[0];
     const coordinates = feature?.geometry?.coordinates;
     if (!feature || !Array.isArray(coordinates) || coordinates.length < 2) return;
-    this.selectPlace({
+    this.chooseRouteStop(this.activeRouteStopIndex, {
       id: feature.properties.id, provider: feature.properties.provider, name: feature.properties.name,
       address: feature.properties.address, countryCode: feature.properties.countryCode,
       lon: Number(coordinates[0]), lat: Number(coordinates[1]),
     });
+  }
+
+  routeStopLabel(index) {
+    return index < 26 ? String.fromCharCode(65 + index) : String(index + 1);
+  }
+
+  routePlan() {
+    while (this.geo.routeStops.length < 2) this.geo.routeStops.push({ query: '', place: null, suggestions: [] });
+    return this.geo.routeStops;
   }
 
   geographyFeatures() {
@@ -732,19 +784,108 @@ class CityExplorer {
       type: 'Feature', geometry: { type: 'Point', coordinates: [pin.lon, pin.lat] },
       properties: { overlay: 'pin', id: pin.id, label: pin.label, name: pin.name },
     }));
+    for (const [index, stop] of this.routePlan().entries()) {
+      if (!stop.place) continue;
+      features.push({
+        type: 'Feature', geometry: { type: 'Point', coordinates: [stop.place.lon, stop.place.lat] },
+        properties: { overlay: 'route-stop', id: `${stop.place.id || 'stop'}-${index}`, label: this.routeStopLabel(index), name: stop.place.name },
+      });
+    }
     for (const area of this.geo.areas) if (!area.summary?.invalid) features.push({
       type: 'Feature', geometry: area.geometry,
       properties: { overlay: 'area', id: area.id, label: area.label, areaSquareMeters: area.summary?.areaSquareMeters || 0 },
     });
-    if (this.geo.route?.geometry) features.push({
-      type: 'Feature', geometry: this.geo.route.geometry,
-      properties: { overlay: 'route', id: this.geo.route.id, temporary: Boolean(this.geo.route.temporary) },
-    });
+    const animation = this.geo.routeAnimation;
+    if (animation && animation.phase !== 'final') {
+      const coordinates = animation.edges.slice(0, animation.visible);
+      if (coordinates.length) features.push({
+        type: 'Feature', geometry: { type: 'MultiLineString', coordinates },
+        properties: { overlay: 'route-search', id: `${this.geo.route.id}-search`, opacity: animation.opacity },
+      });
+    }
+    if (this.geo.route?.geometry && (!animation || animation.phase === 'final')) {
+      const geometry = animation ? partialLineString(this.geo.route.geometry, animation.progress) : this.geo.route.geometry;
+      if (geometry) features.push({
+        type: 'Feature', geometry,
+        properties: { overlay: 'route', id: this.geo.route.id, temporary: Boolean(this.geo.route.temporary) },
+      });
+    }
     return { type: 'FeatureCollection', features };
   }
 
   renderGeography() {
     this.map?.getSource(GEOGRAPHY_SOURCE)?.setData(this.geographyFeatures());
+  }
+
+  routeSearchEdges(route) {
+    const edges = route.summary?.search?.exploredEdges;
+    if (!Array.isArray(edges)) return [];
+    return edges.filter((edge) => Array.isArray(edge) && edge.length === 2
+      && edge.every((point) => Array.isArray(point) && point.length >= 2 && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1]))));
+  }
+
+  stopRouteAnimation(render = true) {
+    this.routeAnimationVersion += 1;
+    if (this.routeAnimationFrame !== null) window.cancelAnimationFrame(this.routeAnimationFrame);
+    this.routeAnimationFrame = null;
+    this.geo.routeAnimation = null;
+    if (render) this.renderGeography();
+  }
+
+  animateRoute(route) {
+    this.stopRouteAnimation(false);
+    const edges = this.routeSearchEdges(route);
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      this.renderGeography();
+      return;
+    }
+    if (!edges.length) {
+      this.renderGeography();
+      return;
+    }
+    const animation = { phase: 'tracing', edges, visible: 0, progress: 0, opacity: 0.8, renderedAt: 0 };
+    const tracingDuration = Math.min(8000, Math.max(1800, edges.length / 2.5));
+    const version = this.routeAnimationVersion;
+    let phaseStartedAt = 0;
+    this.geo.routeAnimation = animation;
+    const frame = (now) => {
+      if (version !== this.routeAnimationVersion) return;
+      if (!phaseStartedAt) phaseStartedAt = now;
+      const elapsed = now - phaseStartedAt;
+      if (animation.phase === 'tracing') {
+        animation.progress = Math.min(1, elapsed / 1100);
+        animation.visible = Math.min(edges.length, Math.ceil(edges.length * elapsed / tracingDuration));
+        if (animation.visible === edges.length) {
+          animation.phase = 'clearing';
+          phaseStartedAt = now;
+        }
+      } else if (animation.phase === 'clearing') {
+        animation.opacity = Math.max(0, 0.8 * (1 - elapsed / 260));
+        if (animation.opacity === 0) {
+          animation.phase = 'final';
+          animation.progress = 0;
+          phaseStartedAt = now;
+        }
+      } else {
+        animation.progress = Math.min(1, elapsed / 750);
+        if (animation.progress === 1) {
+          this.geo.routeAnimation = null;
+          this.routeAnimationFrame = null;
+          this.renderGeography();
+          const { summary } = route;
+          const stopCount = Array.isArray(route.waypoints) ? route.waypoints.length : 0;
+          this.setGeoStatus(`Shortest OSM road path settled after tracing ${edges.length.toLocaleString()} road segments: ${formatDistance(summary.distanceMeters)} / ${formatDuration(summary.durationSeconds)}${summary.approximateDuration ? ' estimated' : ''}${stopCount ? ` across ${stopCount} stops` : ''}${route.stored ? ' from local storage.' : '.'}`);
+          return;
+        }
+      }
+      if (animation.phase !== 'tracing' || animation.visible === edges.length || now - animation.renderedAt >= 40) {
+        animation.renderedAt = now;
+        this.renderGeography();
+      }
+      this.routeAnimationFrame = window.requestAnimationFrame(frame);
+    };
+    this.renderGeography();
+    this.routeAnimationFrame = window.requestAnimationFrame(frame);
   }
 
   setGeoStatus(message, error = false) {
@@ -753,6 +894,7 @@ class CityExplorer {
   }
 
   renderWorkspace() {
+    this.renderRoutePlan();
     const pins = this.geo.pins;
     const list = this.elements['pin-list'];
     list.replaceChildren();
@@ -762,38 +904,18 @@ class CityExplorer {
       label.textContent = pin.label;
       const name = document.createElement('span');
       name.textContent = pin.name;
-      const origin = document.createElement('button');
-      origin.type = 'button';
-      origin.textContent = 'FROM';
-      origin.addEventListener('click', () => this.setRouteEndpoint('origin', pin.id));
-      const destination = document.createElement('button');
-      destination.type = 'button';
-      destination.textContent = 'TO';
-      destination.addEventListener('click', () => this.setRouteEndpoint('destination', pin.id));
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.textContent = 'ADD';
+      add.setAttribute('aria-label', `Add ${pin.name} to the route plan`);
+      add.addEventListener('click', () => this.chooseRouteStop(this.activeRouteStopIndex, { id: pin.id, name: pin.name, lat: pin.lat, lon: pin.lon, countryCode: '' }));
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.textContent = 'X';
       remove.setAttribute('aria-label', `Remove ${pin.name}`);
       remove.addEventListener('click', () => this.removePin(pin.id));
-      row.append(label, name, origin, destination, remove);
+      row.append(label, name, add, remove);
       list.append(row);
-    }
-    const originValue = this.geo.state.originPinId || this.elements['route-origin'].value;
-    const destinationValue = this.geo.state.destinationPinId || this.elements['route-destination'].value;
-    for (const [element, selected] of [[this.elements['route-origin'], originValue], [this.elements['route-destination'], destinationValue]]) {
-      element.replaceChildren();
-      const placeholder = document.createElement('option');
-      placeholder.value = '';
-      placeholder.textContent = pins.length ? 'Choose pin' : 'Add pins first';
-      element.append(placeholder);
-      for (const pin of pins) {
-        const option = document.createElement('option');
-        option.value = pin.id;
-        option.textContent = `${pin.label} / ${pin.name}`;
-        option.selected = pin.id === selected;
-        element.append(option);
-      }
-      element.disabled = pins.length < 2;
     }
     const areaList = this.elements['area-list'];
     areaList.replaceChildren();
@@ -823,17 +945,83 @@ class CityExplorer {
     }
   }
 
+  renderRoutePlan() {
+    const plan = this.routePlan();
+    const container = this.elements['route-stops'];
+    container.replaceChildren();
+    for (const [index, stop] of plan.entries()) {
+      const row = document.createElement('div');
+      row.className = 'route-stop';
+      row.dataset.routeStop = String(index);
+      const marker = document.createElement('span');
+      marker.className = 'route-stop-index';
+      marker.textContent = this.routeStopLabel(index);
+      const field = document.createElement('div');
+      field.className = 'route-stop-field';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = stop.query;
+      input.placeholder = index === 0 ? 'Starting point' : index === plan.length - 1 ? 'Destination' : 'Stop';
+      input.autocomplete = 'off';
+      input.setAttribute('aria-label', `Route stop ${this.routeStopLabel(index)}`);
+      input.addEventListener('focus', () => { this.activeRouteStopIndex = index; });
+      input.addEventListener('input', () => this.setRouteStopQuery(index, input.value));
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.searchRouteStop(index);
+        }
+        if (event.key === 'Escape') {
+          stop.suggestions = [];
+          this.renderRouteStopSuggestions(index);
+        }
+      });
+      const suggestions = document.createElement('div');
+      suggestions.className = 'route-stop-suggestions is-hidden';
+      suggestions.setAttribute('role', 'listbox');
+      field.append(input, suggestions);
+      const up = document.createElement('button');
+      up.type = 'button';
+      up.textContent = '^';
+      up.disabled = index === 0;
+      up.setAttribute('aria-label', `Move stop ${this.routeStopLabel(index)} earlier`);
+      up.addEventListener('click', () => this.moveRouteStop(index, -1));
+      const down = document.createElement('button');
+      down.type = 'button';
+      down.textContent = 'v';
+      down.disabled = index === plan.length - 1;
+      down.setAttribute('aria-label', `Move stop ${this.routeStopLabel(index)} later`);
+      down.addEventListener('click', () => this.moveRouteStop(index, 1));
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'X';
+      remove.setAttribute('aria-label', `Remove stop ${this.routeStopLabel(index)}`);
+      remove.addEventListener('click', () => this.removeRouteStop(index));
+      row.append(marker, field, up, down, remove);
+      container.append(row);
+      this.renderRouteStopSuggestions(index);
+    }
+    const selectedCount = plan.filter((stop) => stop.place).length;
+    const complete = selectedCount === plan.length && selectedCount >= 2;
+    this.elements['route-stop-count'].textContent = `${selectedCount} STOP${selectedCount === 1 ? '' : 'S'}`;
+    this.elements['trace-route'].disabled = !complete;
+    this.elements['route-plan-hint'].textContent = !complete
+      ? 'Type to reuse previously searched places. Press Enter to search Serp and show every match on the map.'
+      : `${selectedCount} stops in order. Use ^ and v to rearrange the plan.`;
+  }
+
   async loadWorkspace() {
     try {
-      const workspace = await jsonRequest('/api/workspace');
-      this.geo.pins = Array.isArray(workspace.pins) ? workspace.pins : [];
-      this.geo.areas = Array.isArray(workspace.areas) ? workspace.areas : [];
-      this.geo.state = workspace.state && typeof workspace.state === 'object' ? workspace.state : {};
-      if (this.geo.state.routeId) {
-        try { this.geo.route = (await jsonRequest(`/api/routes/${encodeURIComponent(this.geo.state.routeId)}`)).route || null; } catch { this.geo.state.routeId = ''; }
-      }
+      await deleteRequest('/api/workspace');
+      this.geo.pins = [];
+      this.geo.areas = [];
+      this.geo.routeStops = [{ query: '', place: null, suggestions: [] }, { query: '', place: null, suggestions: [] }];
+      this.geo.route = null;
+      this.geo.state = {};
+      this.searchResults = [];
       this.renderWorkspace();
       this.renderGeography();
+      this.renderSearchResults();
     } catch (error) {
       this.setGeoStatus(error.message, true);
     }
@@ -846,71 +1034,108 @@ class CityExplorer {
     return null;
   }
 
-  async searchPlaces(event) {
-    event.preventDefault();
-    const query = this.elements['place-input'].value.trim();
+  setRouteStopQuery(index, query) {
+    const stop = this.routePlan()[index];
+    if (!stop) return;
+    stop.query = query;
+    stop.place = null;
+    stop.suggestions = [];
+    this.stopRouteAnimation(false);
+    this.geo.route = null;
+    this.renderGeography();
+    this.queueRouteStopSuggestions(index, query);
+  }
+
+  queueRouteStopSuggestions(index, query) {
+    clearTimeout(this.routeStopTimers.get(index));
+    this.routeStopControllers.get(index)?.abort();
+    if (query.trim().length < 2) return this.renderRouteStopSuggestions(index);
+    this.routeStopTimers.set(index, setTimeout(async () => {
+      const controller = new AbortController();
+      this.routeStopControllers.set(index, controller);
+      try {
+        const response = await jsonRequest(`/api/places/suggest?${new URLSearchParams({ q: query.trim() })}`, controller.signal);
+        const stop = this.routePlan()[index];
+        if (!stop || stop.query !== query) return;
+        stop.suggestions = Array.isArray(response.results) ? response.results : [];
+        this.renderRouteStopSuggestions(index);
+      } catch (error) {
+        if (error.name !== 'AbortError') this.setGeoStatus(error.message, true);
+      }
+    }, 180));
+  }
+
+  renderRouteStopSuggestions(index) {
+    const stop = this.routePlan()[index];
+    const container = this.elements['route-stops'].querySelector(`[data-route-stop="${index}"] .route-stop-suggestions`);
+    if (!stop || !container) return;
+    container.replaceChildren();
+    for (const place of stop.suggestions || []) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      const name = document.createElement('strong');
+      name.textContent = place.name;
+      const address = document.createElement('small');
+      address.textContent = place.address || `${Number(place.lat).toFixed(5)}, ${Number(place.lon).toFixed(5)}`;
+      button.append(name, address);
+      button.addEventListener('click', () => this.chooseRouteStop(index, place));
+      container.append(button);
+    }
+    container.classList.toggle('is-hidden', !container.childElementCount);
+  }
+
+  async searchRouteStop(index) {
+    const stop = this.routePlan()[index];
+    const query = stop?.query.trim() || '';
     if (query.length < 2) {
-      this.setGeoStatus('Enter at least two characters to find a place.', true);
+      this.setGeoStatus('Enter at least two characters before searching Serp.', true);
       return;
     }
-    this.placeSearchController?.abort();
-    this.placeSearchController = new AbortController();
-    const params = new URLSearchParams({ q: query });
+    clearTimeout(this.routeStopTimers.get(index));
+    this.routeStopControllers.get(index)?.abort();
+    const controller = new AbortController();
+    this.routeStopControllers.set(index, controller);
+    const params = new URLSearchParams({ q: query, provider: 'serp' });
     const context = this.placeContext();
     if (this.country.countryCode) params.set('countryCode', this.country.countryCode);
     if (context) {
       params.set('lat', String(context.lat));
       params.set('lon', String(context.lon));
     }
-    this.setGeoStatus('Searching OSM places...');
+    this.setGeoStatus('Searching Serp for matching places...');
     try {
-      const response = await jsonRequest(`/api/places?${params}`, this.placeSearchController.signal);
-      this.placeResults = Array.isArray(response.results) ? response.results : [];
-      this.storedPlacesBounds = '';
-      this.loadStoredPlaces();
-      this.renderPlaceResults();
-      this.setGeoStatus(this.placeResults.length ? `${this.placeResults.length} place${this.placeResults.length === 1 ? '' : 's'} found${response.stored ? ' from local storage' : ''}.` : 'No place found in the current geographic context.', !this.placeResults.length);
+      const response = await jsonRequest(`/api/places?${params}`, controller.signal);
+      if (this.routePlan()[index] !== stop || stop.query !== query) return;
+      this.searchResults = Array.isArray(response.results) ? response.results : [];
+      this.renderSearchResults();
+      stop.suggestions = this.searchResults;
+      this.renderRouteStopSuggestions(index);
+      this.setGeoStatus(this.searchResults.length
+        ? `Serp returned ${this.searchResults.length} place${this.searchResults.length === 1 ? '' : 's'}; every result is marked on the map.`
+        : 'Serp returned no places for that search.', !this.searchResults.length);
     } catch (error) {
       if (error.name !== 'AbortError') this.setGeoStatus(error.message, true);
     }
   }
 
-  renderPlaceResults() {
-    const container = this.elements['place-results'];
-    container.replaceChildren();
-    for (const place of this.placeResults || []) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.role = 'option';
-      const provider = document.createElement('b');
-      provider.textContent = place.provider === 'openstreetmap' ? 'OSM' : 'SERP';
-      const copy = document.createElement('span');
-      const name = document.createElement('strong');
-      name.textContent = place.name;
-      const address = document.createElement('small');
-      address.textContent = place.address || `${place.lat.toFixed(5)}, ${place.lon.toFixed(5)}`;
-      copy.append(name, address);
-      const marker = document.createElement('span');
-      marker.className = 'location-swatch';
-      button.append(marker, copy, provider);
-      button.addEventListener('click', () => this.selectPlace(place));
-      container.append(button);
-    }
-    container.classList.toggle('is-hidden', !container.childElementCount);
-  }
-
-  async selectPlace(place) {
-    try {
-      await this.addPin({ name: place.name, lat: place.lat, lon: place.lon, placeId: place.id, source: 'place' });
-      this.geo.context = { lat: place.lat, lon: place.lon, source: 'selected', countryCode: place.countryCode || this.country.countryCode || '' };
-      if (place.countryCode) this.country = { ...this.country, countryCode: place.countryCode, method: 'selected' };
-      this.renderRegion();
-      this.elements['place-results'].classList.add('is-hidden');
-      this.map.flyTo({ center: [place.lon, place.lat], zoom: Math.max(15, this.map.getZoom()), duration: 900, essential: true });
-      this.setGeoStatus(`Pinned ${place.name}.`);
-    } catch (error) {
-      this.setGeoStatus(error.message, true);
-    }
+  chooseRouteStop(index, place) {
+    const plan = this.routePlan();
+    const targetIndex = plan[index] ? index : plan.findIndex((candidate) => !candidate.place);
+    const stop = plan[targetIndex];
+    if (!stop || !place) return;
+    stop.query = place.name;
+    stop.place = place;
+    stop.suggestions = [];
+    this.stopRouteAnimation(false);
+    this.geo.route = null;
+    this.geo.context = { lat: place.lat, lon: place.lon, source: 'selected', countryCode: place.countryCode || this.country.countryCode || '' };
+    if (place.countryCode) this.country = { ...this.country, countryCode: place.countryCode, method: 'selected' };
+    this.renderRegion();
+    this.renderWorkspace();
+    this.renderGeography();
+    this.updateIntroCard();
+    this.map.flyTo({ center: [place.lon, place.lat], zoom: Math.max(14, this.map.getZoom()), duration: 600, essential: true });
+    this.setGeoStatus(`Added ${place.name} to stop ${this.routeStopLabel(targetIndex)}.`);
   }
 
   togglePinMode() {
@@ -923,7 +1148,7 @@ class CityExplorer {
     const button = this.elements['pin-mode'];
     button.classList.toggle('is-active', enabled);
     button.setAttribute('aria-pressed', String(enabled));
-    button.textContent = enabled ? 'CANCEL MAP PIN' : 'ADD MAP PIN';
+    button.textContent = enabled ? 'CANCEL PIN MODE' : 'PIN STOP ON MAP';
     this.map.getCanvas().style.cursor = enabled ? 'crosshair' : '';
   }
 
@@ -934,8 +1159,8 @@ class CityExplorer {
     }
     this.setPinMode(false);
     try {
-      await this.addPin({ name: `Map pin ${lat.toFixed(5)}, ${lon.toFixed(5)}`, lat, lon, source: 'map-click' });
-      this.setGeoStatus('Map pin added.');
+      const pin = await this.addPin({ name: `Map pin ${lat.toFixed(5)}, ${lon.toFixed(5)}`, lat, lon, source: 'map-click' });
+      this.chooseRouteStop(this.activeRouteStopIndex, { id: pin.id, name: pin.name, lat: pin.lat, lon: pin.lon, countryCode: '' });
     } catch (error) {
       this.setGeoStatus(error.message, true);
     }
@@ -953,14 +1178,11 @@ class CityExplorer {
     try {
       await deleteRequest(`/api/pins/${encodeURIComponent(pinId)}`);
       this.geo.pins = this.geo.pins.filter((pin) => pin.id !== pinId);
+      this.stopRouteAnimation(false);
       this.geo.route = null;
       this.geo.areas = this.geo.areas.map((area) => area.summary?.pinIds?.includes(pinId)
         ? { ...area, summary: { ...area.summary, invalid: true, invalidReason: 'A referenced pin was removed.' } }
         : area);
-      if (this.geo.state.originPinId === pinId) this.geo.state.originPinId = '';
-      if (this.geo.state.destinationPinId === pinId) this.geo.state.destinationPinId = '';
-      this.geo.state.routeId = '';
-      await this.persistWorkspaceState();
       this.renderWorkspace();
       this.renderGeography();
       this.setGeoStatus('Pin removed.');
@@ -982,7 +1204,8 @@ class CityExplorer {
         this.geo.context = { lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy, source: 'browser', countryCode: this.country.countryCode || '' };
         this.renderRegion();
         this.map.flyTo({ center: [coords.longitude, coords.latitude], zoom: Math.max(14, this.map.getZoom()), duration: 800, essential: true });
-        this.setGeoStatus(`Using browser location${coords.accuracy ? ` (about ${Math.round(coords.accuracy)} m accuracy)` : ''}.`);
+        this.chooseRouteStop(this.activeRouteStopIndex, { id: `browser:${coords.latitude.toFixed(6)},${coords.longitude.toFixed(6)}`, name: 'My location', lat: coords.latitude, lon: coords.longitude, countryCode: this.country.countryCode || '' });
+        this.setGeoStatus(`Added your location to the route plan${coords.accuracy ? ` (about ${Math.round(coords.accuracy)} m accuracy)` : ''}.`);
       } catch (error) {
         this.setGeoStatus(error.message, true);
       }
@@ -1055,44 +1278,68 @@ class CityExplorer {
     }
   }
 
-  setRouteEndpoint(kind, pinId) {
-    if (kind === 'origin') this.geo.state.originPinId = pinId;
-    if (kind === 'destination') this.geo.state.destinationPinId = pinId;
+  addRouteStop() {
+    const plan = this.routePlan();
+    if (plan.length >= MAX_ROUTE_STOPS) {
+      this.setGeoStatus(`A route plan can contain up to ${MAX_ROUTE_STOPS} stops.`, true);
+      return;
+    }
+    plan.push({ query: '', place: null, suggestions: [] });
+    this.stopRouteAnimation(false);
+    this.geo.route = null;
     this.renderWorkspace();
-    this.persistWorkspaceState();
+    this.renderGeography();
+    this.elements['route-stops'].querySelector(`[data-route-stop="${plan.length - 1}"] input`)?.focus();
   }
 
-  async persistWorkspaceState() {
-    const state = { originPinId: this.geo.state.originPinId || '', destinationPinId: this.geo.state.destinationPinId || '', routeId: this.geo.state.routeId || '' };
-    try {
-      this.geo.state = await postJson('/api/workspace/state', { state });
-    } catch {
-      // The map remains usable if the local workspace state cannot be saved.
-    }
+  moveRouteStop(index, direction) {
+    const plan = this.routePlan();
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= plan.length) return;
+    [plan[index], plan[nextIndex]] = [plan[nextIndex], plan[index]];
+    this.stopRouteAnimation(false);
+    this.geo.route = null;
+    this.renderWorkspace();
+    this.renderGeography();
+  }
+
+  removeRouteStop(index) {
+    const plan = this.routePlan();
+    if (plan.length <= 2) plan[index] = { query: '', place: null, suggestions: [] };
+    else plan.splice(index, 1);
+    this.stopRouteAnimation(false);
+    this.geo.route = null;
+    this.renderWorkspace();
+    this.renderGeography();
   }
 
   async findRoute(event) {
     event.preventDefault();
-    const originId = this.elements['route-origin'].value;
-    const destinationId = this.elements['route-destination'].value;
-    const origin = this.geo.pins.find((pin) => pin.id === originId);
-    const destination = this.geo.pins.find((pin) => pin.id === destinationId);
-    if (!origin || !destination || origin.id === destination.id) {
-      this.setGeoStatus('Choose two different pins for a driving route.', true);
+    const plan = this.routePlan();
+    const stops = plan.map((stop) => stop.place);
+    if (stops.length < 2 || stops.some((pin) => !pin)) {
+      this.setGeoStatus('Choose a place for every route stop.', true);
       return;
     }
-    this.geo.state = { ...this.geo.state, originPinId: origin.id, destinationPinId: destination.id };
-    this.setGeoStatus('Finding an OSM driving route...');
+    if (new Set(stops.map((pin) => `${Number(pin.lon).toFixed(7)},${Number(pin.lat).toFixed(7)}`)).size < 2) {
+      this.setGeoStatus('Choose at least two different places for a driving route.', true);
+      return;
+    }
+    this.setGeoStatus(`Requesting a ${stops.length}-stop OSM road-network plan...`);
     try {
-      const response = await postJson('/api/routes', { profile: 'driving', waypoints: [[origin.lon, origin.lat], [destination.lon, destination.lat]] });
+      const response = await postJson('/api/routes', { profile: 'driving', waypoints: stops.map((pin) => [pin.lon, pin.lat]) });
       this.geo.route = response.route;
-      this.geo.state.routeId = response.route.id;
-      await this.persistWorkspaceState();
       this.renderWorkspace();
-      this.renderGeography();
       const { summary } = response.route;
       const note = summary.approximateGeometry ? ' External fallback distance shown with an endpoint connector.' : '';
-      this.setGeoStatus(`${formatDistance(summary.distanceMeters)} / ${formatDuration(summary.durationSeconds)}${response.route.stored ? ' from local storage.' : '.'}${note}`);
+      const searchedEdges = this.routeSearchEdges(response.route).length;
+      this.setGeoStatus(summary.approximateGeometry
+        ? `${formatDistance(summary.distanceMeters)} / ${formatDuration(summary.durationSeconds)} for this ${stops.length}-stop plan.${note}`
+        : searchedEdges
+          ? `Replaying Dijkstra across ${searchedEdges.toLocaleString()} explored OSM road segments for this ${stops.length}-stop plan...`
+          : `${formatDistance(summary.distanceMeters)} / ${formatDuration(summary.durationSeconds)} from the OSRM fallback for this ${stops.length}-stop plan.`);
+      if (searchedEdges) this.animateRoute(response.route);
+      else this.renderGeography();
       const coordinates = response.route.geometry?.coordinates || [];
       if (coordinates.length > 1) {
         const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
@@ -1108,11 +1355,16 @@ class CityExplorer {
       await deleteRequest('/api/workspace');
       this.geo.pins = [];
       this.geo.areas = [];
+      this.stopRouteAnimation(false);
       this.geo.route = null;
+      this.geo.routeStops = [{ query: '', place: null, suggestions: [] }, { query: '', place: null, suggestions: [] }];
       this.geo.state = {};
+      this.searchResults = [];
       this.renderWorkspace();
       this.renderGeography();
-      this.setGeoStatus('Pins, areas, and the displayed route were cleared. Stored place and OSM route records remain available.');
+      this.renderSearchResults();
+      this.updateIntroCard();
+      this.setGeoStatus('Pins, areas, the route plan, and current search markers were cleared.');
     } catch (error) {
       this.setGeoStatus(error.message, true);
     }

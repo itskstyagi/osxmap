@@ -7,9 +7,9 @@
     <meta name="description" content="A monochrome 3D city explorer with OSM-first place, pin, area, and routing tools.">
     <title>Monument / City Explorer</title>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-    <link rel="stylesheet" href="./styles.css?v=20260724-1">
+    <link rel="stylesheet" href="./styles.css?v=20260725-5">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
-    <script type="module" src="./app.js?v=20260724-1"></script>
+    <script type="module" src="./app.js?v=20260725-5"></script>
   </head>
   <body>
     <main class="app-shell">
@@ -23,14 +23,28 @@
           </form>
           <div id="suggestions" class="suggestions is-hidden" role="listbox"></div>
           <div class="search-meta"><span id="status-dot" class="status-dot pulse"></span><span id="region-label">Detecting search region</span><span class="meta-separator">/</span><span>OSM-first geography tools</span></div>
-          <section class="geo-panel" aria-label="Map geography tools">
-            <form id="place-form" class="geo-form"><input id="place-input" placeholder="Find a place or address" aria-label="Find a place or address" autocomplete="off"><button type="submit">PIN PLACE</button></form>
-            <div id="place-results" class="place-results is-hidden" role="listbox"></div>
-            <div class="geo-actions"><button id="use-location" type="button">USE MY LOCATION</button><button id="use-approximate-location" type="button">USE APPROX. LOCATION</button><button id="pin-mode" type="button" aria-pressed="false">ADD MAP PIN</button><button id="show-area" type="button">SHOW PIN AREA</button><button id="clear-additions" type="button">CLEAR ADDITIONS</button></div>
-            <form id="route-form" class="route-form"><label>FROM<select id="route-origin" aria-label="Route origin"></select></label><label>TO<select id="route-destination" aria-label="Route destination"></select></label><button type="submit">DRIVING ROUTE</button></form>
-            <div id="pin-list" class="pin-list" aria-label="Saved pins"></div>
-            <div id="area-list" class="area-list" aria-label="Saved areas"></div>
-            <p id="geo-status" class="geo-status" aria-live="polite">Use a place search or add a pin directly on the map.</p>
+          <section class="geo-panel" aria-label="Route planner and map tools">
+            <button id="toggle-geo-tools" class="geo-toggle" type="button" aria-expanded="false"><span>ROUTE PLANNER</span><b>OPEN</b></button>
+            <div id="geo-content" class="geo-content">
+              <form id="route-form" class="route-form">
+                <div class="route-planner-heading"><span>YOUR STOPS</span><b id="route-stop-count">0 STOPS</b></div>
+                <div id="route-stops" class="route-stops" aria-label="Ordered route stops"></div>
+                <div class="route-actions"><button id="add-route-stop" type="button">ADD STOP</button><button id="trace-route" type="submit">TRACE PLAN</button></div>
+                <p id="route-plan-hint" class="route-plan-hint">Type to search places saved from earlier searches. Press Enter to search Serp.</p>
+              </form>
+              <div class="geo-actions"><button id="pin-mode" type="button" aria-pressed="false">PIN STOP ON MAP</button><button id="use-location" type="button">ADD MY LOCATION</button><button id="use-approximate-location" type="button">ADD APPROX. LOCATION</button></div>
+              <details class="utility-tools">
+                <summary>MORE MAP TOOLS</summary>
+                <div class="utility-content">
+                  <div class="geo-actions"><button id="show-area" type="button">MEASURE PIN AREA</button><button id="clear-additions" type="button">CLEAR WORKSPACE</button></div>
+                  <div class="tool-heading">SAVED PINS</div>
+                  <div id="pin-list" class="pin-list" aria-label="Saved pins"></div>
+                  <div class="tool-heading">MEASURED AREAS</div>
+                  <div id="area-list" class="area-list" aria-label="Saved areas"></div>
+                </div>
+              </details>
+              <p id="geo-status" class="geo-status" aria-live="polite">The map starts clear. Add route stops, then trace the plan.</p>
+            </div>
           </section>
         </section>
       </header>

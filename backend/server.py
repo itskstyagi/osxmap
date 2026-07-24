@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import functools
 import hashlib
+import heapq
 import ipaddress
 import json
 import math
@@ -975,12 +976,7 @@ def place_from_serp(item: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def search_serp_places(query: str, lat: float | None, lon: float | None, country_code: str) -> list[dict[str, Any]]:
-    normalized = normalize_query(query)
-
     def task() -> list[dict[str, Any]]:
-        cached_places = CACHE.search_places(normalized)
-        if cached_places:
-            return cached_places
         params = {"engine": "google_maps", "type": "search", "q": query, "hl": "en"}
         if lat is not None and lon is not None:
             params["ll"] = f"@{lat:.6f},{lon:.6f},14z"
@@ -1013,10 +1009,17 @@ def public_place(place: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in place.items() if key != "providerPayload"}
 
 
-def lookup_places(query: str, country_code: str, lat: float | None, lon: float | None) -> tuple[list[dict[str, Any]], bool]:
+def local_place_suggestions(query: str) -> list[dict[str, Any]]:
+    normalized = normalize_query(query)
+    return [public_place(place) for place in CACHE.search_places(normalized, limit=8)] if len(normalized) >= 2 else []
+
+
+def lookup_places(query: str, country_code: str, lat: float | None, lon: float | None, provider: str = "") -> tuple[list[dict[str, Any]], bool]:
     normalized = normalize_query(query)
     if len(normalized) < 2:
         return [], True
+    if provider == "serp":
+        return [public_place(place) for place in search_serp_places(query, lat, lon, country_code)], False
     context = {
         "query": normalized,
         "countryCode": country_param(country_code),
@@ -1055,9 +1058,12 @@ def detect_country(lat: float | None, lon: float | None) -> dict[str, str]:
     return {"country": "", "countryCode": payload.get("country") or "", "method": "ip"}
 
 
+MAX_ROUTE_WAYPOINTS = 50
+
+
 def route_waypoints(value: Any) -> list[list[float]]:
-    if not isinstance(value, list) or not 2 <= len(value) <= 12:
-        raise ServiceError("A route needs between two and twelve waypoints.", 400)
+    if not isinstance(value, list) or not 2 <= len(value) <= MAX_ROUTE_WAYPOINTS:
+        raise ServiceError(f"A route needs between two and {MAX_ROUTE_WAYPOINTS} waypoints.", 400)
     points: list[list[float]] = []
     for item in value:
         if isinstance(item, dict):
@@ -1216,7 +1222,198 @@ def osrm_route(profile: str, waypoints: list[list[float]]) -> dict[str, Any] | N
         raise ServiceError("The OSM router returned an invalid route summary.", 503) from None
     if not math.isfinite(distance) or not math.isfinite(duration) or distance < 0 or duration < 0:
         raise ServiceError("The OSM router returned an invalid route summary.", 503)
-    return {"geometry": geometry, "summary": {"distanceMeters": distance, "durationSeconds": duration, "approximateGeometry": False}}
+    return {"geometry": geometry, "summary": {"distanceMeters": distance, "durationSeconds": duration, "approximateGeometry": False, "algorithm": "osrm"}}
+
+
+DRIVABLE_HIGHWAYS = {"motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "service"}
+ROUTE_GRAPH_MAX_NODES = 40_000
+ROUTE_GRAPH_MAX_EDGES = 120_000
+ROUTE_SEARCH_MAX_EDGES = 50_000
+
+
+def route_distance_meters(first: list[float], second: list[float]) -> float:
+    latitude = math.radians((first[1] + second[1]) / 2)
+    x = math.radians(second[0] - first[0]) * math.cos(latitude)
+    y = math.radians(second[1] - first[1])
+    return EARTH_RADIUS * math.hypot(x, y)
+
+
+def route_graph_bbox(waypoints: list[list[float]]) -> list[float] | None:
+    west, south = min(point[0] for point in waypoints), min(point[1] for point in waypoints)
+    east, north = max(point[0] for point in waypoints), max(point[1] for point in waypoints)
+    direct_distance = max(route_distance_meters(first, second) for first in waypoints for second in waypoints)
+    # Keep the graph local enough for a bounded Overpass query while leaving room
+    # for a sensible detour around barriers and one-way streets.
+    if direct_distance > 30_000:
+        return None
+    latitude_padding = min(0.08, max(0.01, (north - south) * 0.25 + 0.012))
+    longitude_padding = latitude_padding / max(0.2, abs(math.cos(math.radians((south + north) / 2))))
+    return [west - longitude_padding, south - latitude_padding, east + longitude_padding, north + latitude_padding]
+
+
+def fetch_osm_driving_ways(bbox: list[float]) -> list[dict[str, Any]]:
+    west, south, east, north = bbox
+    cache_key = f"roads-v1:{west:.4f}:{south:.4f}:{east:.4f}:{north:.4f}"
+    cached = CACHE.get_raw_tile("routing-osm", cache_key)
+    if cached and cached["fresh"]:
+        return cached["features"]
+
+    def remaining_cooldown() -> int:
+        with OVERPASS_UNAVAILABLE_LOCK:
+            return max(0, math.ceil(OVERPASS_UNAVAILABLE_UNTIL - time.monotonic()))
+
+    def pause(seconds: int) -> int:
+        global OVERPASS_UNAVAILABLE_UNTIL
+        with OVERPASS_UNAVAILABLE_LOCK:
+            OVERPASS_UNAVAILABLE_UNTIL = max(OVERPASS_UNAVAILABLE_UNTIL, time.monotonic() + seconds)
+            return max(1, math.ceil(OVERPASS_UNAVAILABLE_UNTIL - time.monotonic()))
+
+    cooldown = remaining_cooldown()
+    if cooldown:
+        raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, cooldown)
+
+    def task() -> list[dict[str, Any]]:
+        query = f'''[out:json][timeout:30][maxsize:67108864];
+way["highway"]({south},{west},{north},{east});
+out tags geom;'''
+        body = urllib.parse.urlencode({"data": query}).encode("utf-8")
+        try:
+            payload = fetch_json(CONFIG.overpass_endpoint, {"User-Agent": CONFIG.user_agent, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "Accept": "application/json"}, 45, "POST", body)
+        except ServiceError as error:
+            if not error.retry_after:
+                raise
+            raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, pause(max(error.retry_after, CONFIG.overpass_backoff_seconds))) from error
+        return [element for element in payload.get("elements", []) if isinstance(element, dict) and element.get("type") == "way"]
+
+    ways = OVERPASS_QUEUE.run(task)
+    CACHE.put_raw_tile("routing-osm", cache_key, ways, {"featureCount": len(ways)})
+    return ways
+
+
+def osm_driving_graph(ways: list[dict[str, Any]]) -> tuple[list[list[float]], list[list[tuple[int, float]]]]:
+    positions: list[list[float]] = []
+    nodes: dict[tuple[int, int], int] = {}
+    graph: list[list[tuple[int, float]]] = []
+
+    def node_id(position: Any) -> int | None:
+        if not isinstance(position, dict):
+            return None
+        point = valid_coordinate(position.get("lon"), position.get("lat"))
+        if not point:
+            return None
+        key = (round(point[0] * 10_000_000), round(point[1] * 10_000_000))
+        if key not in nodes:
+            if len(positions) >= ROUTE_GRAPH_MAX_NODES:
+                raise ServiceError("The local OSM road graph is too large to animate. Choose closer pins.", 413)
+            nodes[key] = len(positions)
+            positions.append([point[0], point[1]])
+            graph.append([])
+        return nodes[key]
+
+    edge_count = 0
+    for way in ways:
+        tags = way.get("tags") or {}
+        highway = str(tags.get("highway") or "")
+        if highway not in DRIVABLE_HIGHWAYS or str(tags.get("access") or "").lower() in {"no", "private"}:
+            continue
+        if str(tags.get("motor_vehicle") or "").lower() in {"no", "private"} or str(tags.get("motorcar") or "").lower() in {"no", "private"}:
+            continue
+        identifiers = [node_id(position) for position in way.get("geometry") or []]
+        identifiers = [identifier for identifier in identifiers if identifier is not None]
+        if len(identifiers) < 2:
+            continue
+        oneway = str(tags.get("oneway") or "").lower()
+        forward_only = oneway in {"yes", "true", "1"} or str(tags.get("junction") or "").lower() == "roundabout"
+        reverse_only = oneway == "-1"
+        for first, second in zip(identifiers, identifiers[1:]):
+            if first == second:
+                continue
+            distance = route_distance_meters(positions[first], positions[second])
+            if distance <= 0:
+                continue
+            if reverse_only:
+                graph[second].append((first, distance)); edge_count += 1
+            elif forward_only:
+                graph[first].append((second, distance)); edge_count += 1
+            else:
+                graph[first].append((second, distance)); graph[second].append((first, distance)); edge_count += 2
+            if edge_count > ROUTE_GRAPH_MAX_EDGES:
+                raise ServiceError("The local OSM road graph is too detailed to animate. Choose closer pins.", 413)
+    return positions, graph
+
+
+def closest_graph_node(point: list[float], positions: list[list[float]]) -> int | None:
+    if not positions:
+        return None
+    index = min(range(len(positions)), key=lambda candidate: route_distance_meters(point, positions[candidate]))
+    return index if route_distance_meters(point, positions[index]) <= 250 else None
+
+
+def dijkstra_search(positions: list[list[float]], graph: list[list[tuple[int, float]]], start: int, destination: int) -> tuple[list[list[float]], list[list[list[float]]], float] | None:
+    distances = [math.inf] * len(positions)
+    previous = [-1] * len(positions)
+    distances[start] = 0.0
+    queue: list[tuple[float, int]] = [(0.0, start)]
+    explored: list[list[list[float]]] = []
+    while queue:
+        distance, node = heapq.heappop(queue)
+        if distance != distances[node]:
+            continue
+        if node == destination:
+            path = []
+            while node >= 0:
+                path.append(positions[node])
+                node = previous[node]
+            return list(reversed(path)), explored, distance
+        for neighbor, edge_distance in graph[node]:
+            explored.append([positions[node], positions[neighbor]])
+            if len(explored) > ROUTE_SEARCH_MAX_EDGES:
+                raise ServiceError("The OSM search examined too many roads to animate. Choose closer pins.", 413)
+            candidate_distance = distance + edge_distance
+            if candidate_distance < distances[neighbor]:
+                distances[neighbor] = candidate_distance
+                previous[neighbor] = node
+                heapq.heappush(queue, (candidate_distance, neighbor))
+    return None
+
+
+def dijkstra_osm_route(waypoints: list[list[float]]) -> dict[str, Any] | None:
+    bbox = route_graph_bbox(waypoints)
+    if not bbox:
+        return None
+    positions, graph = osm_driving_graph(fetch_osm_driving_ways(bbox))
+    if not positions:
+        return None
+    route_coordinates: list[list[float]] = []
+    explored_edges: list[list[list[float]]] = []
+    total_distance = 0.0
+    for origin, destination in zip(waypoints, waypoints[1:]):
+        start = closest_graph_node(origin, positions)
+        end = closest_graph_node(destination, positions)
+        if start is None or end is None:
+            return None
+        result = dijkstra_search(positions, graph, start, end)
+        if not result:
+            return None
+        path, explored, distance = result
+        for point in [origin, *path, destination]:
+            if not route_coordinates or route_coordinates[-1] != point:
+                route_coordinates.append(point)
+        explored_edges.extend(explored)
+        if len(explored_edges) > ROUTE_SEARCH_MAX_EDGES:
+            raise ServiceError("The OSM search examined too many roads to animate. Choose closer pins.", 413)
+        total_distance += distance + route_distance_meters(origin, positions[start]) + route_distance_meters(positions[end], destination)
+    return {
+        "geometry": {"type": "LineString", "coordinates": route_coordinates},
+        "summary": {
+            "distanceMeters": total_distance,
+            "durationSeconds": total_distance / 13.89,
+            "approximateGeometry": False,
+            "approximateDuration": True,
+            "algorithm": "dijkstra",
+            "search": {"exploredEdges": explored_edges},
+        },
+    }
 
 
 def serp_directions_fallback(waypoints: list[list[float]]) -> dict[str, Any]:
@@ -1248,11 +1445,20 @@ def serp_directions_fallback(waypoints: list[list[float]]) -> dict[str, Any]:
 
 
 def get_route(waypoints: list[list[float]], profile: str) -> dict[str, Any]:
-    request = {"provider": "public-osrm", "profile": profile, "waypoints": [[round(lon, 6), round(lat, 6)] for lon, lat in waypoints]}
+    if profile != CONFIG.osm_router_profile or profile != "driving":
+        raise ServiceError("Only the configured driving profile is available from the local OSM route search.", 400)
+    request = {"provider": "osm-dijkstra-v1", "profile": profile, "waypoints": [[round(lon, 6), round(lat, 6)] for lon, lat in waypoints]}
     key = request_hash(request)
     stored = CACHE.get_route(key)
     if stored:
         return stored
+    try:
+        result = dijkstra_osm_route(waypoints)
+    except ServiceError as error:
+        print(f"[routing] Local OSM graph search failed: {error}")
+        result = None
+    if result is not None:
+        return CACHE.put_route(key, profile, waypoints, result["geometry"], result["summary"], provider="openstreetmap-dijkstra", source_version="overpass-driving-ways-v1")
     result = osrm_route(profile, waypoints)
     if result is not None:
         return CACHE.put_route(key, profile, waypoints, result["geometry"], result["summary"])
@@ -2366,7 +2572,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         try:
             if parsed.path == "/api/health":
-                self.send_json(200, {"ok": True, "cache": "sqlite", "tileZoom": TILE_ZOOM, "overtureRelease": CONFIG.overture_release, "openBuildingMap": bool(CONFIG.openbuildingmap_api_url), "routing": {"provider": "public-osrm", "profile": CONFIG.osm_router_profile, "serpFallbackEnabled": CONFIG.enable_serp_directions_fallback}})
+                self.send_json(200, {"ok": True, "cache": "sqlite", "tileZoom": TILE_ZOOM, "overtureRelease": CONFIG.overture_release, "openBuildingMap": bool(CONFIG.openbuildingmap_api_url), "routing": {"provider": "openstreetmap-dijkstra", "profile": CONFIG.osm_router_profile, "osrmFallback": True, "serpFallbackEnabled": CONFIG.enable_serp_directions_fallback}})
                 return
             if parsed.path == "/api/suggest":
                 value = query.get("q", [""])[0].strip()[:160]
@@ -2400,8 +2606,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                 lon = parse_number(query.get("lon", [None])[0])
                 if (lat is None) != (lon is None) or (lat is not None and not valid_coordinate(lon, lat)):
                     raise ServiceError("Place context coordinates must include a valid longitude and latitude.", 400)
-                results, stored = lookup_places(value, query.get("countryCode", [""])[0], lat, lon)
-                self.send_json(200, {"results": results, "stored": stored})
+                provider = query.get("provider", [""])[0].strip().lower()
+                if provider not in {"", "serp"}:
+                    raise ServiceError("Unsupported place search provider.", 400)
+                results, stored = lookup_places(value, query.get("countryCode", [""])[0], lat, lon, provider)
+                self.send_json(200, {"results": results, "stored": stored, "provider": provider or "osm-first"})
+                return
+            if parsed.path == "/api/places/suggest":
+                value = query.get("q", [""])[0].strip()[:160]
+                self.send_json(200, {"results": local_place_suggestions(value)})
                 return
             if parsed.path == "/api/places/stored":
                 west = parse_number(query.get("west", [None])[0])
@@ -2497,7 +2710,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 state = body.get("state")
                 if not isinstance(state, dict):
                     raise ServiceError("Workspace state must be a JSON object.", 400)
-                safe_state = {key: value for key, value in state.items() if key in {"originPinId", "destinationPinId", "routeId", "context"}}
+                safe_state = {key: value for key, value in state.items() if key in {"routeId", "context"}}
+                route_pin_ids = state.get("routePinIds")
+                if isinstance(route_pin_ids, list):
+                    safe_state["routePinIds"] = [pin_id for pin_id in route_pin_ids[:MAX_ROUTE_WAYPOINTS] if isinstance(pin_id, str)]
                 CACHE.put_workspace_state(safe_state)
                 self.send_json(200, {"state": CACHE.get_workspace_state()})
                 return

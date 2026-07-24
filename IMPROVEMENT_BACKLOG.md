@@ -101,7 +101,7 @@ values.
 
 | ID | Status | Finding | Evidence and locations | Target state |
 | --- | --- | --- | --- | --- |
-| AX-01 | Not started | Make the geography workspace usable on short mobile screens. | The app shell cannot scroll while the expanded panel and map compete for viewport height. `UI/styles.css:29-36`, `UI/styles.css:239-306` | Use a collapsible drawer/bottom sheet with safe maximum height and independently scrollable content. |
+| AX-01 | Done | Make the geography workspace usable on short mobile screens. | The geography workspace is now a collapsed-by-default floating command dock. Its expanded content has a viewport-bounded independent scroll region, so the map remains the primary canvas on desktop and mobile. `UI/index.html:26-37`, `UI/app.js:339-370`, `UI/styles.css:55-71`, `UI/styles.css:240-283`, `UI/styles.css:712-746` | Use a collapsible drawer/bottom sheet with safe maximum height and independently scrollable content. |
 | AX-02 | Not started | Increase touch target sizes. | Several geography and pin controls are 22-30px high. `UI/styles.css:271-285`, `UI/styles.css:393-397` | Use practical 40-44px target sizes for essential and destructive actions. |
 | AX-03 | Not started | Restore visible keyboard focus. | Outlines are removed on map canvas and inputs; many controls lack focus-visible styles. `UI/styles.css:89-90`, `UI/styles.css:121-128`, `UI/styles.css:466-486` | Apply high-contrast consistent focus indicators to every interactive element. |
 | AX-04 | Not started | Provide a keyboard/non-pointer feature-inspection path. | Building and POI details require pointer layer interaction. `UI/app.js:348-358`, `UI/app.js:577-639` | Add a keyboard-accessible selected-feature inspector or nearby-feature list. |

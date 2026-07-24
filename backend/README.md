@@ -8,7 +8,7 @@ Express/Mongo service while retaining its user-visible behavior:
 - OpenBuildingMap mirror ingestion for authoritative local building footprints, with Overpass and Overture/DuckDB fallback.
 - Footprint-, type-, density-, and neighborhood-aware building-height estimation.
 - Map-ready GeoJSON tile streaming with building geometry plus categorized public-place markers.
-- OSM-first place lookup, durable local pins/areas/routes, and development-only public OSRM driving routes.
+- OSM-first place lookup, durable local pins/areas/routes, and animated local Dijkstra driving routes over OSM road data.
 
 ## Run
 
@@ -49,12 +49,13 @@ or user accounts.
 | `GET /api/country?lat=&lon=` | Browser coordinate or IP-country lookup. |
 | `GET /api/context?lat=&lon=` | Resolve coarse geographic context with its source. |
 | `GET /api/places?q=&countryCode=&lat=&lon=` | OSM-first place lookup, with local storage reuse and Serp fallback only when OSM has no usable result. |
+| `GET /api/places/suggest?q=` | Local-only suggestions from previously stored places; never calls an external provider. |
 | `GET /api/places/stored?west=&south=&east=&north=` | Canonical locally stored places in the visible map bounds. |
 | `GET /api/workspace` | Current single-machine pins, areas, and route selection state. |
 | `POST /api/pins` | Add a durable local workspace pin. |
 | `POST /api/areas` | Store a validated local GeoJSON polygon. |
-| `POST /api/routes` | Calculate or retrieve an OSM driving route. |
-| `GET /api/routes/{routeId}` | Retrieve a stored OSM route for workspace restoration. |
+| `POST /api/routes` | Calculate or retrieve a local OSM-road shortest driving route. |
+| `GET /api/routes/{routeId}` | Retrieve a stored OSM-road route for workspace restoration. |
 | `DELETE /api/pins/{pinId}` / `DELETE /api/areas/{areaId}` | Remove a workspace addition. |
 | `DELETE /api/workspace` | Clear pins, areas, and active workspace state without deleting stored place or route records. |
 | `GET /api/tiles/{z}/{x}/{y}.geojson?region=&lat=&lon=` | Progressive city-building tile. |
@@ -105,6 +106,10 @@ credential-redacted response body. Matching SerpApi requests are served from
 that local record before an API key is required or a network call is made.
 Each network-fetched SerpApi response is also archived as a credential-redacted
 JSON file under `backend/logs/serpapi/`; the directory is ignored by Git.
+Route-stop input uses `GET /api/places/suggest` for local-only suggestions. A
+client can intentionally request `GET /api/places?...&provider=serp` to bypass
+OSM-first lookup; that mode returns every coordinate-bearing Serp
+`place_results` and `local_results` entry.
 The database also stores normalized place data, pins, areas, route geometry,
 and OSM-only route failures through additive migrations.
 
@@ -115,10 +120,21 @@ same normalized name or a conservative locality-style extension such as
 `Pan Oasis` and `Pan Oasis Society`. Differently named businesses at the same
 mall remain separate places.
 
-`OSM_ROUTER_BASE_URL` defaults to the public OSRM demonstration service for
-internal development. It has no production availability guarantee or pinned
-graph version; production must configure a managed or self-hosted compatible
-router. Only an explicit OSRM `NoRoute` can enter the optional Serp directions
-fallback. That fallback is disabled by default; its complete SerpApi response
-and the explicitly approximate endpoint connector are retained locally, but
-they do not contribute data to OSM-review records.
+Route plans contain two to 50 ordered waypoints. The backend fetches one
+bounded, cached graph of OSM ways tagged as drivable, then runs Dijkstra's
+algorithm locally for each consecutive leg. It traces every directed road
+segment examined before each leg destination is settled, then stores both that
+trace and the resulting distance-shortest path for replay. The graph honors
+one-way, `access`, `motor_vehicle`, and `motorcar` restrictions, but does not
+model turn restrictions, live traffic, or road speeds; its displayed duration
+is an estimate. Requests are limited to nearby pins so the public Overpass
+query and the animated graph remain bounded.
+
+`OSM_ROUTER_BASE_URL` defaults to the public OSRM demonstration service as a
+fallback when the OSM graph cannot be fetched or does not connect the pins. It
+has no production availability guarantee or pinned graph version; production
+must configure a managed or self-hosted compatible router. Only an explicit
+OSRM `NoRoute` can enter the optional Serp directions fallback. That fallback
+is disabled by default; its complete SerpApi response and the explicitly
+approximate endpoint connector are retained locally, but they do not
+contribute data to OSM-review records.
