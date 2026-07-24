@@ -54,5 +54,7 @@ The geography panel keeps city search separate from place lookup. It supports
 OSM-first place search, explicit browser-location use, map-click pins,
 geodesic pin-area measurement, and driving-route highlights. Pins, areas, and
 OSM routes are stored by the local backend for this single-machine workspace.
+Canonical places previously found through OSM or SerpApi are loaded as a
+separate, clickable map overlay for the current viewport.
 `Clear additions` removes the visible workspace objects while retaining
 provider place records and reusable OSM route records.

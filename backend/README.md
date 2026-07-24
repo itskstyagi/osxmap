@@ -19,7 +19,9 @@ python server.py
 
 The API listens on `http://127.0.0.1:8787` by default. It creates its SQLite
 cache at `backend/data/monument.db`; no database server or package installation
-is required. Set `HOST=0.0.0.0` only when the API must be reachable remotely.
+is required. Monument is deliberately local-only: startup rejects non-loopback
+`HOST` values because this single-machine workspace has no accounts or tenant
+isolation.
 
 The server loads the root `.env` first for a direct migration from the original
 project, then `backend/.env`, whose values override the root file. Explicit
@@ -27,15 +29,15 @@ shell environment variables always take precedence over both files.
 
 ## UI Deployment
 
-The static UI is in `../UI` and may be hosted anywhere. Configure the API
-origin with a query parameter, for example:
+The static UI is in `../UI` and should be served locally alongside the local
+API. Configure the API origin with a loopback query parameter when needed:
 
 ```text
-https://ui.example.com/?api=https://api.example.com
+http://127.0.0.1:8080/?api=http://127.0.0.1:8787
 ```
 
-Or set `window.MONUMENT_API_URL` before loading `UI/app.js`. Set
-`ALLOWED_ORIGINS` to the UI origin or origins before exposing the backend.
+Or set `window.MONUMENT_API_URL` before loading `UI/app.js`. Do not expose this
+backend on a network: it intentionally has no authentication or user accounts.
 
 ## API
 
@@ -47,6 +49,7 @@ Or set `window.MONUMENT_API_URL` before loading `UI/app.js`. Set
 | `GET /api/country?lat=&lon=` | Browser coordinate or IP-country lookup. |
 | `GET /api/context?lat=&lon=` | Resolve coarse geographic context with its source. |
 | `GET /api/places?q=&countryCode=&lat=&lon=` | OSM-first place lookup, with local storage reuse and Serp fallback only when OSM has no usable result. |
+| `GET /api/places/stored?west=&south=&east=&north=` | Canonical locally stored places in the visible map bounds. |
 | `GET /api/workspace` | Current single-machine pins, areas, and route selection state. |
 | `POST /api/pins` | Add a durable local workspace pin. |
 | `POST /api/areas` | Store a validated local GeoJSON polygon. |
@@ -69,9 +72,6 @@ source. The backend discovers its downloaded GeoPackages through `/files`,
 queries the matching quadkey on demand, and converts the returned WKT polygons
 to GeoJSON. Mirror tiles have a separate seven-day cache by default; adjust it
 with `OPENBUILDINGMAP_TILE_TTL_DAYS`.
-Every OpenBuildingMap `/files` and `/query` call writes its complete response to
-a separate JSON file in `backend/logs/openbuildingmap/`. The directory is
-ignored by Git and can grow quickly for large query responses.
 `height` values in the `HBET:min-max` form are treated as an estimated storey
 range, not as a measured height. The renderer uses the range midpoint unless
 nearby compatible OpenBuildingMap buildings from the same community, or a
@@ -103,8 +103,17 @@ before querying Nominatim/OSM. Only an empty OSM result consults SerpApi, and
 is retained in SQLite with its credential-redacted request descriptor and full
 credential-redacted response body. Matching SerpApi requests are served from
 that local record before an API key is required or a network call is made.
+Each network-fetched SerpApi response is also archived as a credential-redacted
+JSON file under `backend/logs/serpapi/`; the directory is ignored by Git.
 The database also stores normalized place data, pins, areas, route geometry,
 and OSM-only route failures through additive migrations.
+
+Places are deduplicated as they enter the local store. The first confirmed
+record becomes the canonical place and alternate provider IDs map to it through
+local aliases. A merge requires coordinates within 35 metres and either the
+same normalized name or a conservative locality-style extension such as
+`Pan Oasis` and `Pan Oasis Society`. Differently named businesses at the same
+mall remain separate places.
 
 `OSM_ROUTER_BASE_URL` defaults to the public OSRM demonstration service for
 internal development. It has no production availability guarantee or pinned

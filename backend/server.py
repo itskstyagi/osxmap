@@ -7,13 +7,16 @@ without a Node runtime, MongoDB driver, or Python package installation.
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
+import ipaddress
 import json
 import math
 import os
 import re
 import signal
 import sqlite3
+import struct
 import subprocess
 import threading
 import time
@@ -39,7 +42,7 @@ DEFAULT_HEIGHT = 9.0
 NEIGHBOR_RADIUS = 150.0
 MAX_TILE_PAYLOAD = 14_000_000
 OPENBUILDINGMAP_CATALOG_TTL_SECONDS = 600
-OPENBUILDINGMAP_LOG_DIR = BACKEND_DIR / "logs" / "openbuildingmap"
+SERPAPI_ARCHIVE_DIR = BACKEND_DIR / "logs" / "serpapi"
 PROCESS_ENV_KEYS = set(os.environ)
 
 
@@ -68,6 +71,16 @@ def root_path(value: str, default: Path) -> Path:
     return path if path.is_absolute() else (ROOT_DIR / path).resolve()
 
 
+def is_loopback_host(value: str) -> bool:
+    host = value.strip().lower().strip("[]")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 @dataclass(frozen=True)
 class Config:
     host: str = os.getenv("HOST", "127.0.0.1")
@@ -94,9 +107,11 @@ class Config:
     osm_router_profile: str = os.getenv("OSM_ROUTER_PROFILE", "driving")
     osm_router_timeout_seconds: int = max(1, int(os.getenv("OSM_ROUTER_TIMEOUT_SECONDS", "12")))
     enable_serp_directions_fallback: bool = os.getenv("ENABLE_SERP_DIRECTIONS_FALLBACK", "0") == "1"
+    max_concurrent_requests: int = max(1, int(os.getenv("MAX_CONCURRENT_REQUESTS", "8")))
 
 
 CONFIG = Config()
+REQUEST_GATE = threading.BoundedSemaphore(CONFIG.max_concurrent_requests)
 
 
 class ServiceError(Exception):
@@ -370,15 +385,32 @@ class Cache:
         return json.loads(row["response_json"]) if row else None
 
     def put_provider_response(self, provider: str, request_key: str, request: dict[str, Any], response: Any) -> None:
+        response_id = f"provider-response-{uuid.uuid4().hex}"
+        received_at = int(time.time())
+        safe_request = redact_provider_payload(request)
+        safe_response = redact_provider_payload(response)
         with self.lock, self.connection:
             self.connection.execute(
                 "INSERT INTO provider_responses(response_id, provider, request_key, request_json, response_json, received_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
-                    f"provider-response-{uuid.uuid4().hex}", provider, request_key,
-                    json.dumps(redact_provider_payload(request), separators=(",", ":")),
-                    json.dumps(redact_provider_payload(response), separators=(",", ":")), int(time.time()),
+                    response_id, provider, request_key,
+                    json.dumps(safe_request, separators=(",", ":")),
+                    json.dumps(safe_response, separators=(",", ":")), received_at,
                 ),
+            )
+        if provider == "serpapi":
+            archive_serpapi_response(response_id, request_key, safe_request, safe_response, received_at)
+
+    def archive_serpapi_responses(self) -> None:
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT response_id, request_key, request_json, response_json, received_at FROM provider_responses WHERE provider = 'serpapi'"
+            ).fetchall()
+        for row in rows:
+            archive_serpapi_response(
+                row["response_id"], row["request_key"], json.loads(row["request_json"]),
+                json.loads(row["response_json"]), row["received_at"],
             )
 
     @staticmethod
@@ -510,16 +542,36 @@ class Cache:
                     canonical_places.append(place)
         return canonical_places
 
-    def search_places(self, normalized_query: str, limit: int = 8) -> list[dict[str, Any]]:
+    def search_places(self, normalized_query: str, limit: int | None = None) -> list[dict[str, Any]]:
         """Return stored places whose normalized name contains the query substring."""
         pattern = f"%{normalized_query}%"
+        statement = (
+            "SELECT place_id, provider, provider_id, name, address, country_code, latitude, longitude, bbox_json, provider_payload_json "
+            "FROM places WHERE normalized_name LIKE ? ORDER BY updated_at DESC, place_id"
+        )
+        parameters: list[Any] = [pattern]
+        if limit is not None:
+            statement += " LIMIT ?"
+            parameters.append(limit)
         with self.lock:
-            rows = self.connection.execute(
-                "SELECT place_id, provider, provider_id, name, address, country_code, latitude, longitude, bbox_json "
-                "FROM places WHERE normalized_name LIKE ? ORDER BY updated_at DESC, place_id LIMIT ?",
-                (pattern, limit),
-            ).fetchall()
+            rows = self.connection.execute(statement, parameters).fetchall()
         return [self._place_from_row(row) for row in rows]
+
+    def list_places_in_bounds(self, west: float, south: float, east: float, north: float, limit: int = 1_000) -> tuple[list[dict[str, Any]], bool]:
+        base = (
+            "SELECT place_id, provider, provider_id, name, address, country_code, latitude, longitude, bbox_json, provider_payload_json "
+            "FROM places WHERE latitude BETWEEN ? AND ? AND "
+        )
+        parameters: list[Any] = [south, north]
+        if west <= east:
+            statement = base + "longitude BETWEEN ? AND ? ORDER BY updated_at DESC, place_id LIMIT ?"
+            parameters.extend([west, east, limit + 1])
+        else:
+            statement = base + "(longitude >= ? OR longitude <= ?) ORDER BY updated_at DESC, place_id LIMIT ?"
+            parameters.extend([west, east, limit + 1])
+        with self.lock:
+            rows = self.connection.execute(statement, parameters).fetchall()
+        return [self._place_from_row(row) for row in rows[:limit]], len(rows) > limit
 
     def list_pins(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -540,7 +592,24 @@ class Cache:
 
     def delete_pin(self, pin_id: str) -> bool:
         with self.lock, self.connection:
-            return self.connection.execute("DELETE FROM workspace_pins WHERE pin_id = ?", (pin_id,)).rowcount > 0
+            deleted = self.connection.execute("DELETE FROM workspace_pins WHERE pin_id = ?", (pin_id,)).rowcount > 0
+            if not deleted:
+                return False
+            rows = self.connection.execute("SELECT area_id, summary_json FROM workspace_areas").fetchall()
+            for row in rows:
+                try:
+                    summary = json.loads(row["summary_json"])
+                except (TypeError, json.JSONDecodeError):
+                    summary = {}
+                pin_ids = summary.get("pinIds") if isinstance(summary, dict) else []
+                if isinstance(pin_ids, list) and pin_id in pin_ids:
+                    summary["invalid"] = True
+                    summary["invalidReason"] = "A referenced pin was removed."
+                    self.connection.execute(
+                        "UPDATE workspace_areas SET summary_json = ? WHERE area_id = ?",
+                        (json.dumps(summary, separators=(",", ":")), row["area_id"]),
+                    )
+            return True
 
     def list_areas(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -556,6 +625,17 @@ class Cache:
                 (area_id, label[:160], json.dumps(geometry, separators=(",", ":")), json.dumps(summary, separators=(",", ":")), created_at),
             )
         return {"id": area_id, "label": label[:160], "geometry": geometry, "summary": summary, "createdAt": created_at}
+
+    def update_area(self, area_id: str, label: str, geometry: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any] | None:
+        with self.lock, self.connection:
+            row = self.connection.execute("SELECT created_at FROM workspace_areas WHERE area_id = ?", (area_id,)).fetchone()
+            if not row:
+                return None
+            self.connection.execute(
+                "UPDATE workspace_areas SET label = ?, geometry_json = ?, summary_json = ? WHERE area_id = ?",
+                (label[:160], json.dumps(geometry, separators=(",", ":")), json.dumps(summary, separators=(",", ":")), area_id),
+            )
+        return {"id": area_id, "label": label[:160], "geometry": geometry, "summary": summary, "createdAt": row["created_at"]}
 
     def delete_area(self, area_id: str) -> bool:
         with self.lock, self.connection:
@@ -679,6 +759,30 @@ def redact_provider_payload(value: Any) -> Any:
             continue
         result[key] = redact_provider_payload(item)
     return result
+
+
+def archive_serpapi_response(response_id: str, request_key: str, request: Any, response: Any, received_at: int) -> None:
+    """Write an inspectable local archive for each network-fetched SerpApi response."""
+    path = SERPAPI_ARCHIVE_DIR / f"{response_id}.json"
+    if path.exists():
+        return
+    temporary = path.with_suffix(".tmp")
+    record = {
+        "responseId": response_id,
+        "requestKey": request_key,
+        "receivedAt": datetime.fromtimestamp(received_at, timezone.utc).isoformat(),
+        "request": request,
+        "response": response,
+    }
+    try:
+        SERPAPI_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(path)
+    except OSError as error:
+        print(f"[serpapi] Could not archive response {response_id}: {error}")
+
+
+CACHE.archive_serpapi_responses()
 
 
 def fetch_serp_response(params: dict[str, Any]) -> Any:
@@ -900,7 +1004,6 @@ def search_serp_places(query: str, lat: float | None, lon: float | None, country
             if place and place["id"] not in seen:
                 seen.add(place["id"])
                 places.append(place)
-        places = places[:8]
         return CACHE.put_places(places)
 
     return SERP_PLACE_QUEUE.run(task)
@@ -990,10 +1093,80 @@ def valid_linestring(geometry: Any) -> dict[str, Any] | None:
     return {"type": "LineString", "coordinates": coordinates} if len(coordinates) >= 2 else None
 
 
+MAX_AREA_RINGS = 128
+MAX_AREA_VERTICES = 10_000
+
+
+def orientation(first: list[float], second: list[float], third: list[float]) -> float:
+    return (second[0] - first[0]) * (third[1] - first[1]) - (second[1] - first[1]) * (third[0] - first[0])
+
+
+def point_on_segment(point: list[float], first: list[float], second: list[float]) -> bool:
+    return abs(orientation(first, second, point)) < 1e-12 and min(first[0], second[0]) <= point[0] <= max(first[0], second[0]) and min(first[1], second[1]) <= point[1] <= max(first[1], second[1])
+
+
+def segments_intersect(first: list[float], second: list[float], third: list[float], fourth: list[float]) -> bool:
+    one, two = orientation(first, second, third), orientation(first, second, fourth)
+    three, four = orientation(third, fourth, first), orientation(third, fourth, second)
+    if (one > 0) != (two > 0) and (three > 0) != (four > 0):
+        return True
+    return (abs(one) < 1e-12 and point_on_segment(third, first, second)) or (abs(two) < 1e-12 and point_on_segment(fourth, first, second)) or (abs(three) < 1e-12 and point_on_segment(first, third, fourth)) or (abs(four) < 1e-12 and point_on_segment(second, third, fourth))
+
+
+def ring_self_intersects(ring: list[list[float]]) -> bool:
+    segment_count = len(ring) - 1
+    for first in range(segment_count):
+        for second in range(first + 1, segment_count):
+            if abs(first - second) <= 1 or (first == 0 and second == segment_count - 1):
+                continue
+            if segments_intersect(ring[first], ring[first + 1], ring[second], ring[second + 1]):
+                return True
+    return False
+
+
+def point_in_ring(point: list[float], ring: list[list[float]]) -> bool:
+    inside = False
+    for first, second in zip(ring, ring[1:]):
+        if point_on_segment(point, first, second):
+            return False
+        if (first[1] > point[1]) != (second[1] > point[1]):
+            crossing_lon = (second[0] - first[0]) * (point[1] - first[1]) / (second[1] - first[1]) + first[0]
+            if point[0] < crossing_lon:
+                inside = not inside
+    return inside
+
+
+def rings_intersect(first_ring: list[list[float]], second_ring: list[list[float]]) -> bool:
+    return any(
+        segments_intersect(first, second, third, fourth)
+        for first, second in zip(first_ring, first_ring[1:])
+        for third, fourth in zip(second_ring, second_ring[1:])
+    )
+
+
+def ring_area_square_meters(ring: list[list[float]]) -> float:
+    total = 0.0
+    for first, second in zip(ring, ring[1:]):
+        delta_lon = math.radians(((second[0] - first[0] + 540) % 360) - 180)
+        total += delta_lon * (2 + math.sin(math.radians(first[1])) + math.sin(math.radians(second[1])))
+    return abs(total) * EARTH_RADIUS ** 2 / 2
+
+
+def area_summary(geometry: dict[str, Any], submitted: Any) -> dict[str, Any]:
+    rings = geometry["coordinates"]
+    area = max(0.0, ring_area_square_meters(rings[0]) - sum(ring_area_square_meters(ring) for ring in rings[1:]))
+    requested_pin_ids = submitted.get("pinIds") if isinstance(submitted, dict) else []
+    pin_ids = [value for value in requested_pin_ids if isinstance(value, str)][:MAX_AREA_VERTICES] if isinstance(requested_pin_ids, list) else []
+    return {"areaSquareMeters": area, "pinIds": pin_ids}
+
+
 def valid_polygon(geometry: Any) -> dict[str, Any] | None:
     if not isinstance(geometry, dict) or geometry.get("type") != "Polygon" or not isinstance(geometry.get("coordinates"), list):
         return None
+    if not 1 <= len(geometry["coordinates"]) <= MAX_AREA_RINGS:
+        return None
     rings: list[list[list[float]]] = []
+    vertex_count = 0
     for ring in geometry["coordinates"]:
         if not isinstance(ring, list) or len(ring) < 4:
             return None
@@ -1007,8 +1180,19 @@ def valid_polygon(geometry: Any) -> dict[str, Any] | None:
             points.append([point[0], point[1]])
         if points[0] != points[-1]:
             return None
+        vertex_count += len(points) - 1
+        if vertex_count > MAX_AREA_VERTICES or ring_self_intersects(points) or ring_area_square_meters(points) <= 0:
+            return None
         rings.append(points)
-    return {"type": "Polygon", "coordinates": rings} if rings else None
+    outer = rings[0]
+    holes = rings[1:]
+    for index, hole in enumerate(holes):
+        if not point_in_ring(hole[0], outer) or rings_intersect(outer, hole):
+            return None
+        for other in holes[:index]:
+            if point_in_ring(hole[0], other) or point_in_ring(other[0], hole) or rings_intersect(hole, other):
+                return None
+    return {"type": "Polygon", "coordinates": rings}
 
 
 def osrm_route(profile: str, waypoints: list[list[float]]) -> dict[str, Any] | None:
@@ -1420,6 +1604,141 @@ def wkt_geometry(value: Any) -> dict[str, Any] | None:
     return None
 
 
+MAX_WKB_RINGS = 10_000
+MAX_WKB_POINTS = 1_000_000
+
+
+def wkb_type(type_code: int) -> tuple[int, int] | None:
+    """Return a WKB base geometry type and coordinate dimension."""
+    dimension = 2
+    # EWKB flags are used by PostGIS and some GeoPackage exporters.
+    if type_code & 0x80000000:
+        dimension += 1
+    if type_code & 0x40000000:
+        dimension += 1
+    base = type_code & 0x0FFFFFFF
+    # ISO WKB represents Z/M dimensions by adding 1000/2000/3000.
+    if base >= 1000:
+        modifier, base = divmod(base, 1000)
+        if modifier == 1:
+            dimension = 3
+        elif modifier == 2:
+            dimension = 3
+        elif modifier == 3:
+            dimension = 4
+        else:
+            return None
+    return (base, dimension) if base in {3, 6} else None
+
+
+def read_wkb_geometry(data: bytes, offset: int = 0) -> tuple[dict[str, Any], int] | None:
+    """Read Polygon or MultiPolygon WKB without accepting unbounded counts."""
+    if offset + 5 > len(data) or data[offset] not in {0, 1}:
+        return None
+    byte_order = ">" if data[offset] == 0 else "<"
+    try:
+        type_code = struct.unpack_from(f"{byte_order}I", data, offset + 1)[0]
+    except struct.error:
+        return None
+    geometry_type = wkb_type(type_code)
+    if not geometry_type:
+        return None
+    base, dimension = geometry_type
+    cursor = offset + 5
+
+    def read_count() -> int | None:
+        nonlocal cursor
+        if cursor + 4 > len(data):
+            return None
+        try:
+            count = struct.unpack_from(f"{byte_order}I", data, cursor)[0]
+        except struct.error:
+            return None
+        cursor += 4
+        return count
+
+    def read_polygon() -> dict[str, Any] | None:
+        nonlocal cursor
+        ring_count = read_count()
+        if ring_count is None or ring_count > MAX_WKB_RINGS:
+            return None
+        rings: list[list[list[float]]] = []
+        total_points = 0
+        for _ in range(ring_count):
+            point_count = read_count()
+            if point_count is None or point_count < 3 or point_count > MAX_WKB_POINTS - total_points:
+                return None
+            byte_count = point_count * dimension * 8
+            if cursor + byte_count > len(data):
+                return None
+            ring: list[list[float]] = []
+            for _ in range(point_count):
+                try:
+                    values = struct.unpack_from(f"{byte_order}{dimension}d", data, cursor)
+                except struct.error:
+                    return None
+                cursor += dimension * 8
+                lon, lat = values[:2]
+                if not math.isfinite(lon) or not math.isfinite(lat):
+                    return None
+                ring.append([lon, lat])
+            total_points += point_count
+            if ring[0] != ring[-1]:
+                ring.append(ring[0])
+            rings.append(ring)
+        return {"type": "Polygon", "coordinates": rings} if rings else None
+
+    if base == 3:
+        polygon = read_polygon()
+        return (polygon, cursor) if polygon else None
+
+    polygon_count = read_count()
+    if polygon_count is None or polygon_count > MAX_WKB_RINGS:
+        return None
+    polygons: list[list[list[list[float]]]] = []
+    for _ in range(polygon_count):
+        child = read_wkb_geometry(data, cursor)
+        if not child or child[0].get("type") != "Polygon":
+            return None
+        polygon, cursor = child
+        polygons.append(polygon["coordinates"])
+    return ({"type": "MultiPolygon", "coordinates": polygons}, cursor) if polygons else None
+
+
+def binary_geometry(value: Any) -> dict[str, Any] | None:
+    """Decode hexadecimal WKB and GeoPackage binary geometry into GeoJSON."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.lower().startswith("0x"):
+        text = text[2:]
+    if len(text) % 2 or not re.fullmatch(r"[0-9a-fA-F]+", text):
+        return None
+    try:
+        data = bytes.fromhex(text)
+    except ValueError:
+        return None
+    offset = 0
+    if data.startswith(b"GP"):
+        if len(data) < 8 or data[2] != 0:
+            return None
+        flags = data[3]
+        envelope_code = (flags >> 1) & 0x07
+        envelope_sizes = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
+        if envelope_code not in envelope_sizes or flags & 0x10:
+            return None
+        offset = 8 + envelope_sizes[envelope_code]
+    result = read_wkb_geometry(data, offset)
+    if not result:
+        return None
+    geometry, end = result
+    return geometry if end == len(data) else None
+
+
+def encoded_geometry(value: Any) -> dict[str, Any] | None:
+    return wkt_geometry(value) or binary_geometry(value)
+
+
 def row_value(row: dict[str, Any], *names: str) -> Any:
     values = {str(key).lower(): value for key, value in row.items()}
     for name in names:
@@ -1429,10 +1748,10 @@ def row_value(row: dict[str, Any], *names: str) -> Any:
 
 
 def openbuildingmap_feature(row: dict[str, Any], filename: str) -> dict[str, Any] | None:
-    geometry = wkt_geometry(row_value(row, "geom", "geometry", "wkt", "geometry_wkt"))
+    geometry = encoded_geometry(row_value(row, "geom", "geometry", "wkt", "geometry_wkt"))
     if not geometry:
         for value in row.values():
-            geometry = wkt_geometry(value)
+            geometry = encoded_geometry(value)
             if geometry:
                 break
     if not geometry:
@@ -1460,37 +1779,6 @@ def openbuildingmap_feature(row: dict[str, Any], filename: str) -> dict[str, Any
     }
 
 
-def log_openbuildingmap_result(operation: str, url: str, result: Any) -> None:
-    timestamp = datetime.now(timezone.utc)
-    filename = f"{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}-{operation}-{time.time_ns()}.json"
-    path = OPENBUILDINGMAP_LOG_DIR / filename
-    record = {
-        "fetchedAt": timestamp.isoformat(),
-        "operation": operation,
-        "url": url,
-        "result": result,
-    }
-    try:
-        OPENBUILDINGMAP_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"[openbuildingmap] Saved {operation} result to {path}")
-    except (OSError, TypeError) as error:
-        print(f"[openbuildingmap] Could not save {operation} result: {error}")
-
-
-def fetch_openbuildingmap_json(operation: str, url: str, timeout: float) -> Any:
-    try:
-        payload = fetch_json(url, {"Accept": "application/json"}, timeout)
-    except ServiceError as error:
-        log_openbuildingmap_result(operation, url, {"error": str(error), "status": error.status, "retryAfter": error.retry_after})
-        raise
-    except Exception as error:
-        log_openbuildingmap_result(operation, url, {"error": str(error), "type": type(error).__name__})
-        raise
-    log_openbuildingmap_result(operation, url, payload)
-    return payload
-
-
 def openbuildingmap_files() -> list[dict[str, str]]:
     if not CONFIG.openbuildingmap_api_url:
         return []
@@ -1499,7 +1787,7 @@ def openbuildingmap_files() -> list[dict[str, str]]:
             return OPENBUILDINGMAP_CATALOG["files"]
 
         def task() -> list[dict[str, str]]:
-            payload = fetch_openbuildingmap_json("files", f"{CONFIG.openbuildingmap_api_url}/files", 100)
+            payload = fetch_json(f"{CONFIG.openbuildingmap_api_url}/files", {"Accept": "application/json"}, 100)
             files = []
             for item in payload.get("files", []):
                 filename = str(item.get("filename") or "")
@@ -1529,7 +1817,7 @@ def fetch_openbuildingmap_buildings(x: int, y: int, z: int) -> list[dict[str, An
             params = urllib.parse.urlencode({"quadkey": target, "limit": min(limit, CONFIG.max_buildings_per_tile - len(features)), "offset": offset})
             filename = urllib.parse.quote(item["filename"], safe="")
             url = f"{CONFIG.openbuildingmap_api_url}/query/{filename}?{params}"
-            payload = OPENBUILDINGMAP_QUEUE.run(lambda: fetch_openbuildingmap_json("query", url, 20))
+            payload = OPENBUILDINGMAP_QUEUE.run(lambda: fetch_json(url, {"Accept": "application/json"}, 20))
             rows = payload.get("rows", [])
             if not isinstance(rows, list):
                 break
@@ -1743,6 +2031,11 @@ def known_height(properties: dict[str, Any]) -> tuple[float, str] | None:
     return None
 
 
+def height_above_base(height: float, properties: dict[str, Any]) -> tuple[float, bool]:
+    minimum = number(properties.get("minHeight")) + 0.5
+    return (max(height, minimum), height < minimum)
+
+
 class Grid:
     def __init__(self, entries: list[dict[str, Any]], reference_lat: float) -> None:
         self.cell_size = NEIGHBOR_RADIUS
@@ -1871,15 +2164,35 @@ def apply_heights(features: list[dict[str, Any]], city_center: list[float], cali
     for entry in entries:
         properties = entry["feature"]["properties"]
         if entry["label"]:
-            properties.update({"height": round(entry["label"][0], 1), "heightSource": entry["label"][1], "inferred": False})
+            source = entry["label"][1]
+            derived = source == "levels"
+            height, adjusted_to_base = height_above_base(entry["label"][0], properties)
+            properties.update({
+                "height": round(height, 1), "heightSource": source,
+                "heightKind": "source-derived" if derived else "measured",
+                "heightConfidence": "medium" if derived else "high",
+                "heightAdjustedToBase": adjusted_to_base,
+                "inferred": derived,
+            })
             continue
         reference = matching_reference(entry, reference_entries)
         if reference:
-            properties.update({"height": round(reference[0], 1), "heightSource": f"osm-reference-{reference[1]}", "inferred": False})
+            height, adjusted_to_base = height_above_base(reference[0], properties)
+            properties.update({
+                "height": round(height, 1), "heightSource": f"osm-reference-{reference[1]}",
+                "heightKind": "matched", "heightConfidence": "low", "heightAdjustedToBase": adjusted_to_base,
+                "inferred": True,
+            })
             continue
         hbet = hbet_estimate(entry, known_grid)
         if hbet:
-            properties.update({"height": round(max(hbet[0], number(properties.get("minHeight")) + 0.5), 1), "heightSource": hbet[1], "inferred": True})
+            height, adjusted_to_base = height_above_base(hbet[0], properties)
+            properties.update({
+                "height": round(height, 1),
+                "heightSource": hbet[1], "heightKind": "estimated-range",
+                "heightConfidence": "medium" if hbet[1] == "hbet-range-neighbor" else "low", "heightAdjustedToBase": adjusted_to_base,
+                "inferred": True,
+            })
             continue
         vector = raw_vector(entry, known_grid, all_grid, city_center)
         local_median = vector[2]
@@ -1891,7 +2204,13 @@ def apply_heights(features: list[dict[str, Any]], city_center: list[float], cali
             estimate = local_median * 0.65 + prior * 0.35
         else:
             estimate = prior
-        properties.update({"height": round(max(estimate, number(properties.get("minHeight")) + 0.5), 1), "heightSource": "inferred", "inferred": True})
+        height, adjusted_to_base = height_above_base(estimate, properties)
+        properties.update({
+            "height": round(height, 1),
+            "heightSource": "inferred", "heightKind": "inferred",
+            "heightConfidence": "medium" if model else "low", "heightAdjustedToBase": adjusted_to_base,
+            "inferred": True,
+        })
     return output, len(known)
 
 
@@ -1909,7 +2228,7 @@ def render_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
         output = {
             "sourceId": str(props.get("sourceId") or ""), "kind": str(props.get("kind") or ""), "buildingType": str(props.get("buildingType") or ""),
             "roadClass": str(props.get("roadClass") or ""), "source": str(props.get("dataSource") or props.get("source") or ""),
-            "height": number(props.get("height")), "minHeight": number(props.get("minHeight")), "levels": number(props.get("levels")), "heightSource": str(props.get("heightSource") or ""), "inferred": 1 if props.get("inferred") else 0,
+            "height": number(props.get("height")), "minHeight": number(props.get("minHeight")), "levels": number(props.get("levels")), "heightSource": str(props.get("heightSource") or ""), "heightKind": str(props.get("heightKind") or ""), "heightConfidence": str(props.get("heightConfidence") or ""), "heightAdjustedToBase": 1 if props.get("heightAdjustedToBase") else 0, "inferred": 1 if props.get("inferred") else 0,
             "poiCategory": str(props.get("poiCategory") or ""), "name": str(props.get("name") or "")[:160], "community": str(props.get("community") or "")[:160], "estimatedLevelRange": list(estimated_level_range(props.get("estimatedLevelRange")) or ()),
         }
         key = f"{output['source']}:{output['sourceId']}:{output['kind']}"
@@ -1927,12 +2246,41 @@ def get_tile(x: int, y: int, z: int, city_center: list[float]) -> dict[str, Any]
     return {"features": features, "source": source_tile["source"], "cached": source_tile["cached"], "stale": source_tile["stale"], "stats": {**tile_stats(features), "inferredCount": sum(feature["properties"]["inferred"] == 1 for feature in features), "modelSampleSize": model_size}}
 
 
+def tile_response_headers(tile: dict[str, Any]) -> dict[str, str]:
+    stats = tile["stats"]
+    return {
+        "X-Cache": "HIT" if tile["cached"] else "MISS",
+        "X-Data-Source": str(tile["source"]),
+        "X-Data-Stale": "1" if tile["stale"] else "0",
+        "X-Height-Prediction": "transient",
+        "X-Feature-Count": str(stats["featureCount"]),
+        "X-Building-Count": str(stats["buildingCount"]),
+        "X-Place-Count": str(stats["poiCount"]),
+        "X-Inferred-Building-Count": str(stats["inferredCount"]),
+        "X-Height-Model-Sample-Size": str(stats["modelSampleSize"]),
+    }
+
+
 def parse_number(value: str | None) -> float | None:
     try:
         parsed = float(value) if value is not None else None
         return parsed if parsed is not None and math.isfinite(parsed) else None
     except ValueError:
         return None
+
+
+def limited_request(method: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(method)
+    def wrapped(handler: Any, *args: Any, **kwargs: Any) -> Any:
+        if not REQUEST_GATE.acquire(blocking=False):
+            handler.send_json(503, {"error": "The local data service is busy. Try again shortly."}, {"Retry-After": "1"})
+            return None
+        try:
+            return method(handler, *args, **kwargs)
+        finally:
+            REQUEST_GATE.release()
+
+    return wrapped
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -1969,6 +2317,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             # Browsers abort stale tile requests while the server is still fetching data.
             return
 
+    @limited_request
     def do_OPTIONS(self) -> None:
         self.send_json(204, None)
 
@@ -1995,6 +2344,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         print(f"Unhandled API error: {error}")
         self.send_json(500, {"error": "The data service failed."})
 
+    @limited_request
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
@@ -2037,6 +2387,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                 results, stored = lookup_places(value, query.get("countryCode", [""])[0], lat, lon)
                 self.send_json(200, {"results": results, "stored": stored})
                 return
+            if parsed.path == "/api/places/stored":
+                west = parse_number(query.get("west", [None])[0])
+                south = parse_number(query.get("south", [None])[0])
+                east = parse_number(query.get("east", [None])[0])
+                north = parse_number(query.get("north", [None])[0])
+                if west is None or south is None or east is None or north is None:
+                    raise ServiceError("Stored-place bounds must be valid west, south, east, and north coordinates.", 400)
+                if not valid_coordinate(west, south) or not valid_coordinate(east, north) or south > north:
+                    raise ServiceError("Stored-place bounds must be valid west, south, east, and north coordinates.", 400)
+                places, truncated = CACHE.list_places_in_bounds(west, south, east, north)
+                self.send_json(200, {"places": places, "truncated": truncated})
+                return
             if parsed.path == "/api/workspace":
                 self.send_json(200, workspace_snapshot())
                 return
@@ -2060,13 +2422,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 else:
                     city_center = [requested_lon, requested_lat]
                 tile = get_tile(x, y, z, city_center)
-                headers = {"X-Cache": "HIT" if tile["cached"] else "MISS", "X-Data-Source": tile["source"], "X-Data-Stale": "1" if tile["stale"] else "0", "X-Height-Prediction": "transient", "X-Feature-Count": str(tile["stats"]["featureCount"]), "X-Building-Count": str(tile["stats"]["buildingCount"]), "X-Place-Count": str(tile["stats"]["poiCount"]), "Cache-Control": "no-store"}
+                headers = {**tile_response_headers(tile), "Cache-Control": "no-store"}
                 self.send_json(204, None, headers) if not tile["features"] else self.send_json(200, {"type": "FeatureCollection", "features": tile["features"]}, {**headers, "geojson": "1"})
                 return
             raise ServiceError("Not found.", 404)
         except Exception as error:
             self.handle_error(error)
 
+    @limited_request
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         try:
@@ -2092,10 +2455,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not geometry:
                     raise ServiceError("An area must be a valid closed GeoJSON polygon.", 400)
                 label = str(body.get("label") or "Measured area").strip()
-                summary_value = body.get("summary")
-                summary: dict[str, Any] = dict(summary_value) if isinstance(summary_value, dict) else {}
+                summary = area_summary(geometry, body.get("summary"))
                 area = CACHE.add_area(label, geometry, summary)
                 self.send_json(201, {"area": area})
+                return
+            area_match = re.fullmatch(r"/api/areas/(area-[A-Za-z0-9]+)", parsed.path)
+            if area_match:
+                geometry = valid_polygon(body.get("geometry"))
+                if not geometry:
+                    raise ServiceError("An area must be a valid closed GeoJSON polygon.", 400)
+                label = str(body.get("label") or "Measured area").strip()
+                summary = area_summary(geometry, body.get("summary"))
+                area = CACHE.update_area(area_match.group(1), label, geometry, summary)
+                if not area:
+                    raise ServiceError("Area not found.", 404)
+                self.send_json(200, {"area": area})
                 return
             if parsed.path == "/api/routes":
                 waypoints = route_waypoints(body.get("waypoints"))
@@ -2115,6 +2489,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as error:
             self.handle_error(error)
 
+    @limited_request
     def do_DELETE(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         try:
@@ -2140,6 +2515,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    if not is_loopback_host(CONFIG.host):
+        raise SystemExit("Monument is a local-only service. HOST must be localhost, 127.0.0.1, or ::1.")
     server = ThreadingHTTPServer((CONFIG.host, CONFIG.port), ApiHandler)
     print(f"Monument Python API listening at http://{CONFIG.host}:{CONFIG.port}")
 

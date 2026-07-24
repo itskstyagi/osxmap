@@ -5,6 +5,7 @@ const ACCENT = '#315efb';
 const PREVIEW_LAYER = 'local-buildings-preview';
 const FOCUS_SOURCE = 'local-city-focus';
 const GEOGRAPHY_SOURCE = 'local-geography';
+const STORED_PLACES_SOURCE = 'local-stored-places';
 const EMPTY_COLLECTION = { type: 'FeatureCollection', features: [] };
 
 function numeric(value) {
@@ -41,9 +42,23 @@ function heightMethod(properties) {
   return source ? readable(source) : '';
 }
 
+function heightConfidence(properties) {
+  const value = String(properties.heightConfidence || '');
+  return value ? `${readable(value)} confidence` : '';
+}
+
 function sourceName(value) {
   const source = String(value || '');
   return source === 'openstreetmap' ? 'OpenStreetMap' : source === 'openbuildingmap' ? 'OpenBuildingMap' : source === 'overture' ? 'Overture Maps' : readable(source);
+}
+
+function sourceMixLabel(sources, staleTiles, failedTiles) {
+  const labels = Object.entries(sources)
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([source, count]) => `${sourceName(source)} ${count} tile${count === 1 ? '' : 's'}`);
+  if (staleTiles) labels.push(`${staleTiles} stale`);
+  if (failedTiles) labels.push(`${failedTiles} failed`);
+  return labels.join(' / ') || 'No detailed tile data';
 }
 
 function lonLatToTile(lon, lat, zoom = TILE_ZOOM) {
@@ -110,6 +125,18 @@ function formatDuration(secondsValue) {
   if (!Number.isFinite(seconds)) return '';
   const minutes = Math.round(seconds / 60);
   return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes} min`;
+}
+
+function formatArea(areaSquareMeters) {
+  const value = Number(areaSquareMeters);
+  if (!Number.isFinite(value) || value <= 0) return 'Area unavailable';
+  return value >= 1_000_000 ? `${(value / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 2 })} sq km` : `${Math.round(value).toLocaleString()} sq m`;
+}
+
+function geometryPositions(geometry) {
+  if (geometry?.type === 'Polygon') return geometry.coordinates.flat();
+  if (geometry?.type === 'MultiPolygon') return geometry.coordinates.flat(2);
+  return [];
 }
 
 function polygonAreaSquareMeters(coordinates) {
@@ -224,6 +251,7 @@ function addLocalLayers(map, theme) {
   map.addSource('local-city', { type: 'geojson', data: EMPTY_COLLECTION, generateId: true, tolerance: 0.7, buffer: 32, maxzoom: 18 });
   map.addSource(FOCUS_SOURCE, { type: 'geojson', data: EMPTY_COLLECTION });
   map.addSource(GEOGRAPHY_SOURCE, { type: 'geojson', data: EMPTY_COLLECTION });
+  map.addSource(STORED_PLACES_SOURCE, { type: 'geojson', data: EMPTY_COLLECTION });
   const firstSymbol = map.getStyle().layers?.find((layer) => layer.type === 'symbol')?.id;
   map.addLayer({ id: 'local-park', type: 'fill', source: 'local-city', filter: ['==', ['get', 'kind'], 'park'], paint: { 'fill-color': '#dcdcd7', 'fill-opacity': 0.7 } });
   if (map.getSource('openmaptiles')) map.addLayer({
@@ -235,7 +263,7 @@ function addLocalLayers(map, theme) {
   map.addLayer({ id: 'local-road', type: 'line', source: 'local-city', filter: ['==', ['get', 'kind'], 'road'], minzoom: 13, paint: { 'line-color': '#a7a7a3', 'line-width': ['interpolate', ['linear'], ['zoom'], 13, 0.4, 17, 2.2], 'line-opacity': 0.72 } }, firstSymbol);
   for (const [id, inferred] of [['local-buildings', 0], ['local-buildings-inferred', 1]]) map.addLayer({
     id, type: 'fill-extrusion', source: 'local-city', filter: ['all', ['==', ['get', 'kind'], 'building'], ['==', ['get', 'inferred'], inferred]], minzoom: 13,
-    paint: { 'fill-extrusion-color': '#e0e0da', 'fill-extrusion-height': ['get', 'height'], 'fill-extrusion-base': ['get', 'minHeight'], 'fill-extrusion-opacity': 0.94, 'fill-extrusion-vertical-gradient': false },
+    paint: { 'fill-extrusion-color': '#e0e0da', 'fill-extrusion-height': ['get', 'height'], 'fill-extrusion-base': ['get', 'minHeight'], 'fill-extrusion-opacity': inferred ? 0.62 : 0.94, 'fill-extrusion-vertical-gradient': false },
   }, firstSymbol);
   map.addLayer({ id: 'local-selection', type: 'line', source: 'local-city', filter: ['==', ['get', 'sourceId'], '__none__'], paint: { 'line-color': ACCENT, 'line-width': 3, 'line-opacity': 1 } });
   map.addLayer({ id: 'local-hover', type: 'line', source: 'local-city', filter: ['==', ['get', 'sourceId'], '__none__'], paint: { 'line-color': '#ffffff', 'line-width': 1.5, 'line-opacity': 0.88 } });
@@ -270,28 +298,34 @@ function addLocalLayers(map, theme) {
   map.addLayer({ id: 'geo-route', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route'], paint: { 'line-color': ACCENT, 'line-width': 4, 'line-opacity': 1 } });
   map.addLayer({ id: 'geo-pin', type: 'circle', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'pin'], paint: { 'circle-radius': 7, 'circle-color': ACCENT, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
   map.addLayer({ id: 'geo-pin-label', type: 'symbol', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'pin'], layout: { 'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'], 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff' } });
+  map.addLayer({ id: 'local-stored-place-halo', type: 'circle', source: STORED_PLACES_SOURCE, minzoom: 7, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 7, 15, 14], 'circle-color': '#4b5563', 'circle-opacity': 0.14 } });
+  map.addLayer({ id: 'local-stored-place', type: 'circle', source: STORED_PLACES_SOURCE, minzoom: 7, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 3.5, 15, 6], 'circle-color': '#4b5563', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.25, 'circle-opacity': 0.9 } });
+  map.addLayer({ id: 'local-stored-place-label', type: 'symbol', source: STORED_PLACES_SOURCE, minzoom: 13, layout: { 'text-field': ['get', 'name'], 'text-size': 10, 'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'], 'text-offset': [0, 1.1], 'text-anchor': 'top', 'text-max-width': 14 }, paint: { 'text-color': '#374151', 'text-halo-color': '#ffffff', 'text-halo-width': 1.25 } });
   applyMonochrome(map, theme);
 }
 
 class CityExplorer {
   constructor() {
-    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'intro-card', 'place-form', 'place-input', 'place-results', 'use-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-origin', 'route-destination', 'pin-list', 'geo-status'].map((id) => [id, document.getElementById(id)]));
+    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'intro-card', 'place-form', 'place-input', 'place-results', 'use-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-origin', 'route-destination', 'pin-list', 'area-list', 'geo-status'].map((id) => [id, document.getElementById(id)]));
     this.theme = localStorage.getItem('theme') || 'dark';
     this.country = { country: '', countryCode: '', method: 'detecting' };
     this.selected = null;
-    this.stream = { loaded: 0, total: 0, buildings: 0, active: false, preview: false, source: '', degraded: false };
+    this.stream = { loaded: 0, total: 0, buildings: 0, inferred: 0, active: false, preview: false, source: '', degraded: false };
     this.features = new Map();
     this.tileFeatures = new Map();
+    this.tileMetadata = new Map();
     this.loaded = new Set();
     this.failed = new Set();
     this.total = 0;
     this.buildings = 0;
-    this.source = '';
     this.generation = 0;
     this.previewVisible = true;
     this.suggestionController = null;
     this.suggestionTimer = null;
     this.placeSearchController = null;
+    this.storedPlacesController = null;
+    this.storedPlacesBounds = '';
+    this.storedPlaces = [];
     this.pinMode = false;
     this.geo = { pins: [], areas: [], route: null, state: {}, context: { lat: null, lon: null, source: 'unknown', accuracy: null } };
     this.worker = new Worker(new URL('./tile-worker.js', import.meta.url), { type: 'module' });
@@ -327,6 +361,8 @@ class CityExplorer {
       this.map.getSource('local-city')?.setData({ type: 'FeatureCollection', features: [...this.features.values()] });
       this.map.getSource(FOCUS_SOURCE)?.setData(this.selected ? this.focusFeature(this.selected) : EMPTY_COLLECTION);
       this.renderGeography();
+      this.renderStoredPlaces();
+      this.loadStoredPlaces();
       if (this.map.getLayer(PREVIEW_LAYER) && !this.previewBuildingEventsBound) {
         this.map.on('click', PREVIEW_LAYER, (event) => this.showBuilding(event));
         this.map.on('mousemove', PREVIEW_LAYER, (event) => this.hoverBuilding(event));
@@ -343,15 +379,25 @@ class CityExplorer {
     this.map.on('click', 'local-poi-marker', (event) => this.showPoi(event));
     this.map.on('mouseenter', 'local-poi-marker', () => { this.map.getCanvas().style.cursor = 'pointer'; });
     this.map.on('mouseleave', 'local-poi-marker', () => { this.map.getCanvas().style.cursor = ''; });
+    this.map.on('click', 'local-stored-place', (event) => this.selectStoredPlace(event));
+    this.map.on('mouseenter', 'local-stored-place', () => { this.map.getCanvas().style.cursor = 'pointer'; });
+    this.map.on('mouseleave', 'local-stored-place', () => { this.map.getCanvas().style.cursor = ''; });
     this.map.on('movestart', () => { if (this.selected && this.map.getZoom() >= 13) this.setPreviewVisible(true); });
-    this.map.on('moveend', () => { if (this.selected && this.map.getZoom() >= 13) this.worker.postMessage({ type: 'append', tiles: visibleTiles(this.map) }); });
+    this.map.on('moveend', () => {
+      if (this.selected && this.map.getZoom() >= 13) this.worker.postMessage({ type: 'append', tiles: visibleTiles(this.map) });
+      this.loadStoredPlaces();
+    });
     this.map.on('dblclick', (event) => {
       if (!this.selected) return;
       event.preventDefault();
       this.operate('reset');
     });
     this.map.on('click', (event) => {
-      if (this.pinMode) this.addMapPin(event.lngLat.lng, event.lngLat.lat);
+      if (!this.pinMode) return;
+      const interactiveLayers = [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred', 'local-poi-marker', 'local-stored-place', 'geo-pin', 'geo-area-fill', 'geo-route']
+        .filter((layer) => this.map.getLayer(layer));
+      if (interactiveLayers.length && this.map.queryRenderedFeatures(event.point, { layers: interactiveLayers }).length) return;
+      this.addMapPin(event.lngLat.lng, event.lngLat.lat);
     });
     requestAnimationFrame(() => this.map.resize());
   }
@@ -477,14 +523,14 @@ class CityExplorer {
     this.geo.context = { ...this.geo.context, lat: location.lat, lon: location.lon, source: 'selected', countryCode: location.countryCode || this.country.countryCode || '' };
     this.elements['search-input'].value = location.name;
     this.renderSuggestions([]);
-    this.setStream({ loaded: 0, total: 9, buildings: 0, active: true, preview: true, source: '', degraded: false });
+    this.setStream({ loaded: 0, total: 9, buildings: 0, inferred: 0, active: true, preview: true, source: '', degraded: false });
     this.resetMapForLocation();
   }
 
   resetMapForLocation() {
     const location = this.selected;
-    this.features.clear(); this.tileFeatures.clear(); this.loaded.clear(); this.failed.clear();
-    this.buildings = 0; this.source = ''; this.total = 9; this.previewVisible = true; this.generation += 1;
+    this.features.clear(); this.tileFeatures.clear(); this.tileMetadata.clear(); this.loaded.clear(); this.failed.clear();
+    this.buildings = 0; this.inferred = 0; this.total = 9; this.previewVisible = true; this.generation += 1;
     this.map.getSource('local-city')?.setData(EMPTY_COLLECTION);
     if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', 'visible');
     if (this.map.getLayer('local-selection')) this.map.setFilter('local-selection', ['==', ['get', 'sourceId'], '__none__']);
@@ -500,29 +546,43 @@ class CityExplorer {
   handleWorkerMessage(data) {
     if (data.generation !== this.generation) return;
     if (data.type === 'queued') {
-      this.total = data.total;
+      this.total = Math.max(this.total, data.total);
       if (data.added > 0) this.setPreviewVisible(true);
-      this.setStream({ ...this.stream, total: data.total, active: true, preview: this.previewVisible });
+      this.setStream({ ...this.stream, total: this.total, active: true, preview: this.previewVisible });
       return;
     }
     if (data.type !== 'tile' && data.type !== 'tileError') return;
     this.loaded.add(data.key);
-      if (data.type === 'tile') {
-        this.failed.delete(data.key);
-        if (data.source !== 'none') this.source = data.source;
-        this.tileFeatures.delete(data.key);
-        this.tileFeatures.set(data.key, data.features);
-        this.features.clear(); this.buildings = 0;
+    if (data.type === 'tile') {
+      this.failed.delete(data.key);
+      this.tileMetadata.set(data.key, { source: data.source, stale: Boolean(data.stale), stats: data.stats || {} });
+      this.tileFeatures.delete(data.key);
+      this.tileFeatures.set(data.key, data.features);
+      this.features.clear(); this.buildings = 0;
+      let inferred = 0;
       for (const [tileKey, tileFeatures] of this.tileFeatures) for (const feature of tileFeatures) {
         const properties = feature.properties || {};
         const key = properties.sourceId ? `${properties.source}:${properties.sourceId}:${properties.kind}` : `${tileKey}:${this.features.size}`;
-        if (!this.features.has(key) && properties.kind === 'building') this.buildings += 1;
+        if (!this.features.has(key) && properties.kind === 'building') {
+          this.buildings += 1;
+          if (Number(properties.inferred) === 1) inferred += 1;
+        }
         this.features.set(key, feature);
       }
       this.map.getSource('local-city')?.setData({ type: 'FeatureCollection', features: [...this.features.values()] });
-    } else this.failed.add(data.key);
+      this.inferred = inferred;
+    } else {
+      this.failed.add(data.key);
+      this.tileMetadata.delete(data.key);
+    }
+    const sources = {};
+    let staleTiles = 0;
+    for (const metadata of this.tileMetadata.values()) {
+      if (metadata.source && metadata.source !== 'none') sources[metadata.source] = (sources[metadata.source] || 0) + 1;
+      if (metadata.stale) staleTiles += 1;
+    }
     if (this.loaded.size >= this.total && this.buildings > 0 && this.failed.size === 0) this.setPreviewVisible(false);
-    this.setStream({ loaded: this.loaded.size, total: this.total, buildings: this.buildings, source: this.source, active: true, preview: this.previewVisible, degraded: this.failed.size > 0 });
+    this.setStream({ loaded: this.loaded.size, total: this.total, buildings: this.buildings, inferred: this.inferred || 0, source: sourceMixLabel(sources, staleTiles, this.failed.size), active: true, preview: this.previewVisible, degraded: this.failed.size > 0 });
   }
 
   setPreviewVisible(visible) {
@@ -536,11 +596,11 @@ class CityExplorer {
     el['stream-card'].classList.toggle('is-hidden', !stream.active);
     el['stream-card'].classList.toggle('is-loading', stream.active && stream.loaded < stream.total);
     if (!stream.active) return;
-    el['stream-title'].textContent = stream.degraded ? 'OSM PREVIEW' : stream.loaded < stream.total ? 'ENRICHING CITY' : stream.preview ? 'OSM PREVIEW' : 'CITY READY';
+    el['stream-title'].textContent = stream.degraded ? 'CITY PARTIAL' : stream.loaded < stream.total ? 'ENRICHING CITY' : stream.preview ? 'BASEMAP PREVIEW' : 'CITY READY';
     el['stream-count'].textContent = `${stream.loaded}/${stream.total}`;
     el['stream-progress'].style.width = `${Math.min(100, (stream.loaded / Math.max(stream.total, 1)) * 100)}%`;
-    el['stream-buildings'].textContent = stream.preview && stream.buildings === 0 ? 'procedural buildings' : `${stream.buildings.toLocaleString()} buildings`;
-    el['stream-source'].textContent = stream.preview ? 'OSM / transient heights' : stream.source || 'cache / open data';
+    el['stream-buildings'].textContent = stream.preview && stream.buildings === 0 ? 'basemap preview' : `${stream.buildings.toLocaleString()} buildings${stream.inferred ? ` / ${stream.inferred.toLocaleString()} inferred` : ''}`;
+    el['stream-source'].textContent = stream.source || 'No detailed tile data';
     el['intro-card'].classList.toggle('is-hidden', Boolean(this.selected));
   }
 
@@ -592,6 +652,8 @@ class CityExplorer {
     addDetail('Floors', numeric(properties.levels)?.toLocaleString());
     addDetail('Estimated floors', levelRange(properties.estimatedLevelRange));
     addDetail('Height method', heightMethod(properties));
+    addDetail('Height confidence', heightConfidence(properties));
+    addDetail('Height adjustment', Number(properties.heightAdjustedToBase) === 1 ? 'Raised above source base height' : '');
     addDetail('Community', properties.community);
     addDetail('Data source', sourceName(properties.source) || (properties.render_height ? 'OpenStreetMap preview' : 'Open data'));
     addDetail('Record ID', sourceId || properties.osm_id || properties.id);
@@ -622,12 +684,59 @@ class CityExplorer {
     new window.maplibregl.Popup({ closeButton: false, className: 'mono-popup', offset: 12 }).setLngLat(event.lngLat).setDOMContent(content).addTo(this.map);
   }
 
+  storedPlaceFeatures() {
+    return {
+      type: 'FeatureCollection',
+      features: this.storedPlaces.map((place) => ({
+        type: 'Feature', geometry: { type: 'Point', coordinates: [place.lon, place.lat] },
+        properties: { id: place.id, provider: place.provider, name: place.name, address: place.address || '', countryCode: place.countryCode || '' },
+      })),
+    };
+  }
+
+  renderStoredPlaces() {
+    this.map?.getSource(STORED_PLACES_SOURCE)?.setData(this.storedPlaceFeatures());
+  }
+
+  async loadStoredPlaces() {
+    if (!this.map?.isStyleLoaded()) return;
+    const bounds = this.map.getBounds();
+    const params = new URLSearchParams({
+      west: bounds.getWest().toFixed(5), south: bounds.getSouth().toFixed(5),
+      east: bounds.getEast().toFixed(5), north: bounds.getNorth().toFixed(5),
+    });
+    const key = params.toString();
+    if (key === this.storedPlacesBounds) return;
+    this.storedPlacesBounds = key;
+    this.storedPlacesController?.abort();
+    this.storedPlacesController = new AbortController();
+    try {
+      const response = await jsonRequest(`/api/places/stored?${params}`, this.storedPlacesController.signal);
+      if (key !== this.storedPlacesBounds) return;
+      this.storedPlaces = Array.isArray(response.places) ? response.places : [];
+      this.renderStoredPlaces();
+    } catch (error) {
+      if (error.name !== 'AbortError' && key === this.storedPlacesBounds) this.storedPlaces = [];
+    }
+  }
+
+  selectStoredPlace(event) {
+    const feature = event.features?.[0];
+    const coordinates = feature?.geometry?.coordinates;
+    if (!feature || !Array.isArray(coordinates) || coordinates.length < 2) return;
+    this.selectPlace({
+      id: feature.properties.id, provider: feature.properties.provider, name: feature.properties.name,
+      address: feature.properties.address, countryCode: feature.properties.countryCode,
+      lon: Number(coordinates[0]), lat: Number(coordinates[1]),
+    });
+  }
+
   geographyFeatures() {
     const features = this.geo.pins.map((pin) => ({
       type: 'Feature', geometry: { type: 'Point', coordinates: [pin.lon, pin.lat] },
       properties: { overlay: 'pin', id: pin.id, label: pin.label, name: pin.name },
     }));
-    for (const area of this.geo.areas) features.push({
+    for (const area of this.geo.areas) if (!area.summary?.invalid) features.push({
       type: 'Feature', geometry: area.geometry,
       properties: { overlay: 'area', id: area.id, label: area.label, areaSquareMeters: area.summary?.areaSquareMeters || 0 },
     });
@@ -690,6 +799,32 @@ class CityExplorer {
       }
       element.disabled = pins.length < 2;
     }
+    const areaList = this.elements['area-list'];
+    areaList.replaceChildren();
+    for (const area of this.geo.areas) {
+      const row = document.createElement('div');
+      const kind = document.createElement('strong');
+      kind.textContent = 'AREA';
+      const name = document.createElement('span');
+      name.textContent = area.label;
+      const summary = document.createElement('small');
+      summary.textContent = area.summary?.invalid ? 'Needs recompute' : formatArea(area.summary?.areaSquareMeters);
+      const focus = document.createElement('button');
+      focus.type = 'button';
+      focus.textContent = 'VIEW';
+      focus.addEventListener('click', () => this.focusArea(area));
+      const recompute = document.createElement('button');
+      recompute.type = 'button';
+      recompute.textContent = 'REBUILD';
+      recompute.addEventListener('click', () => this.recomputeArea(area));
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'X';
+      remove.setAttribute('aria-label', `Remove ${area.label}`);
+      remove.addEventListener('click', () => this.removeArea(area.id));
+      row.append(kind, name, summary, focus, recompute, remove);
+      areaList.append(row);
+    }
   }
 
   async loadWorkspace() {
@@ -735,6 +870,8 @@ class CityExplorer {
     try {
       const response = await jsonRequest(`/api/places?${params}`, this.placeSearchController.signal);
       this.placeResults = Array.isArray(response.results) ? response.results : [];
+      this.storedPlacesBounds = '';
+      this.loadStoredPlaces();
       this.renderPlaceResults();
       this.setGeoStatus(this.placeResults.length ? `${this.placeResults.length} place${this.placeResults.length === 1 ? '' : 's'} found${response.stored ? ' from local storage' : ''}.` : 'No place found in the current geographic context.', !this.placeResults.length);
     } catch (error) {
@@ -781,16 +918,25 @@ class CityExplorer {
   }
 
   togglePinMode() {
-    this.pinMode = !this.pinMode;
-    this.elements['pin-mode'].classList.toggle('is-active', this.pinMode);
-    this.map.getCanvas().style.cursor = this.pinMode ? 'crosshair' : '';
-    this.setGeoStatus(this.pinMode ? 'Click the map to add a pin.' : 'Map pin mode turned off.');
+    this.setPinMode(!this.pinMode);
+    this.setGeoStatus(this.pinMode ? 'Click an empty map location to add a pin. Press Escape to cancel.' : 'Map pin mode turned off.');
+  }
+
+  setPinMode(enabled) {
+    this.pinMode = enabled;
+    const button = this.elements['pin-mode'];
+    button.classList.toggle('is-active', enabled);
+    button.setAttribute('aria-pressed', String(enabled));
+    button.textContent = enabled ? 'CANCEL MAP PIN' : 'ADD MAP PIN';
+    this.map.getCanvas().style.cursor = enabled ? 'crosshair' : '';
   }
 
   async addMapPin(lon, lat) {
-    this.pinMode = false;
-    this.elements['pin-mode'].classList.remove('is-active');
-    this.map.getCanvas().style.cursor = '';
+    if (!window.confirm(`Add a pin at ${lat.toFixed(5)}, ${lon.toFixed(5)}?`)) {
+      this.setGeoStatus('Map pin cancelled.');
+      return;
+    }
+    this.setPinMode(false);
     try {
       await this.addPin({ name: `Map pin ${lat.toFixed(5)}, ${lon.toFixed(5)}`, lat, lon, source: 'map-click' });
       this.setGeoStatus('Map pin added.');
@@ -812,6 +958,9 @@ class CityExplorer {
       await deleteRequest(`/api/pins/${encodeURIComponent(pinId)}`);
       this.geo.pins = this.geo.pins.filter((pin) => pin.id !== pinId);
       this.geo.route = null;
+      this.geo.areas = this.geo.areas.map((area) => area.summary?.pinIds?.includes(pinId)
+        ? { ...area, summary: { ...area.summary, invalid: true, invalidReason: 'A referenced pin was removed.' } }
+        : area);
       if (this.geo.state.originPinId === pinId) this.geo.state.originPinId = '';
       if (this.geo.state.destinationPinId === pinId) this.geo.state.destinationPinId = '';
       this.geo.state.routeId = '';
@@ -845,23 +994,66 @@ class CityExplorer {
   }
 
   async createPinArea() {
+    const payload = this.pinAreaPayload();
+    if (!payload) return;
+    try {
+      const response = await postJson('/api/areas', payload);
+      this.geo.areas.push(response.area);
+      this.renderWorkspace();
+      this.renderGeography();
+      this.setGeoStatus(`Area shown: ${formatArea(payload.summary.areaSquareMeters)}.`);
+    } catch (error) {
+      this.setGeoStatus(error.message, true);
+    }
+  }
+
+  pinAreaPayload(label) {
     if (this.geo.pins.length < 3) {
       this.setGeoStatus('Add at least three pins before measuring an area.', true);
-      return;
+      return null;
     }
     const ring = this.geo.pins.map((pin) => [pin.lon, pin.lat]);
     ring.push([...ring[0]]);
     if (selfIntersectsRing(ring)) {
       this.setGeoStatus('These pins cross when joined in creation order. Reorder them by removing and adding them around the boundary.', true);
-      return;
+      return null;
     }
     const areaSquareMeters = polygonAreaSquareMeters(ring);
+    return {
+      label: label || `Area / ${this.geo.pins.map((pin) => pin.label).join(', ')}`,
+      geometry: { type: 'Polygon', coordinates: [ring] },
+      summary: { areaSquareMeters, pinIds: this.geo.pins.map((pin) => pin.id) },
+    };
+  }
+
+  async recomputeArea(area) {
+    const payload = this.pinAreaPayload(area.label);
+    if (!payload) return;
     try {
-      const response = await postJson('/api/areas', { label: `Area / ${this.geo.pins.map((pin) => pin.label).join(', ')}`, geometry: { type: 'Polygon', coordinates: [ring] }, summary: { areaSquareMeters, pinIds: this.geo.pins.map((pin) => pin.id) } });
-      this.geo.areas.push(response.area);
+      const response = await postJson(`/api/areas/${encodeURIComponent(area.id)}`, payload);
+      this.geo.areas = this.geo.areas.map((item) => item.id === area.id ? response.area : item);
+      this.renderWorkspace();
       this.renderGeography();
-      const label = areaSquareMeters >= 1_000_000 ? `${(areaSquareMeters / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 2 })} sq km` : `${Math.round(areaSquareMeters).toLocaleString()} sq m`;
-      this.setGeoStatus(`Area shown: ${label}.`);
+      this.setGeoStatus(`Area rebuilt: ${formatArea(payload.summary.areaSquareMeters)}.`);
+    } catch (error) {
+      this.setGeoStatus(error.message, true);
+    }
+  }
+
+  focusArea(area) {
+    const coordinates = geometryPositions(area.geometry).filter((position) => Array.isArray(position) && position.length >= 2);
+    if (!coordinates.length) return;
+    const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
+    this.map.fitBounds(bounds, { padding: 90, maxZoom: 16, duration: 600, essential: true });
+  }
+
+  async removeArea(areaId) {
+    try {
+      await deleteRequest(`/api/areas/${encodeURIComponent(areaId)}`);
+      this.geo.areas = this.geo.areas.filter((area) => area.id !== areaId);
+      this.renderWorkspace();
+      this.renderGeography();
+      this.setGeoStatus('Area removed.');
     } catch (error) {
       this.setGeoStatus(error.message, true);
     }
@@ -934,6 +1126,12 @@ class CityExplorer {
     const target = event.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === 'Escape' && this.pinMode) {
+      event.preventDefault();
+      this.setPinMode(false);
+      this.setGeoStatus('Map pin mode turned off.');
+      return;
+    }
     if (event.key === '/') {
       event.preventDefault();
       this.elements['search-input'].focus();

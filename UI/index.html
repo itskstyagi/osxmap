@@ -26,9 +26,10 @@
           <section class="geo-panel" aria-label="Map geography tools">
             <form id="place-form" class="geo-form"><input id="place-input" placeholder="Find a place or address" aria-label="Find a place or address" autocomplete="off"><button type="submit">PIN PLACE</button></form>
             <div id="place-results" class="place-results is-hidden" role="listbox"></div>
-            <div class="geo-actions"><button id="use-location" type="button">USE MY LOCATION</button><button id="pin-mode" type="button">ADD MAP PIN</button><button id="show-area" type="button">SHOW PIN AREA</button><button id="clear-additions" type="button">CLEAR ADDITIONS</button></div>
+            <div class="geo-actions"><button id="use-location" type="button">USE MY LOCATION</button><button id="pin-mode" type="button" aria-pressed="false">ADD MAP PIN</button><button id="show-area" type="button">SHOW PIN AREA</button><button id="clear-additions" type="button">CLEAR ADDITIONS</button></div>
             <form id="route-form" class="route-form"><label>FROM<select id="route-origin" aria-label="Route origin"></select></label><label>TO<select id="route-destination" aria-label="Route destination"></select></label><button type="submit">DRIVING ROUTE</button></form>
             <div id="pin-list" class="pin-list" aria-label="Saved pins"></div>
+            <div id="area-list" class="area-list" aria-label="Saved areas"></div>
             <p id="geo-status" class="geo-status" aria-live="polite">Use a place search or add a pin directly on the map.</p>
           </section>
         </section>
@@ -43,7 +44,6 @@
         </div>
         <section id="intro-card" class="intro-card"><p>01 / SEARCH</p><h1>Every city,<br>drawn from open data.</h1><span>Enter a place to stream its built form from the center outward.</span></section>
         <nav class="map-controls" aria-label="Map controls"><button type="button" data-map-action="in" aria-label="Zoom in">+</button><button type="button" data-map-action="out" aria-label="Zoom out">-</button><button type="button" data-map-action="pitch" aria-label="Toggle map pitch">3D</button><button type="button" data-map-action="reset" aria-label="Reset city view">R</button></nav>
-        <div class="height-key" aria-hidden="true"><span>LOW</span><i></i><span>HIGH</span></div>
         <footer class="attribution-note">OVERTURE / OPENSTREETMAP / NOMINATIM / OPTIONAL SERPAPI</footer>
       </section>
     </main>

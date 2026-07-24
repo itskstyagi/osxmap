@@ -6,6 +6,11 @@ let apiBaseUrl = '';
 let activeController = null;
 const queued = new Set();
 
+function headerNumber(response, name) {
+  const value = Number.parseInt(response.headers.get(name) || '', 10);
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
 self.onmessage = (event) => {
   const { type } = event.data;
   if (type === 'reset') {
@@ -61,6 +66,14 @@ async function processQueue() {
         generation: tile.generation,
         cached: response.headers.get('X-Cache') === 'HIT',
         source: response.headers.get('X-Data-Source') || 'none',
+        stale: response.headers.get('X-Data-Stale') === '1',
+        stats: {
+          featureCount: headerNumber(response, 'X-Feature-Count'),
+          buildingCount: headerNumber(response, 'X-Building-Count'),
+          poiCount: headerNumber(response, 'X-Place-Count'),
+          inferredBuildingCount: headerNumber(response, 'X-Inferred-Building-Count'),
+          modelSampleSize: headerNumber(response, 'X-Height-Model-Sample-Size'),
+        },
       });
     } catch (error) {
       if (tile.generation === generation && error.name !== 'AbortError') {
