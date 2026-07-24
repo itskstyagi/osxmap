@@ -7,14 +7,16 @@
     <meta name="description" content="A monochrome 3D city explorer with OSM-first place, pin, area, and routing tools.">
     <title>Monument / City Explorer</title>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-    <link rel="stylesheet" href="./styles.css?v=20260725-5">
+    <link rel="stylesheet" href="./styles.css?v=20260725-6">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
-    <script type="module" src="./app.js?v=20260725-5"></script>
+    <script type="module" src="./app.js?v=20260725-6"></script>
   </head>
   <body>
     <main class="app-shell">
-      <header class="search-strip">
-        <section class="search-panel" aria-label="City search">
+      <aside class="manual-sidebar" aria-label="Manual map controls">
+        <button id="toggle-manual-controls" class="manual-toggle" type="button" aria-expanded="false"><span>MANUAL CONTROLS</span><b>OPEN</b></button>
+        <div id="manual-controls-content" class="manual-controls-content">
+          <section class="search-panel" aria-label="City search">
           <form id="search-form" class="search-form">
             <span class="search-icon" aria-hidden="true"></span>
             <input id="search-input" placeholder="Search city, country" aria-label="Search city and country" aria-autocomplete="list" aria-expanded="false" autocomplete="off">
@@ -46,8 +48,9 @@
               <p id="geo-status" class="geo-status" aria-live="polite">The map starts clear. Add route stops, then trace the plan.</p>
             </div>
           </section>
-        </section>
-      </header>
+          </section>
+        </div>
+      </aside>
 
       <section class="map-region">
         <div id="map" class="map-canvas" aria-label="Interactive 3D city map"></div>
@@ -58,6 +61,21 @@
         </div>
         <section id="intro-card" class="intro-card"><p>01 / SEARCH</p><h1>Every city,<br>drawn from open data.</h1><span>Enter a place to stream its built form from the center outward.</span></section>
         <nav class="map-controls" aria-label="Map controls"><button type="button" data-map-action="in" aria-label="Zoom in">+</button><button type="button" data-map-action="out" aria-label="Zoom out">-</button><button type="button" data-map-action="pitch" aria-label="Toggle map pitch">3D</button><button type="button" data-map-action="reset" aria-label="Reset city view">R</button></nav>
+        <aside id="agent-hud" class="agent-hud" aria-live="polite">
+          <div class="agent-hud-heading"><span>MAP AGENT</span><b id="agent-connection">CONNECTING</b></div>
+          <div class="agent-hud-stage"><span>REQUEST</span><strong id="agent-request">Waiting for connection</strong></div>
+          <div class="agent-hud-stage"><span>TOOL</span><strong id="agent-tool">No active tool</strong></div>
+        </aside>
+        <section id="agent-question" class="agent-question is-hidden" aria-live="polite" aria-label="Map agent clarification">
+          <p>MAP AGENT NEEDS A DETAIL</p>
+          <strong id="agent-question-text"></strong>
+          <div id="agent-question-choices" class="agent-question-choices"></div>
+        </section>
+        <form id="agent-composer" class="agent-composer" aria-label="Ask the map agent">
+          <input id="agent-input" maxlength="2000" placeholder="Ask the map agent to explore, route, or compare..." aria-label="Map agent request" autocomplete="off">
+          <button id="agent-submit" type="submit">SEND</button>
+          <button id="agent-cancel" class="agent-cancel is-hidden" type="button">CANCEL</button>
+        </form>
         <footer class="attribution-note">OVERTURE / OPENSTREETMAP / NOMINATIM / OPTIONAL SERPAPI</footer>
       </section>
     </main>

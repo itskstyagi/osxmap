@@ -1,11 +1,19 @@
+import asyncio
+import socket
 import struct
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from backend.agent import MapAgentService
+from backend.agent_tools import AgentDependencies, AgentTools
+from backend.openai_client import OpenAIChatClient
+from backend.realtime import RealtimeHub
 from backend import server
+from websockets.asyncio.client import connect as websocket_connect
 
 
 def polygon_wkb() -> bytes:
@@ -260,6 +268,195 @@ class OpenBuildingMapGeometryTests(unittest.TestCase):
 
         self.assertEqual(results, [place])
         search.assert_called_once_with("exam", limit=8)
+
+
+class MapAgentToolTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.workspace = {"pins": [], "areas": [], "state": {}}
+        self.add_pin = mock.Mock(side_effect=lambda name, lat, lon, place_id, source: {
+            "id": "pin-agent", "label": "A", "name": name, "lat": lat, "lon": lon, "placeId": place_id, "source": source,
+        })
+
+        def save_state(state):
+            self.workspace["state"] = state
+            return state
+
+        city = {"id": "city-delhi", "name": "Delhi, India", "shortName": "Delhi", "country": "India", "countryCode": "IN", "lat": 28.6139, "lon": 77.2090, "bbox": [76.8, 28.4, 77.4, 28.9]}
+        place = {"id": "osm-cafe", "provider": "openstreetmap", "name": "Map Cafe", "address": "Connaught Place", "countryCode": "IN", "lat": 28.632, "lon": 77.219, "bbox": [77.219, 28.632, 77.219, 28.632]}
+        route = {"id": "route-agent", "provider": "openstreetmap-dijkstra", "profile": "driving", "waypoints": [[77.209, 28.6139], [77.219, 28.632]], "geometry": {"type": "LineString", "coordinates": [[77.209, 28.6139], [77.219, 28.632]]}, "summary": {"distanceMeters": 2400, "durationSeconds": 420}}
+        self.tools = AgentTools(AgentDependencies(
+            suggest_cities=mock.Mock(return_value=[city]),
+            resolve_city=mock.Mock(return_value=city),
+            search_places=mock.Mock(return_value=([place], False)),
+            plan_route=mock.Mock(return_value=route),
+            workspace_snapshot=lambda: self.workspace,
+            clear_workspace=self.clear_workspace,
+            add_pin=self.add_pin,
+            save_workspace_state=save_state,
+        ))
+
+    def clear_workspace(self) -> None:
+        self.workspace.update({"pins": [], "areas": [], "state": {}})
+
+    def test_agent_tools_only_present_trusted_city_place_and_route_data(self) -> None:
+        context = self.tools.new_context({})
+        city_result = self.tools.execute(context, "find_city", {"query": "Delhi"})
+        city_ref = city_result["locations"][0]["ref"]
+        place_result = self.tools.execute(context, "search_places", {"query": "coffee shops", "nearRef": city_ref})
+        place_ref = place_result["places"][0]["ref"]
+        route_result = self.tools.execute(context, "plan_route", {"waypointRefs": [city_ref, place_ref]})
+
+        result = self.tools.execute(context, "present_map", {
+            "cityRef": city_ref,
+            "placeRefs": [place_ref],
+            "persistPlaceRefs": [place_ref],
+            "routeRef": route_result["routeRef"],
+        })
+
+        update = result["mapUpdate"]
+        self.assertEqual(update["selectedCity"]["name"], "Delhi, India")
+        self.assertEqual(update["places"][0]["name"], "Map Cafe")
+        self.assertEqual(update["route"]["id"], "route-agent")
+        self.assertEqual(update["routeStops"][1]["id"], "osm-cafe")
+        self.assertEqual(self.workspace["state"]["routeId"], "route-agent")
+        self.add_pin.assert_called_once_with("Map Cafe", 28.632, 77.219, "osm-cafe", "place")
+
+    def test_agent_tools_reject_unknown_references_and_clear_explicitly(self) -> None:
+        context = self.tools.new_context({})
+        with self.assertRaises(server.ServiceError):
+            self.tools.execute(context, "present_map", {"placeRefs": ["place:not-trusted"]})
+
+        cleared = self.tools.execute(context, "clear_map", {})
+        self.assertTrue(cleared["mapUpdate"]["clear"])
+        self.assertEqual(cleared["mapUpdate"]["workspace"]["pins"], [])
+
+    def test_agent_map_presentation_recovers_from_invalid_legacy_workspace_state(self) -> None:
+        self.workspace["state"] = "invalid legacy state"
+        context = self.tools.new_context({})
+        city_ref = self.tools.execute(context, "find_city", {"query": "Delhi"})["locations"][0]["ref"]
+
+        result = self.tools.execute(context, "present_map", {"cityRef": city_ref})
+
+        self.assertEqual(result["mapUpdate"]["selectedCity"]["name"], "Delhi, India")
+        self.assertIsInstance(self.workspace["state"], dict)
+
+    def test_socket_origin_policy_keeps_wildcard_configuration_loopback_only(self) -> None:
+        hub = RealtimeHub(server.CONFIG)
+
+        self.assertTrue(hub._origin_allowed("http://127.0.0.1:8080"))
+        self.assertTrue(hub._origin_allowed("https://localhost:3000"))
+        self.assertFalse(hub._origin_allowed("https://example.com"))
+        self.assertFalse(hub._origin_allowed(""))
+
+
+class OpenAICompatibleClientTests(unittest.TestCase):
+    def test_posts_tools_to_chat_completions_without_exposing_the_key(self) -> None:
+        config = replace(server.CONFIG, openai_base_url="https://model.example/v1", openai_api_key="secret", model_name="map-model")
+
+        class Response:
+            def read(self, _maximum):
+                return b'{"choices":[{"message":{"content":"ready"}}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with mock.patch("backend.openai_client.urllib.request.urlopen", return_value=Response()) as request:
+            message = OpenAIChatClient(config).complete([{"role": "user", "content": "map it"}], [])
+
+        self.assertEqual(message["content"], "ready")
+        outbound = request.call_args.args[0]
+        self.assertEqual(outbound.full_url, "https://model.example/v1/chat/completions")
+        self.assertEqual(outbound.get_header("Authorization"), "Bearer secret")
+        self.assertIn(b'"model":"map-model"', outbound.data)
+        self.assertNotIn(b'"temperature"', outbound.data)
+
+
+class MapAgentServiceTests(unittest.TestCase):
+    class Hub:
+        def __init__(self) -> None:
+            self.events = []
+            self.completed = threading.Event()
+            self.handler = None
+
+        def set_message_handler(self, handler) -> None:
+            self.handler = handler
+
+        def has_session(self, session_id: str) -> bool:
+            return session_id == "session-12345678901234567890"
+
+        def publish(self, session_id: str, event: dict) -> bool:
+            self.events.append((session_id, event))
+            if event["type"] in {"agent.completed", "agent.failed", "agent.cancelled"}:
+                self.completed.set()
+            return True
+
+    class Client:
+        available = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, tools):
+            self.calls += 1
+            if self.calls == 1:
+                return {"content": "", "tool_calls": [{"id": "clear", "function": {"name": "clear_map", "arguments": "{}"}}]}
+            return {"content": "The map is clear."}
+
+    def test_agent_service_emits_validated_map_update_after_tool_loop(self) -> None:
+        workspace = {"pins": [], "areas": [], "state": {}}
+        tools = AgentTools(AgentDependencies(
+            suggest_cities=lambda query, country: [],
+            resolve_city=lambda query, country: None,
+            search_places=lambda query, country, lat, lon: ([], False),
+            plan_route=lambda waypoints, profile: {},
+            workspace_snapshot=lambda: workspace,
+            clear_workspace=lambda: workspace.update({"pins": [], "areas": [], "state": {}}),
+            add_pin=lambda name, lat, lon, place_id, source: {},
+            save_workspace_state=lambda state: state,
+        ))
+        hub = self.Hub()
+        service = MapAgentService(self.Client(), tools, hub)
+
+        service.start_run("session-12345678901234567890", "clear the map", {})
+
+        self.assertTrue(hub.completed.wait(2))
+        self.assertTrue(any(event["type"] == "agent.map" and event["update"]["clear"] for _, event in hub.events))
+        self.assertEqual(hub.events[-1][1]["type"], "agent.completed")
+
+
+class RealtimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def socket_port_pair() -> int:
+        for _ in range(20):
+            first = socket.socket()
+            first.bind(("127.0.0.1", 0))
+            port = first.getsockname()[1]
+            second = socket.socket()
+            try:
+                second.bind(("127.0.0.1", port + 1))
+                return port
+            except OSError:
+                continue
+            finally:
+                first.close()
+                second.close()
+        raise RuntimeError("Could not find a free local socket port pair.")
+
+    async def test_session_registration_uses_the_dedicated_loopback_socket(self) -> None:
+        port = self.socket_port_pair()
+        hub = RealtimeHub(replace(server.CONFIG, port=port))
+        hub.start()
+        try:
+            async with websocket_connect(f"ws://127.0.0.1:{port + 1}", origin="http://127.0.0.1:8080") as websocket:
+                await websocket.send('{"v":1,"type":"session.open","sessionId":"session-12345678901234567890"}')
+                reply = await asyncio.wait_for(websocket.recv(), 2)
+                self.assertIn("session.ready", reply)
+                self.assertTrue(hub.has_session("session-12345678901234567890"))
+        finally:
+            hub.stop()
 
 
 if __name__ == "__main__":

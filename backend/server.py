@@ -1,7 +1,7 @@
 """Monument City Explorer API.
 
-This server intentionally uses only Python's standard library so the API can run
-without a Node runtime, MongoDB driver, or Python package installation.
+The HTTP API remains standard-library based; agent transport and orchestration
+are isolated in dedicated backend modules.
 """
 
 from __future__ import annotations
@@ -10,10 +10,8 @@ import copy
 import functools
 import hashlib
 import heapq
-import ipaddress
 import json
 import math
-import os
 import re
 import signal
 import sqlite3
@@ -27,16 +25,28 @@ import urllib.parse
 import urllib.request
 import uuid
 import zlib
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from .agent import MapAgentService
+    from .agent_tools import AgentDependencies, AgentTools
+    from .config import BACKEND_DIR, Config, is_loopback_host
+    from .errors import ServiceError
+    from .openai_client import OpenAIChatClient
+    from .realtime import RealtimeHub
+except ImportError:  # Supports `python server.py` from the backend directory.
+    from agent import MapAgentService
+    from agent_tools import AgentDependencies, AgentTools
+    from config import BACKEND_DIR, Config, is_loopback_host
+    from errors import ServiceError
+    from openai_client import OpenAIChatClient
+    from realtime import RealtimeHub
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-BACKEND_DIR = Path(__file__).resolve().parent
+
 EARTH_RADIUS = 6_371_008.8
 TILE_ZOOM = 14
 DEFAULT_HEIGHT = 9.0
@@ -44,82 +54,8 @@ NEIGHBOR_RADIUS = 150.0
 MAX_TILE_PAYLOAD = 14_000_000
 OPENBUILDINGMAP_CATALOG_TTL_SECONDS = 600
 SERPAPI_ARCHIVE_DIR = BACKEND_DIR / "logs" / "serpapi"
-PROCESS_ENV_KEYS = set(os.environ)
-
-
-def load_env_file(path: Path, override: bool = False) -> None:
-    if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if (override and key not in PROCESS_ENV_KEYS) or key not in os.environ:
-            os.environ[key] = value
-
-
-load_env_file(ROOT_DIR / ".env")
-load_env_file(BACKEND_DIR / ".env", override=True)
-
-
-def root_path(value: str, default: Path) -> Path:
-    if not value:
-        return default
-    path = Path(value)
-    return path if path.is_absolute() else (ROOT_DIR / path).resolve()
-
-
-def is_loopback_host(value: str) -> bool:
-    host = value.strip().lower().strip("[]")
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-@dataclass(frozen=True)
-class Config:
-    host: str = os.getenv("HOST", "127.0.0.1")
-    port: int = int(os.getenv("PORT", "8787"))
-    database_path: Path = root_path(os.getenv("DATABASE_PATH", ""), BACKEND_DIR / "data" / "monument.db")
-    user_agent: str = os.getenv(
-        "APP_USER_AGENT", "MonoCityExplorer/1.0 (local-development; configure a contact before public traffic)"
-    )
-    allowed_origins: str = os.getenv("ALLOWED_ORIGINS", "*")
-    overpass_endpoint: str = os.getenv("OVERPASS_ENDPOINT", "https://overpass-api.de/api/interpreter")
-    overpass_backoff_seconds: int = max(1, int(os.getenv("OVERPASS_BACKOFF_SECONDS", "120")))
-    overture_release: str = os.getenv("OVERTURE_RELEASE", "2026-06-17.0")
-    overture_path: str = os.getenv("OVERTURE_BUILDINGS_PATH", "")
-    disable_overture: bool = os.getenv("DISABLE_OVERTURE", "0") == "1"
-    openbuildingmap_api_url: str = os.getenv("OPENBUILDINGMAP_API_URL", "").rstrip("/")
-    openbuildingmap_tile_ttl_days: int = int(os.getenv("OPENBUILDINGMAP_TILE_TTL_DAYS", "7"))
-    duckdb_path: Path = root_path(os.getenv("DUCKDB_PATH", ""), ROOT_DIR / "__duckdb" / "duckdb.exe")
-    tile_ttl_days: int = int(os.getenv("TILE_TTL_DAYS", "90"))
-    geocode_ttl_days: int = int(os.getenv("GEOCODE_TTL_DAYS", "30"))
-    suggestion_ttl_days: int = int(os.getenv("SUGGESTION_TTL_DAYS", "7"))
-    max_buildings_per_tile: int = int(os.getenv("MAX_BUILDINGS_PER_TILE", "20000"))
-    serp_api_key: str = os.getenv("SERP_API_KEY", "")
-    osm_router_base_url: str = os.getenv("OSM_ROUTER_BASE_URL", "https://router.project-osrm.org").rstrip("/")
-    osm_router_profile: str = os.getenv("OSM_ROUTER_PROFILE", "driving")
-    osm_router_timeout_seconds: int = max(1, int(os.getenv("OSM_ROUTER_TIMEOUT_SECONDS", "12")))
-    enable_serp_directions_fallback: bool = os.getenv("ENABLE_SERP_DIRECTIONS_FALLBACK", "0") == "1"
-    max_concurrent_requests: int = max(1, int(os.getenv("MAX_CONCURRENT_REQUESTS", "8")))
-
-
 CONFIG = Config()
 REQUEST_GATE = threading.BoundedSemaphore(CONFIG.max_concurrent_requests)
-
-
-class ServiceError(Exception):
-    def __init__(self, message: str, status: int = 500, retry_after: int | None = None):
-        super().__init__(message)
-        self.status = status
-        self.retry_after = max(1, math.ceil(retry_after)) if retry_after else None
 
 
 class SerialQueue:
@@ -1473,6 +1409,62 @@ def workspace_snapshot() -> dict[str, Any]:
     return {"pins": CACHE.list_pins(), "areas": CACHE.list_areas(), "state": CACHE.get_workspace_state()}
 
 
+def safe_workspace_state(state: Any) -> dict[str, Any]:
+    """Keep persisted workspace state small, map-specific, and client-safe."""
+    if not isinstance(state, dict):
+        raise ServiceError("Workspace state must be a JSON object.", 400)
+    safe: dict[str, Any] = {}
+    route_id = state.get("routeId")
+    if isinstance(route_id, str) and re.fullmatch(r"route-[A-Za-z0-9]+", route_id):
+        safe["routeId"] = route_id
+    route_pin_ids = state.get("routePinIds")
+    if isinstance(route_pin_ids, list):
+        safe["routePinIds"] = [pin_id for pin_id in route_pin_ids[:MAX_ROUTE_WAYPOINTS] if isinstance(pin_id, str)]
+    context = state.get("context")
+    if isinstance(context, dict):
+        selected = context.get("selectedCity")
+        if isinstance(selected, dict):
+            point = valid_coordinate(selected.get("lon"), selected.get("lat"))
+            name = str(selected.get("name") or "").strip()[:160]
+            if point and name:
+                city = {
+                    "id": str(selected.get("id") or f"city:{point[0]:.6f},{point[1]:.6f}")[:180],
+                    "name": name,
+                    "shortName": str(selected.get("shortName") or name)[:160],
+                    "country": str(selected.get("country") or "")[:120],
+                    "countryCode": country_param(str(selected.get("countryCode") or "" )).upper(),
+                    "lon": point[0],
+                    "lat": point[1],
+                }
+                bbox = selected.get("bbox")
+                if isinstance(bbox, list) and len(bbox) == 4:
+                    parsed_bbox = [parse_number(str(value)) for value in bbox]
+                    if all(value is not None for value in parsed_bbox):
+                        city["bbox"] = parsed_bbox
+                safe["context"] = {"selectedCity": city}
+    return safe
+
+
+def save_workspace_state(state: Any) -> dict[str, Any]:
+    safe = safe_workspace_state(state)
+    CACHE.put_workspace_state(safe)
+    return safe
+
+
+REALTIME = RealtimeHub(CONFIG)
+AGENT_TOOLS = AgentTools(AgentDependencies(
+    suggest_cities=suggest_locations,
+    resolve_city=resolve_location,
+    search_places=lambda query, country, lat, lon: lookup_places(query, country, lat, lon),
+    plan_route=get_route,
+    workspace_snapshot=workspace_snapshot,
+    clear_workspace=CACHE.clear_workspace,
+    add_pin=CACHE.add_pin,
+    save_workspace_state=save_workspace_state,
+))
+AGENT = MapAgentService(OpenAIChatClient(CONFIG), AGENT_TOOLS, REALTIME)
+
+
 def meters(value: Any) -> float:
     if not isinstance(value, (str, int, float)):
         return 0.0
@@ -2572,7 +2564,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         try:
             if parsed.path == "/api/health":
-                self.send_json(200, {"ok": True, "cache": "sqlite", "tileZoom": TILE_ZOOM, "overtureRelease": CONFIG.overture_release, "openBuildingMap": bool(CONFIG.openbuildingmap_api_url), "routing": {"provider": "openstreetmap-dijkstra", "profile": CONFIG.osm_router_profile, "osrmFallback": True, "serpFallbackEnabled": CONFIG.enable_serp_directions_fallback}})
+                self.send_json(200, {"ok": True, "cache": "sqlite", "tileZoom": TILE_ZOOM, "overtureRelease": CONFIG.overture_release, "openBuildingMap": bool(CONFIG.openbuildingmap_api_url), "agent": {"available": AGENT.available, "socketPort": CONFIG.socket_port}, "routing": {"provider": "openstreetmap-dijkstra", "profile": CONFIG.osm_router_profile, "osrmFallback": True, "serpFallbackEnabled": CONFIG.enable_serp_directions_fallback}})
                 return
             if parsed.path == "/api/suggest":
                 value = query.get("q", [""])[0].strip()[:160]
@@ -2663,6 +2655,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         try:
             body = self.read_json_body()
+            if parsed.path == "/api/agent/runs":
+                run_id = AGENT.start_run(str(body.get("sessionId") or ""), body.get("message"), body.get("mapContext"))
+                self.send_json(202, {"accepted": True, "runId": run_id})
+                return
             if parsed.path == "/api/pins":
                 point = valid_coordinate(body.get("lon"), body.get("lat"))
                 if not point:
@@ -2707,15 +2703,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_json(200, {"route": route})
                 return
             if parsed.path == "/api/workspace/state":
-                state = body.get("state")
-                if not isinstance(state, dict):
-                    raise ServiceError("Workspace state must be a JSON object.", 400)
-                safe_state = {key: value for key, value in state.items() if key in {"routeId", "context"}}
-                route_pin_ids = state.get("routePinIds")
-                if isinstance(route_pin_ids, list):
-                    safe_state["routePinIds"] = [pin_id for pin_id in route_pin_ids[:MAX_ROUTE_WAYPOINTS] if isinstance(pin_id, str)]
-                CACHE.put_workspace_state(safe_state)
-                self.send_json(200, {"state": CACHE.get_workspace_state()})
+                self.send_json(200, {"state": save_workspace_state(body.get("state"))})
                 return
             raise ServiceError("Not found.", 404)
         except Exception as error:
@@ -2749,8 +2737,13 @@ class ApiHandler(BaseHTTPRequestHandler):
 def main() -> None:
     if not is_loopback_host(CONFIG.host):
         raise SystemExit("Monument is a local-only service. HOST must be localhost, 127.0.0.1, or ::1.")
+    try:
+        REALTIME.start()
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
     server = ThreadingHTTPServer((CONFIG.host, CONFIG.port), ApiHandler)
     print(f"Monument Python API listening at http://{CONFIG.host}:{CONFIG.port}")
+    print(f"Monument agent socket listening at ws://{CONFIG.host}:{CONFIG.socket_port}")
 
     def shutdown(_signal: int, _frame: Any) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -2760,6 +2753,7 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        REALTIME.stop()
         server.server_close()
         CACHE.close()
 

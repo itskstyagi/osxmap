@@ -15,6 +15,20 @@ function loopbackApiUrl(value) {
 
 export const API_BASE_URL = loopbackApiUrl(window.MONUMENT_API_URL);
 
+export function agentSocketUrl(apiBaseUrl = API_BASE_URL) {
+  const url = new URL(apiBaseUrl);
+  const defaultPort = url.protocol === 'https:' ? 443 : 80;
+  const port = Number(url.port || defaultPort);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.port = String(port + 1);
+  url.pathname = '/';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+export const AGENT_SOCKET_URL = agentSocketUrl();
+
 export function apiPath(path) {
   return `${API_BASE_URL}${path}`;
 }

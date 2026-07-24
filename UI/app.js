@@ -1,4 +1,4 @@
-import { API_BASE_URL, apiPath } from './config.js';
+import { AGENT_SOCKET_URL, API_BASE_URL, apiPath } from './config.js';
 
 const TILE_ZOOM = 14;
 const ACCENT = '#315efb';
@@ -347,7 +347,7 @@ function addLocalLayers(map, theme) {
 
 class CityExplorer {
   constructor() {
-    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'intro-card', 'use-location', 'use-approximate-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-stops', 'route-stop-count', 'route-plan-hint', 'add-route-stop', 'trace-route', 'pin-list', 'area-list', 'geo-status', 'toggle-geo-tools', 'geo-content'].map((id) => [id, document.getElementById(id)]));
+    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'intro-card', 'use-location', 'use-approximate-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-stops', 'route-stop-count', 'route-plan-hint', 'add-route-stop', 'trace-route', 'pin-list', 'area-list', 'geo-status', 'toggle-geo-tools', 'geo-content', 'toggle-manual-controls', 'manual-controls-content', 'agent-composer', 'agent-input', 'agent-submit', 'agent-cancel', 'agent-question', 'agent-question-text', 'agent-question-choices', 'agent-connection', 'agent-request', 'agent-tool'].map((id) => [id, document.getElementById(id)]));
     this.theme = localStorage.getItem('theme') || 'dark';
     this.country = { country: '', countryCode: '', method: 'detecting' };
     this.selected = null;
@@ -368,16 +368,30 @@ class CityExplorer {
     this.searchResults = [];
     this.pinMode = false;
     this.geoToolsOpen = false;
+    this.manualControlsOpen = false;
     this.geo = { pins: [], areas: [], routeStops: [{ query: '', place: null, suggestions: [] }, { query: '', place: null, suggestions: [] }], route: null, routeAnimation: null, state: {}, context: { lat: null, lon: null, source: 'unknown', accuracy: null } };
     this.activeRouteStopIndex = 0;
     this.routeAnimationFrame = null;
     this.routeAnimationVersion = 0;
+    this.agentSessionId = crypto.randomUUID();
+    this.agentSocket = null;
+    this.agentSocketReady = false;
+    this.agentReconnectTimer = null;
+    this.agentReconnectAttempts = 0;
+    this.agentSubmitting = false;
+    this.agentCancelRequested = false;
+    this.agentRunId = '';
+    this.agentQuestionOpen = false;
+    this.agentRequestSerial = 0;
+    this.agentPostSerial = 0;
+    this.agentActivity = { connection: 'CONNECTING', request: 'Waiting for connection', tool: 'No active tool' };
     this.worker = new Worker(new URL('./tile-worker.js', import.meta.url), { type: 'module' });
     this.setTheme(this.theme);
     this.bindUi();
     this.createMap();
     this.initializeLocation();
     this.loadWorkspace();
+    this.connectAgentSocket();
   }
 
   bindUi() {
@@ -386,6 +400,7 @@ class CityExplorer {
     el['search-input'].addEventListener('input', () => this.queueSuggestions());
     el['search-input'].addEventListener('focus', () => { if (this.selected?.name !== el['search-input'].value) this.selected = null; });
     el['toggle-geo-tools'].addEventListener('click', () => this.setGeoToolsOpen(!this.geoToolsOpen));
+    el['toggle-manual-controls'].addEventListener('click', () => this.setManualControlsOpen(!this.manualControlsOpen));
     el['use-location'].addEventListener('click', () => this.useBrowserLocation());
     el['use-approximate-location'].addEventListener('click', () => this.useApproximateLocation());
     el['pin-mode'].addEventListener('click', () => this.togglePinMode());
@@ -399,10 +414,27 @@ class CityExplorer {
       }
     });
     el['add-route-stop'].addEventListener('click', () => this.addRouteStop());
+    el['agent-composer'].addEventListener('submit', (event) => this.submitAgentRequest(event));
+    el['agent-cancel'].addEventListener('click', () => this.cancelAgentRequest());
     document.querySelectorAll('[data-map-action]').forEach((button) => button.addEventListener('click', () => this.operate(button.dataset.mapAction)));
     document.addEventListener('keydown', (event) => this.handleShortcut(event));
     this.worker.onmessage = ({ data }) => this.handleWorkerMessage(data);
     this.setGeoToolsOpen(false);
+    this.setManualControlsOpen(false);
+    this.renderAgentActivity();
+    window.addEventListener('beforeunload', () => {
+      window.clearTimeout(this.agentReconnectTimer);
+      this.agentSocket?.close();
+    });
+  }
+
+  setManualControlsOpen(open) {
+    this.manualControlsOpen = open;
+    const sidebar = this.elements['manual-controls-content'].closest('.manual-sidebar');
+    const toggle = this.elements['toggle-manual-controls'];
+    sidebar.classList.toggle('is-open', open);
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.querySelector('b').textContent = open ? 'CLOSE' : 'OPEN';
   }
 
   setGeoToolsOpen(open) {
@@ -412,6 +444,390 @@ class CityExplorer {
     panel.classList.toggle('is-collapsed', !open);
     toggle.setAttribute('aria-expanded', String(open));
     toggle.querySelector('b').textContent = open ? 'CLOSE' : 'OPEN';
+  }
+
+  setAgentActivity(activity) {
+    this.agentActivity = { ...this.agentActivity, ...activity };
+    this.renderAgentActivity();
+  }
+
+  renderAgentActivity() {
+    const el = this.elements;
+    el['agent-connection'].textContent = this.agentActivity.connection;
+    el['agent-request'].textContent = this.agentActivity.request;
+    el['agent-tool'].textContent = this.agentActivity.tool;
+    const active = this.agentSubmitting || Boolean(this.agentRunId);
+    el['agent-submit'].disabled = !this.agentSocketReady || active;
+    el['agent-submit'].textContent = active ? 'WORKING' : 'SEND';
+    el['agent-cancel'].classList.toggle('is-hidden', !active);
+    el['agent-input'].disabled = active;
+  }
+
+  connectAgentSocket() {
+    if (this.agentSocket?.readyState === window.WebSocket?.OPEN || this.agentSocket?.readyState === window.WebSocket?.CONNECTING) return;
+    window.clearTimeout(this.agentReconnectTimer);
+    if (!window.WebSocket) {
+      this.setAgentActivity({ connection: 'UNAVAILABLE', request: 'WebSocket is not supported' });
+      return;
+    }
+    this.agentSocketReady = false;
+    this.setAgentActivity({ connection: 'CONNECTING', request: this.agentRunId ? 'Connection lost; reconnecting' : 'Waiting for connection' });
+    const socket = new window.WebSocket(AGENT_SOCKET_URL);
+    this.agentSocket = socket;
+    socket.addEventListener('open', () => {
+      if (this.agentSocket !== socket) return;
+      socket.send(JSON.stringify({ v: 1, type: 'session.open', sessionId: this.agentSessionId }));
+      this.setAgentActivity({ connection: 'OPENING' });
+    });
+    socket.addEventListener('message', (event) => this.handleAgentSocketMessage(socket, event));
+    socket.addEventListener('error', () => {
+      if (this.agentSocket === socket) this.setAgentActivity({ connection: 'RETRYING' });
+    });
+    socket.addEventListener('close', () => {
+      if (this.agentSocket !== socket) return;
+      this.agentSocketReady = false;
+      this.agentSocket = null;
+      this.renderAgentActivity();
+      const delay = Math.min(10000, 500 * 2 ** this.agentReconnectAttempts);
+      this.agentReconnectAttempts += 1;
+      this.agentReconnectTimer = window.setTimeout(() => this.connectAgentSocket(), delay);
+    });
+  }
+
+  handleAgentSocketMessage(socket, event) {
+    if (this.agentSocket !== socket || typeof event.data !== 'string') return;
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (!message || typeof message !== 'object') return;
+    if (message.type === 'session.ready' && message.sessionId === this.agentSessionId) {
+      this.agentSocketReady = true;
+      this.agentReconnectAttempts = 0;
+      this.setAgentActivity({ connection: 'READY', request: this.agentRunId ? 'Request in progress' : 'Ready for a map request' });
+      return;
+    }
+    if (message.type === 'error') {
+      this.setAgentActivity({ request: String(message.error || 'Socket request failed').slice(0, 160) });
+      return;
+    }
+    if (typeof message.type === 'string' && message.type.startsWith('agent.')) this.handleAgentEvent(message);
+  }
+
+  agentEventIsCurrent(runId) {
+    return Boolean(runId) && (this.agentSubmitting || !this.agentRunId || this.agentRunId === runId);
+  }
+
+  handleAgentEvent(event) {
+    const runId = typeof event.runId === 'string' ? event.runId : '';
+    if (!this.agentEventIsCurrent(runId)) return;
+    if (!this.agentRunId) this.agentRunId = runId;
+    if (event.type === 'agent.started') {
+      this.agentSubmitting = false;
+      this.setAgentActivity({ request: 'Agent request started', tool: 'Preparing map tools' });
+      return;
+    }
+    if (event.type === 'agent.status') {
+      this.agentSubmitting = false;
+      const label = String(event.label || 'Updating the map').slice(0, 160);
+      this.setAgentActivity({ request: 'Request in progress', tool: label });
+      return;
+    }
+    if (event.type === 'agent.map') {
+      this.applyAgentMapUpdate(event.update);
+      this.setAgentActivity({ request: 'Map updated', tool: 'Map changes applied' });
+      return;
+    }
+    if (event.type === 'agent.question') {
+      this.agentSubmitting = false;
+      this.agentRunId = '';
+      this.agentCancelRequested = false;
+      this.agentPostSerial = 0;
+      this.showAgentQuestion(event.question, event.choices);
+      this.setAgentActivity({ request: 'Waiting for your choice', tool: 'Clarification requested' });
+      return;
+    }
+    if (event.type === 'agent.completed') {
+      this.finishAgentRun();
+      this.setAgentActivity({ request: String(event.message || 'Map request completed').slice(0, 160), tool: 'Completed' });
+      return;
+    }
+    if (event.type === 'agent.failed') {
+      this.finishAgentRun();
+      this.setAgentActivity({ request: String(event.error || 'Map request failed').slice(0, 160), tool: 'Failed' });
+      return;
+    }
+    if (event.type === 'agent.cancelled') {
+      this.finishAgentRun();
+      this.setAgentActivity({ request: 'Request cancelled', tool: 'Cancelled' });
+    }
+  }
+
+  finishAgentRun() {
+    this.agentSubmitting = false;
+    this.agentCancelRequested = false;
+    this.agentRunId = '';
+    this.agentPostSerial = 0;
+    this.renderAgentActivity();
+  }
+
+  async submitAgentRequest(event) {
+    event.preventDefault();
+    const message = this.elements['agent-input'].value.trim();
+    if (!message) return this.elements['agent-input'].focus();
+    await this.startAgentRequest(message);
+  }
+
+  async startAgentRequest(message) {
+    if (this.agentSubmitting || this.agentRunId) return;
+    if (!this.agentSocketReady) {
+      this.setAgentActivity({ request: 'Waiting for the agent connection' });
+      this.connectAgentSocket();
+      return;
+    }
+    this.agentQuestionOpen = false;
+    this.elements['agent-question'].classList.add('is-hidden');
+    this.agentSubmitting = true;
+    this.agentCancelRequested = false;
+    const requestSerial = ++this.agentRequestSerial;
+    this.agentPostSerial = requestSerial;
+    this.setAgentActivity({ request: 'Sending request', tool: 'Waiting for agent' });
+    try {
+      const response = await postJson('/api/agent/runs', {
+        sessionId: this.agentSessionId,
+        message: message.slice(0, 2000),
+        mapContext: this.agentMapContext(),
+      });
+      if (!response.accepted || typeof response.runId !== 'string') throw new Error('The agent request was not accepted.');
+      if (this.agentPostSerial !== requestSerial) return;
+      this.agentSubmitting = false;
+      this.agentRunId = this.agentRunId || response.runId;
+      this.elements['agent-input'].value = '';
+      this.setAgentActivity({ request: 'Request in progress' });
+      if (this.agentCancelRequested) this.sendAgentCancel();
+    } catch (error) {
+      if (this.agentPostSerial !== requestSerial) return;
+      this.finishAgentRun();
+      this.setAgentActivity({ request: String(error.message || 'Could not start the map agent.').slice(0, 160), tool: 'Request failed' });
+    }
+  }
+
+  cancelAgentRequest() {
+    if (this.agentQuestionOpen) {
+      this.agentQuestionOpen = false;
+      this.elements['agent-question'].classList.add('is-hidden');
+      this.setAgentActivity({ request: 'Clarification dismissed', tool: 'No active tool' });
+      return;
+    }
+    if (!this.agentSubmitting && !this.agentRunId) return;
+    this.agentCancelRequested = true;
+    this.setAgentActivity({ request: 'Cancelling request', tool: 'Waiting for cancellation' });
+    this.sendAgentCancel();
+  }
+
+  sendAgentCancel() {
+    if (!this.agentRunId || !this.agentSocketReady || this.agentSocket?.readyState !== window.WebSocket.OPEN) return;
+    this.agentSocket.send(JSON.stringify({ v: 1, type: 'agent.cancel', runId: this.agentRunId }));
+  }
+
+  showAgentQuestion(question, choices) {
+    const safeQuestion = String(question || '').trim().slice(0, 300);
+    const safeChoices = Array.isArray(choices) ? [...new Set(choices.map((choice) => String(choice || '').trim()).filter(Boolean))].slice(0, 4) : [];
+    if (!safeQuestion || safeChoices.length < 2) return;
+    this.agentQuestionOpen = true;
+    this.elements['agent-question-text'].textContent = safeQuestion;
+    const container = this.elements['agent-question-choices'];
+    container.replaceChildren();
+    for (const choice of safeChoices) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = choice;
+      button.addEventListener('click', () => this.startAgentRequest(choice));
+      container.append(button);
+    }
+    this.elements['agent-question'].classList.remove('is-hidden');
+  }
+
+  agentMapContext() {
+    const point = (value) => {
+      const lon = numeric(value?.lon);
+      const lat = numeric(value?.lat);
+      return lon === null || lat === null ? null : { id: String(value?.id || '').slice(0, 180), name: String(value?.name || '').slice(0, 160), countryCode: String(value?.countryCode || '').slice(0, 2), lon: Number(lon.toFixed(6)), lat: Number(lat.toFixed(6)) };
+    };
+    const view = this.map;
+    const center = view?.getCenter?.();
+    const bounds = view?.getBounds?.();
+    const areaBounds = (area) => {
+      const positions = geometryPositions(area.geometry).filter((position) => Array.isArray(position) && numeric(position[0]) !== null && numeric(position[1]) !== null).slice(0, 200);
+      if (!positions.length) return null;
+      const lons = positions.map((position) => Number(position[0]));
+      const lats = positions.map((position) => Number(position[1]));
+      return [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)].map((value) => Number(value.toFixed(6)));
+    };
+    const selectedCity = point(this.selected);
+    const selectedBbox = Array.isArray(this.selected?.bbox) && this.selected.bbox.length === 4 && this.selected.bbox.every((value) => numeric(value) !== null)
+      ? this.selected.bbox.map((value) => Number(Number(value).toFixed(6)))
+      : undefined;
+    return {
+      selectedCity: selectedCity ? { ...selectedCity, shortName: String(this.selected.shortName || this.selected.name || '').slice(0, 160), country: String(this.selected.country || '').slice(0, 120), bbox: selectedBbox } : null,
+      center: center ? [Number(center.lng.toFixed(6)), Number(center.lat.toFixed(6))] : undefined,
+      bounds: bounds ? [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].map((value) => Number(value.toFixed(6))) : undefined,
+      zoom: view ? Number(view.getZoom().toFixed(2)) : undefined,
+      countryCode: String(this.country.countryCode || '').slice(0, 2),
+      routeStops: this.routePlan().filter((stop) => stop.place).slice(0, 12).map((stop) => point(stop.place)).filter(Boolean),
+      pins: this.geo.pins.slice(0, 20).map((pin) => point(pin)).filter(Boolean),
+      areas: this.geo.areas.slice(0, 8).map((area) => ({ id: String(area.id || '').slice(0, 80), label: String(area.label || '').slice(0, 160), areaSquareMeters: numeric(area.summary?.areaSquareMeters), bounds: areaBounds(area) })).filter((area) => area.bounds),
+    };
+  }
+
+  agentLocation(value) {
+    const lon = numeric(value?.lon);
+    const lat = numeric(value?.lat);
+    const name = String(value?.name || value?.shortName || '').trim().slice(0, 160);
+    if (lon === null || lat === null || lon < -180 || lon > 180 || lat < -90 || lat > 90 || !name) return null;
+    const bbox = Array.isArray(value?.bbox) && value.bbox.length === 4 && value.bbox.every((item) => numeric(item) !== null)
+      ? value.bbox.map(Number)
+      : [lon, lat, lon, lat];
+    return {
+      id: String(value.id || `agent:${lon.toFixed(6)},${lat.toFixed(6)}`).slice(0, 180), name,
+      shortName: String(value.shortName || name).slice(0, 160), address: String(value.address || '').slice(0, 240),
+      country: String(value.country || '').slice(0, 120), countryCode: String(value.countryCode || '').slice(0, 2).toUpperCase(),
+      provider: String(value.provider || '').slice(0, 80), lon, lat, bbox,
+    };
+  }
+
+  agentRoute(value) {
+    if (!value || typeof value !== 'object' || value.geometry?.type !== 'LineString' || !Array.isArray(value.geometry.coordinates)) return null;
+    const coordinates = value.geometry.coordinates.slice(0, 20_000).map((point) => {
+      const lon = numeric(point?.[0]);
+      const lat = numeric(point?.[1]);
+      return lon === null || lat === null || lon < -180 || lon > 180 || lat < -90 || lat > 90 ? null : [lon, lat];
+    }).filter(Boolean);
+    if (coordinates.length < 2) return null;
+    const waypoints = Array.isArray(value.waypoints) ? value.waypoints.slice(0, MAX_ROUTE_STOPS).map((point) => {
+      const lon = numeric(point?.[0]);
+      const lat = numeric(point?.[1]);
+      return lon === null || lat === null || lon < -180 || lon > 180 || lat < -90 || lat > 90 ? null : [lon, lat];
+    }).filter(Boolean) : [];
+    return {
+      id: String(value.id || 'agent-route').slice(0, 160), provider: String(value.provider || '').slice(0, 80),
+      profile: String(value.profile || 'driving').slice(0, 40), waypoints,
+      geometry: { type: 'LineString', coordinates }, summary: value.summary && typeof value.summary === 'object' ? value.summary : {},
+    };
+  }
+
+  agentArea(value) {
+    const geometry = value?.geometry;
+    if (!geometry || !['Polygon', 'MultiPolygon'].includes(geometry.type) || !Array.isArray(geometry.coordinates)) return null;
+    const sanitizeRing = (ring) => {
+      if (!Array.isArray(ring)) return null;
+      const points = ring.slice(0, 500).map((point) => {
+        const lon = numeric(point?.[0]);
+        const lat = numeric(point?.[1]);
+        return lon === null || lat === null || lon < -180 || lon > 180 || lat < -90 || lat > 90 ? null : [lon, lat];
+      }).filter(Boolean);
+      return points.length >= 4 ? points : null;
+    };
+    let coordinates;
+    if (geometry.type === 'Polygon') {
+      coordinates = geometry.coordinates?.slice(0, 32).map(sanitizeRing).filter(Boolean);
+    } else {
+      coordinates = geometry.coordinates?.slice(0, 16).map((polygon) => polygon?.slice(0, 32).map(sanitizeRing).filter(Boolean)).filter((polygon) => polygon?.length);
+    }
+    if (!coordinates?.length) return null;
+    return {
+      id: String(value.id || '').slice(0, 100), label: String(value.label || 'Measured area').slice(0, 160),
+      geometry: { type: geometry.type, coordinates }, summary: value.summary && typeof value.summary === 'object' ? value.summary : {},
+    };
+  }
+
+  applyWorkspaceSnapshot(workspace) {
+    if (!workspace || typeof workspace !== 'object') return;
+    this.geo.pins = (Array.isArray(workspace.pins) ? workspace.pins : []).slice(0, 100).map((pin) => {
+      const location = this.agentLocation(pin);
+      return location ? { ...location, label: String(pin.label || '').slice(0, 32) || 'PIN', source: String(pin.source || '').slice(0, 40), placeId: String(pin.placeId || '').slice(0, 180) } : null;
+    }).filter(Boolean);
+    this.geo.areas = (Array.isArray(workspace.areas) ? workspace.areas : []).slice(0, 32).map((area) => this.agentArea(area)).filter(Boolean);
+    this.geo.state = workspace.state && typeof workspace.state === 'object' ? workspace.state : {};
+  }
+
+  clearCityData() {
+    this.selected = null;
+    this.features.clear();
+    this.tileFeatures.clear();
+    this.tileMetadata.clear();
+    this.loaded.clear();
+    this.failed.clear();
+    this.buildings = 0;
+    this.inferred = 0;
+    this.total = 0;
+    this.generation += 1;
+    this.worker.postMessage({ type: 'reset', apiBaseUrl: API_BASE_URL, context: { region: '', lat: 0, lon: 0 }, tiles: [] });
+    this.map?.getSource('local-city')?.setData(EMPTY_COLLECTION);
+    this.map?.getSource(FOCUS_SOURCE)?.setData(EMPTY_COLLECTION);
+    this.map?.getSource(SEARCH_RESULTS_SOURCE)?.setData(EMPTY_COLLECTION);
+    this.setStream({ loaded: 0, total: 0, buildings: 0, inferred: 0, active: false, preview: false, source: '', degraded: false });
+  }
+
+  clearWorkspaceLocal(clearCity = false) {
+    this.geo.pins = [];
+    this.geo.areas = [];
+    this.stopRouteAnimation(false);
+    this.geo.route = null;
+    this.geo.routeStops = [{ query: '', place: null, suggestions: [] }, { query: '', place: null, suggestions: [] }];
+    this.geo.state = {};
+    this.searchResults = [];
+    if (clearCity) {
+      this.geo.context = { lat: null, lon: null, source: 'unknown', accuracy: null };
+      this.clearCityData();
+      this.elements['search-input'].value = '';
+    }
+    this.renderWorkspace();
+    this.renderGeography();
+    this.renderSearchResults();
+    this.updateIntroCard();
+  }
+
+  applyAgentView(view) {
+    if (!view || typeof view !== 'object' || !this.map) return;
+    if (Array.isArray(view.bounds) && view.bounds.length === 4 && view.bounds.every((value) => numeric(value) !== null)) {
+      const [west, south, east, north] = view.bounds.map(Number);
+      if (west >= -180 && east <= 180 && south >= -90 && north <= 90 && west < east && south < north) {
+        this.map.fitBounds([[west, south], [east, north]], { padding: 90, maxZoom: 16, duration: 800, essential: true });
+        return;
+      }
+    }
+    if (Array.isArray(view.center) && view.center.length >= 2 && numeric(view.center[0]) !== null && numeric(view.center[1]) !== null) {
+      const zoom = numeric(view.zoom);
+      this.map.flyTo({ center: [Number(view.center[0]), Number(view.center[1])], zoom: zoom === null ? Math.max(12, this.map.getZoom()) : Math.max(1, Math.min(20, zoom)), duration: 700, essential: true });
+    }
+  }
+
+  applyAgentMapUpdate(update) {
+    if (!update || typeof update !== 'object') return;
+    if (update.clear === true) {
+      this.clearWorkspaceLocal(true);
+      this.setGeoStatus('The map agent cleared the workspace.');
+      return;
+    }
+    const selected = this.agentLocation(update.selectedCity);
+    if (selected) this.chooseLocation(selected);
+    if (Array.isArray(update.places)) {
+      this.searchResults = update.places.slice(0, 20).map((place) => this.agentLocation(place)).filter(Boolean);
+    }
+    if (Array.isArray(update.routeStops)) {
+      this.geo.routeStops = update.routeStops.slice(0, MAX_ROUTE_STOPS).map((place) => this.agentLocation(place)).filter(Boolean).map((place) => ({ query: place.name, place, suggestions: [] }));
+    }
+    if (Object.prototype.hasOwnProperty.call(update, 'route')) this.geo.route = this.agentRoute(update.route);
+    if (update.workspace) this.applyWorkspaceSnapshot(update.workspace);
+    this.routePlan();
+    this.renderWorkspace();
+    this.renderGeography();
+    this.renderSearchResults();
+    this.updateIntroCard();
+    this.applyAgentView(update.view);
   }
 
   createMap() {
@@ -602,6 +1018,7 @@ class CityExplorer {
   handleWorkerMessage(data) {
     if (data.generation !== this.generation) return;
     if (data.type === 'queued') {
+      if (data.total === 0) return;
       this.total = Math.max(this.total, data.total);
       if (data.added > 0) this.setPreviewVisible(true);
       this.setStream({ ...this.stream, total: this.total, active: true, preview: this.previewVisible });
@@ -1012,16 +1429,31 @@ class CityExplorer {
 
   async loadWorkspace() {
     try {
-      await deleteRequest('/api/workspace');
-      this.geo.pins = [];
-      this.geo.areas = [];
-      this.geo.routeStops = [{ query: '', place: null, suggestions: [] }, { query: '', place: null, suggestions: [] }];
-      this.geo.route = null;
-      this.geo.state = {};
-      this.searchResults = [];
+      const workspace = await jsonRequest('/api/workspace');
+      this.applyWorkspaceSnapshot(workspace);
+      const selected = this.agentLocation(this.geo.state?.context?.selectedCity);
+      if (selected) this.chooseLocation(selected);
+      const routeId = typeof this.geo.state?.routeId === 'string' ? this.geo.state.routeId : '';
+      if (routeId) {
+        try {
+          const response = await jsonRequest(`/api/routes/${encodeURIComponent(routeId)}`);
+          this.geo.route = this.agentRoute(response.route);
+          if (this.geo.route) {
+            const pinsById = new Map(this.geo.pins.map((pin) => [pin.id, pin]));
+            const savedStops = Array.isArray(this.geo.state.routePinIds) ? this.geo.state.routePinIds.map((id) => pinsById.get(id)).filter(Boolean) : [];
+            const routeStops = savedStops.length >= 2 ? savedStops : this.geo.route.waypoints.map(([lon, lat], index) => ({ id: `route-stop-${index}`, name: `Route stop ${this.routeStopLabel(index)}`, lon, lat }));
+            this.geo.routeStops = routeStops.map((place) => ({ query: place.name, place, suggestions: [] }));
+          }
+        } catch (error) {
+          this.geo.route = null;
+          this.setGeoStatus(`Saved route could not be restored: ${error.message}`, true);
+        }
+      }
       this.renderWorkspace();
       this.renderGeography();
       this.renderSearchResults();
+      this.updateIntroCard();
+      if (this.geo.pins.length || this.geo.areas.length || this.geo.route || selected) this.setGeoStatus('Restored the saved workspace.');
     } catch (error) {
       this.setGeoStatus(error.message, true);
     }
@@ -1353,17 +1785,7 @@ class CityExplorer {
   async clearAdditions() {
     try {
       await deleteRequest('/api/workspace');
-      this.geo.pins = [];
-      this.geo.areas = [];
-      this.stopRouteAnimation(false);
-      this.geo.route = null;
-      this.geo.routeStops = [{ query: '', place: null, suggestions: [] }, { query: '', place: null, suggestions: [] }];
-      this.geo.state = {};
-      this.searchResults = [];
-      this.renderWorkspace();
-      this.renderGeography();
-      this.renderSearchResults();
-      this.updateIntroCard();
+      this.clearWorkspaceLocal(false);
       this.setGeoStatus('Pins, areas, the route plan, and current search markers were cleared.');
     } catch (error) {
       this.setGeoStatus(error.message, true);

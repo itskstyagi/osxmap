@@ -1,7 +1,9 @@
 # Monument Python Backend
 
-This is a standard-library Python 3.11+ API server. It replaces the original
-Express/Mongo service while retaining its user-visible behavior:
+This is a Python 3.11+ local API server. Its map/cache HTTP layer uses the
+standard library, while the agent WebSocket bridge uses one pinned dependency.
+It replaces the original Express/Mongo service while retaining its user-visible
+behavior:
 
 - Nominatim city suggestions, exact lookup, and country detection.
 - Rate-limited public-service access and durable TTL caches.
@@ -9,11 +11,13 @@ Express/Mongo service while retaining its user-visible behavior:
 - Footprint-, type-, density-, and neighborhood-aware building-height estimation.
 - Map-ready GeoJSON tile streaming with building geometry plus categorized public-place markers.
 - OSM-first place lookup, durable local pins/areas/routes, and animated local Dijkstra driving routes over OSM road data.
+- An OpenAI-compatible map agent that turns natural-language requests into validated city, place, and route map updates.
 
 ## Run
 
 ```powershell
 Copy-Item .env.example .env
+python -m pip install -r ..\requirements.txt
 python server.py
 ```
 
@@ -26,6 +30,33 @@ isolation.
 The server loads the root `.env` first for a direct migration from the original
 project, then `backend/.env`, whose values override the root file. Explicit
 shell environment variables always take precedence over both files.
+
+## AI Map Agent
+
+Set these backend-only variables in the root or `backend` `.env` file:
+
+```text
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=...
+MODEL_NAME=...
+```
+
+`OPENAI_BASE_URL` is an OpenAI-compatible API root. The backend sends model
+requests to its `/chat/completions` endpoint; the static UI never receives the
+base URL, API key, or model name.
+
+The HTTP API listens on `PORT` and the agent event socket listens on `PORT + 1`
+(defaults: `8787` and `8788`). The browser posts an agent request to
+`POST /api/agent/runs` and receives progress, clarification requests, validated
+map updates, errors, and cancellation events on the loopback WebSocket. Socket
+origin checks allow only local browser origins even when `ALLOWED_ORIGINS=*`.
+
+Agent requests use a fixed tool allowlist over existing city, place, route, and
+workspace services. They cannot make arbitrary HTTP requests, read files, run
+SQL, or receive provider credentials. Model prompts and responses are not
+persisted. Agent-created pins, areas, selected-city context, and active routes
+use the same local workspace store as manual controls. `clear map` is an
+explicit workspace mutation that clears these items and the visible map state.
 
 ## UI Deployment
 
@@ -44,6 +75,7 @@ or user accounts.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/health` | Service configuration status. |
+| `POST /api/agent/runs` | Start an AI map run for an active browser socket session. |
 | `GET /api/suggest?q=&countryCode=` | Debounced city suggestions. |
 | `GET /api/geocode?q=&countryCode=` | Exact city lookup. |
 | `GET /api/country?lat=&lon=` | Browser coordinate or IP-country lookup. |
