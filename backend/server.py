@@ -1779,22 +1779,29 @@ def openbuildingmap_files() -> list[dict[str, str]]:
         return []
     with OPENBUILDINGMAP_CATALOG_LOCK:
         if OPENBUILDINGMAP_CATALOG["expires"] > time.monotonic():
-            return OPENBUILDINGMAP_CATALOG["files"]
+            return list(OPENBUILDINGMAP_CATALOG["files"])
+        stale_files = list(OPENBUILDINGMAP_CATALOG["files"])
 
-        def task() -> list[dict[str, str]]:
-            payload = fetch_json(f"{CONFIG.openbuildingmap_api_url}/files", {"Accept": "application/json"}, 100)
-            files = []
-            for item in payload.get("files", []):
-                filename = str(item.get("filename") or "")
-                key = str(item.get("quadkey") or "")
-                if not key:
-                    match = re.search(r"building\.([0-3]+)\.gpkg$", filename)
-                    key = match.group(1) if match else ""
-                if filename.endswith(".gpkg") and re.fullmatch(r"[0-3]+", key):
-                    files.append({"filename": filename, "quadkey": key})
-            return files
+    def task() -> list[dict[str, str]]:
+        payload = fetch_json(f"{CONFIG.openbuildingmap_api_url}/files", {"Accept": "application/json"}, 100)
+        files = []
+        for item in payload.get("files", []):
+            filename = str(item.get("filename") or "")
+            key = str(item.get("quadkey") or "")
+            if not key:
+                match = re.search(r"building\.([0-3]+)\.gpkg$", filename)
+                key = match.group(1) if match else ""
+            if filename.endswith(".gpkg") and re.fullmatch(r"[0-3]+", key):
+                files.append({"filename": filename, "quadkey": key})
+        return files
 
+    try:
         files = OPENBUILDINGMAP_QUEUE.run(task)
+    except Exception:
+        if stale_files:
+            return stale_files
+        raise
+    with OPENBUILDINGMAP_CATALOG_LOCK:
         OPENBUILDINGMAP_CATALOG.update({"expires": time.monotonic() + OPENBUILDINGMAP_CATALOG_TTL_SECONDS, "files": files})
         return files
 

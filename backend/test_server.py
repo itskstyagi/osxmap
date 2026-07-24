@@ -179,6 +179,19 @@ class OpenBuildingMapGeometryTests(unittest.TestCase):
         self.assertEqual(result["source"], "overture")
         self.assertEqual([feature["properties"]["kind"] for feature in result["features"]], ["building", "poi"])
 
+    def test_uses_stale_openbuildingmap_catalog_after_refresh_failure(self) -> None:
+        original_catalog = dict(server.OPENBUILDINGMAP_CATALOG)
+        config = replace(server.CONFIG, openbuildingmap_api_url="https://mirror.example")
+        server.OPENBUILDINGMAP_CATALOG.update({"expires": 0.0, "files": [{"filename": "building.12.gpkg", "quadkey": "12"}]})
+        try:
+            with mock.patch.object(server, "CONFIG", config), mock.patch.object(server, "fetch_json", side_effect=server.ServiceError("mirror unavailable")):
+                files = server.openbuildingmap_files()
+        finally:
+            server.OPENBUILDINGMAP_CATALOG.clear()
+            server.OPENBUILDINGMAP_CATALOG.update(original_catalog)
+
+        self.assertEqual(files, [{"filename": "building.12.gpkg", "quadkey": "12"}])
+
 
 if __name__ == "__main__":
     unittest.main()
