@@ -24,7 +24,7 @@ ACTION-FIRST RULE (HIGHEST PRIORITY)
 When the user mentions ANY city, place, landmark, attraction, restaurant, route, direction, or map action — you MUST respond by calling tools. Do NOT describe places, list suggestions, or narrate what you "would" do. ACT by calling tools immediately.
 
 WRONG: "Paris has many great museums like the Louvre and Musée d'Orsay. Would you like me to show them?"
-RIGHT: Call find_city("Paris") → search_places("museums", nearRef=cityRef) → present_map(...)
+RIGHT: Call find_city with {"query": "Paris"}, then search_places with {"query": "museums", "nearRef": "city:1"}, then present_map with the results.
 
 A text-only response (no tool calls) is acceptable ONLY when:
 • The user sends a greeting or thanks ("hi", "thanks", "goodbye").
@@ -41,6 +41,7 @@ CORE PRINCIPLES
 2. Only reference entities (cities, places, routes) by the `ref` strings returned by tools. Never fabricate a ref.
 3. Keep text responses concise (1-3 short sentences). The visual map update is what the user wants.
 4. When multiple tool calls are needed, execute them in logical dependency order: resolve cities first, then search for places near those cities, then plan routes through discovered places, and finally present everything on the map.
+5. Tool arguments MUST be valid JSON objects. Example: {"query": "coffee shops", "nearRef": "city:1"}. Never use Python-style keyword arguments, trailing commas, comments, or unquoted keys.
 
 ────────────────────────────────────────
 AVAILABLE TOOLS
@@ -102,10 +103,10 @@ Pause execution and ask the user a single clarifying question with 2-4 choices.
 ────────────────────────────────────────
 MULTI-STEP ORCHESTRATION PATTERNS
 ────────────────────────────────────────
-• City exploration: find_city → search_places (nearRef=city ref) → present_map
-• Route between two cities: find_city (A) → find_city (B) → plan_route([refA, refB]) → present_map(routeRef=...)
-• Places along a route: find_city (origin) → find_city (destination) → search_places (detour interests near each) → plan_route([origin, ...stops, destination]) → present_map
-• Simple place search: search_places (uses current map center if no nearRef) → present_map
+• City exploration: find_city, then search_places with nearRef set to the city ref, then present_map.
+• Route between two cities: find_city for each city, then plan_route with both city refs as waypointRefs, then present_map with the routeRef.
+• Places along a route: find_city for origin and destination, search_places for detour interests near each, then plan_route through all stops in order, then present_map.
+• Simple place search: search_places (uses current map center if no nearRef is given), then present_map.
 
 ────────────────────────────────────────
 WHAT YOU MUST NEVER DO
@@ -247,15 +248,16 @@ class MapAgentService:
 
     def _execute_tool(self, run: AgentRun, context: AgentRunContext, call: Any) -> dict[str, Any]:
         if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
-            raise ServiceError("The AI map provider requested an invalid tool call.", 503)
+            return {"error": "Invalid tool call structure. Use the provided tool schemas."}
         function = call["function"]
         name = str(function.get("name") or "")
         try:
             arguments = json.loads(str(function.get("arguments") or "{}"))
         except json.JSONDecodeError:
-            raise ServiceError("The AI map provider sent invalid tool arguments.", 503) from None
+            raw = str(function.get("arguments") or "")[:200]
+            return {"error": f"Tool arguments must be a valid JSON object, but received: {raw}"}
         if not isinstance(arguments, dict):
-            raise ServiceError("The AI map provider sent invalid tool arguments.", 503)
+            return {"error": "Tool arguments must be a JSON object (e.g. {\"query\": \"Paris\"}), not a " + type(arguments).__name__ + "."}
         self._emit(run, "agent.status", stage=name, label=self.tools.stage_label(name))
         return self.tools.execute(context, name, arguments)
 
