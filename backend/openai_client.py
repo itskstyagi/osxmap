@@ -37,6 +37,12 @@ class OpenAIChatClient:
             "tools": tools,
             "tool_choice": "auto",
         }
+        if self.config.agent_temperature is not None:
+            payload["temperature"] = self.config.agent_temperature
+        if self.config.agent_max_tokens:
+            # Azure reasoning deployments commonly reject `max_tokens`; only
+            # send their modern completion limit when an operator opts in.
+            payload["max_completion_tokens"] = self.config.agent_max_tokens
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if len(body) > 512_000:
             raise ServiceError("The map-agent request is too large.", 413)

@@ -250,16 +250,50 @@ class OpenBuildingMapGeometryTests(unittest.TestCase):
 
         self.assertEqual([place["name"] for place in results], ["Primary", "First", "Second"])
 
-    def test_forced_serp_lookup_skips_local_and_osm_lookup_paths(self) -> None:
-        place = {"id": "serpapi-google-maps:example", "provider": "serpapi-google-maps", "providerId": "example", "name": "Example", "address": "", "countryCode": "", "lat": 28.0, "lon": 77.0, "bbox": [77.0, 28.0, 77.0, 28.0]}
-        with mock.patch.object(server, "search_serp_places", return_value=[place]) as serp, mock.patch.object(server.CACHE, "get_place_lookup") as lookup, mock.patch.object(server.CACHE, "search_places") as local:
-            results, stored = server.lookup_places("Example", "", None, None, "serp")
+    def test_osm_category_lookup_precedes_nominatim_and_serp(self) -> None:
+        place = {"id": "openstreetmap:node:1", "provider": "openstreetmap", "providerId": "node:1", "name": "Map Cafe", "address": "", "countryCode": "IN", "lat": 28.0, "lon": 77.0, "bbox": [77.0, 28.0, 77.0, 28.0]}
+        stale_serp = {"id": "serpapi-google-maps:old", "provider": "serpapi-google-maps", "providerId": "old", "name": "Old Cafe", "address": "", "countryCode": "IN", "lat": 28.0, "lon": 77.0, "bbox": [77.0, 28.0, 77.0, 28.0]}
+        with mock.patch.object(server.CACHE, "get_place_lookup", return_value=[stale_serp]), mock.patch.object(server.CACHE, "search_places", return_value=[]), mock.patch.object(server, "search_osm_category_places", return_value=[place]) as osm, mock.patch.object(server, "search_nominatim_places") as nominatim, mock.patch.object(server, "search_serp_places") as serp, mock.patch.object(server.CACHE, "put_place_lookup"):
+            discovery = server.lookup_places("coffee shops", "IN", 28.0, 77.0)
 
-        self.assertEqual(results, [place])
-        self.assertFalse(stored)
-        serp.assert_called_once_with("Example", None, None, "")
-        lookup.assert_not_called()
-        local.assert_not_called()
+        self.assertEqual(discovery["results"], [place])
+        self.assertEqual(discovery["source"], "openstreetmap")
+        self.assertEqual(discovery["lookupStage"], "osm-category-search")
+        osm.assert_called_once_with("coffee shops", "IN", 28.0, 77.0)
+        nominatim.assert_not_called()
+        serp.assert_not_called()
+
+    def test_osm_category_query_uses_only_the_reviewed_tag_taxonomy(self) -> None:
+        payload = {"elements": [{"type": "node", "id": 7, "lat": 28.0, "lon": 77.0, "tags": {"name": "Map Cafe", "amenity": "cafe"}}]}
+        with mock.patch.object(server, "fetch_overpass_payload", return_value=payload) as overpass, mock.patch.object(server.CACHE, "put_places"):
+            places = server.search_osm_category_places('coffee; nwr["tourism"]', "IN", 28.0, 77.0)
+
+        self.assertEqual(places[0]["id"], "openstreetmap:node:7")
+        query = overpass.call_args.args[0]
+        self.assertIn('["amenity"="cafe"]', query)
+        self.assertNotIn('coffee; nwr', query)
+
+    def test_agent_city_resolution_keeps_ambiguous_short_names_as_choices(self) -> None:
+        cities = [
+            {"shortName": "Portland", "countryCode": "US", "lat": 43.66, "lon": -70.25},
+            {"shortName": "Portland", "countryCode": "US", "lat": 45.52, "lon": -122.67},
+        ]
+        with mock.patch.object(server, "suggest_locations", return_value=cities):
+            self.assertIsNone(server.resolve_agent_city("Portland", "US"))
+        with mock.patch.object(server, "suggest_locations", return_value=[cities[0]]):
+            self.assertEqual(server.resolve_agent_city("Portland", "US"), cities[0])
+
+    def test_serp_is_used_only_after_osm_discovery_is_empty(self) -> None:
+        place = {"id": "serpapi-google-maps:example", "provider": "serpapi-google-maps", "providerId": "example", "name": "Example", "address": "", "countryCode": "", "lat": 28.0, "lon": 77.0, "bbox": [77.0, 28.0, 77.0, 28.0]}
+        with mock.patch.object(server.CACHE, "get_place_lookup", return_value=None), mock.patch.object(server.CACHE, "search_places", return_value=[]), mock.patch.object(server, "search_osm_category_places", return_value=[]) as osm, mock.patch.object(server, "search_nominatim_places", return_value=[]) as nominatim, mock.patch.object(server, "search_serp_places", return_value=[place]) as serp, mock.patch.object(server.CACHE, "put_place_lookup"):
+            discovery = server.lookup_places("unindexed place", "", None, None)
+
+        self.assertEqual(discovery["source"], "serpapi")
+        self.assertEqual(discovery["lookupStage"], "serp-fallback")
+        self.assertEqual(discovery["fallbackReason"], "no-usable-osm-result")
+        osm.assert_called_once_with("unindexed place", "", None, None)
+        nominatim.assert_called_once_with("unindexed place", "", None, None)
+        serp.assert_called_once_with("unindexed place", None, None, "")
 
     def test_local_place_suggestions_use_only_the_local_store(self) -> None:
         place = {"id": "openstreetmap:node:1", "provider": "openstreetmap", "providerId": "node:1", "name": "Example", "address": "", "countryCode": "", "lat": 28.0, "lon": 77.0, "bbox": [77.0, 28.0, 77.0, 28.0]}
@@ -287,7 +321,7 @@ class MapAgentToolTests(unittest.TestCase):
         self.tools = AgentTools(AgentDependencies(
             suggest_cities=mock.Mock(return_value=[city]),
             resolve_city=mock.Mock(return_value=city),
-            search_places=mock.Mock(return_value=([place], False)),
+            search_places=mock.Mock(return_value={"results": [place], "source": "openstreetmap", "lookupStage": "osm-category-search"}),
             plan_route=mock.Mock(return_value=route),
             workspace_snapshot=lambda: self.workspace,
             clear_workspace=self.clear_workspace,
@@ -351,7 +385,7 @@ class MapAgentToolTests(unittest.TestCase):
 
 class OpenAICompatibleClientTests(unittest.TestCase):
     def test_posts_tools_to_chat_completions_without_exposing_the_key(self) -> None:
-        config = replace(server.CONFIG, openai_base_url="https://model.example/v1", openai_api_key="secret", model_name="map-model")
+        config = replace(server.CONFIG, openai_base_url="https://model.example/v1", openai_api_key="secret", model_name="map-model", agent_max_tokens=0, agent_temperature=None)
 
         class Response:
             def read(self, _maximum):
@@ -371,7 +405,10 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(outbound.full_url, "https://model.example/v1/chat/completions")
         self.assertEqual(outbound.get_header("Authorization"), "Bearer secret")
         self.assertIn(b'"model":"map-model"', outbound.data)
+        self.assertNotIn(b'"parallel_tool_calls"', outbound.data)
         self.assertNotIn(b'"temperature"', outbound.data)
+        self.assertNotIn(b'"max_tokens"', outbound.data)
+        self.assertNotIn(b'"max_completion_tokens"', outbound.data)
 
 
 class MapAgentServiceTests(unittest.TestCase):
@@ -410,7 +447,7 @@ class MapAgentServiceTests(unittest.TestCase):
         tools = AgentTools(AgentDependencies(
             suggest_cities=lambda query, country: [],
             resolve_city=lambda query, country: None,
-            search_places=lambda query, country, lat, lon: ([], False),
+            search_places=lambda query, country, lat, lon: {"results": [], "source": "openstreetmap", "lookupStage": "local-osm-cache"},
             plan_route=lambda waypoints, profile: {},
             workspace_snapshot=lambda: workspace,
             clear_workspace=lambda: workspace.update({"pins": [], "areas": [], "state": {}}),
@@ -425,6 +462,41 @@ class MapAgentServiceTests(unittest.TestCase):
         self.assertTrue(hub.completed.wait(2))
         self.assertTrue(any(event["type"] == "agent.map" and event["update"]["clear"] for _, event in hub.events))
         self.assertEqual(hub.events[-1][1]["type"], "agent.completed")
+
+    def test_agent_cannot_complete_after_discovery_without_presenting_the_map(self) -> None:
+        city = {"id": "city-delhi", "name": "Delhi", "shortName": "Delhi", "countryCode": "IN", "lat": 28.6139, "lon": 77.2090, "bbox": [77.0, 28.0, 77.4, 29.0]}
+
+        class Client:
+            available = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete(self, messages, tools):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"content": "", "tool_calls": [{"id": "city", "function": {"name": "find_city", "arguments": '{"query":"Delhi"}'}}]}
+                return {"content": "Delhi is ready."}
+
+        workspace = {"pins": [], "areas": [], "state": {}}
+        tools = AgentTools(AgentDependencies(
+            suggest_cities=lambda query, country: [city],
+            resolve_city=lambda query, country: city,
+            search_places=lambda query, country, lat, lon: {"results": [], "source": "openstreetmap", "lookupStage": "local-osm-cache"},
+            plan_route=lambda waypoints, profile: {},
+            workspace_snapshot=lambda: workspace,
+            clear_workspace=lambda: workspace.update({"pins": [], "areas": [], "state": {}}),
+            add_pin=lambda name, lat, lon, place_id, source: {},
+            save_workspace_state=lambda state: state,
+        ))
+        hub = self.Hub()
+        service = MapAgentService(Client(), tools, hub)
+
+        service.start_run("session-12345678901234567890", "show Delhi", {})
+
+        self.assertTrue(hub.completed.wait(2))
+        self.assertEqual(hub.events[-1][1]["type"], "agent.failed")
+        self.assertFalse(any(event["type"] == "agent.completed" for _, event in hub.events))
 
 
 class RealtimeIntegrationTests(unittest.IsolatedAsyncioTestCase):

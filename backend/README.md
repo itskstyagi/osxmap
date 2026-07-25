@@ -80,7 +80,7 @@ or user accounts.
 | `GET /api/geocode?q=&countryCode=` | Exact city lookup. |
 | `GET /api/country?lat=&lon=` | Browser coordinate or IP-country lookup. |
 | `GET /api/context?lat=&lon=` | Resolve coarse geographic context with its source. |
-| `GET /api/places?q=&countryCode=&lat=&lon=` | OSM-first place lookup, with local storage reuse and Serp fallback only when OSM has no usable result. |
+| `GET /api/places?q=&countryCode=&lat=&lon=` | OSM-first place lookup. Returns source, lookup stage, cache state, and fallback reason; SerpApi is considered only after OSM has no usable result. |
 | `GET /api/places/suggest?q=` | Local-only suggestions from previously stored places; never calls an external provider. |
 | `GET /api/places/stored?west=&south=&east=&north=` | Canonical locally stored places in the visible map bounds. |
 | `GET /api/workspace` | Current single-machine pins, areas, and route selection state. |
@@ -130,18 +130,26 @@ precedence over consented browser coordinates, which take precedence over the
 coarse IP/locale fallback. Precise browser coordinates are not written to the
 database unless the user turns them into a pin.
 
-Place lookup checks exact durable lookup results and stored place-name matches
-before querying Nominatim/OSM. Only an empty OSM result consults SerpApi, and
-`SERP_API_KEY` remains on the backend. Every received SerpApi JSON response
+City identity is resolved with Nominatim, the OSM geocoding/search service.
+Known nearby categories such as cafes, museums, parks, pharmacies, hotels, and
+fuel stations first use a bounded, reviewed-tag Overpass query around the map
+context (`OSM_PLACE_SEARCH_RADIUS_METERS`, 5 km by default). Name and unknown
+category search then uses Nominatim. Stored and lookup-cache results qualify as
+OSM reuse only when their provenance is OpenStreetMap; prior SerpApi records
+can never skip these OSM stages. Only an empty OSM result consults SerpApi, and
+`SERP_API_KEY` remains on the backend. The response exposes the actual source,
+lookup stage, cache state, and fallback reason so the UI and agent do not need
+to infer provenance. Every received SerpApi JSON response
 is retained in SQLite with its credential-redacted request descriptor and full
 credential-redacted response body. Matching SerpApi requests are served from
 that local record before an API key is required or a network call is made.
 Each network-fetched SerpApi response is also archived as a credential-redacted
 JSON file under `backend/logs/serpapi/`; the directory is ignored by Git.
-Route-stop input uses `GET /api/places/suggest` for local-only suggestions. A
-client can intentionally request `GET /api/places?...&provider=serp` to bypass
-OSM-first lookup; that mode returns every coordinate-bearing Serp
-`place_results` and `local_results` entry.
+Route-stop input uses `GET /api/places/suggest` for local-only suggestions.
+Submitting a route-stop search uses the same server-enforced OSM-first policy;
+clients cannot select SerpApi as a first source. A Serp fallback still returns
+every coordinate-bearing `place_results` and `local_results` entry when both
+OSM stages have no usable result.
 The database also stores normalized place data, pins, areas, route geometry,
 and OSM-only route failures through additive migrations.
 

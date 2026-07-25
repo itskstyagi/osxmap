@@ -116,7 +116,7 @@ values.
 
 | ID | Status | Finding | Evidence and locations | Target state |
 | --- | --- | --- | --- | --- |
-| OP-01 | Not started | Establish automated tests and CI. | No test suite, runner configuration, or CI workflow exists. Repository root, `backend/server.py`, `UI/` | Add unit, integration, fixture, browser, and regression tests; run them in CI before merges. |
+| OP-01 | In progress | Establish automated tests and CI. | `backend/test_server.py` now provides a manually-run backend unit/integration suite, including OSM-first provider-policy and agent-presentation regressions. No CI workflow, browser suite, fixture corpus, or test-runner configuration exists yet. | Add unit, integration, fixture, browser, and regression tests; run them in CI before merges. |
 | OP-02 | Not started | Add structured privacy-safe observability. | Provider errors and handler messages use `print`; static health data lacks runtime signals. `backend/server.py:1686-1701`, `backend/server.py:1970-2025` | Emit request IDs, latency, queues, cache state, provider status, truncation, source mix, and SerpAPI usage with redaction. |
 | OP-03 | Not started | Split liveness from readiness. | `/api/health` reports configuration but not actual dependencies. `backend/server.py:2031-2033` | Add non-sensitive liveness/readiness/dependency status endpoints. |
 | OP-04 | Not started | Define retention and deletion. | Cache expiry is query-only; stored places/routes/provider responses/archive files have no retention lifecycle. `backend/server.py:155-177`, `backend/server.py:349-399` | Add source-specific TTLs, pruning, size budgets, workspace deletion, and documented retention. |

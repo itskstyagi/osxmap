@@ -39,6 +39,18 @@ def root_path(value: str, default: Path) -> Path:
     return path if path.is_absolute() else (ROOT_DIR / path).resolve()
 
 
+def optional_float(value: str) -> float | None:
+    text = value.strip()
+    if not text:
+        return None
+    return max(0.0, min(1.0, float(text)))
+
+
+def optional_token_limit(value: str) -> int:
+    text = value.strip()
+    return max(0, min(2_000, int(text))) if text else 0
+
+
 def is_loopback_host(value: str) -> bool:
     host = value.strip().lower().strip("[]")
     if host == "localhost":
@@ -71,6 +83,7 @@ class Config:
     suggestion_ttl_days: int = int(os.getenv("SUGGESTION_TTL_DAYS", "7"))
     max_buildings_per_tile: int = int(os.getenv("MAX_BUILDINGS_PER_TILE", "20000"))
     serp_api_key: str = os.getenv("SERP_API_KEY", "")
+    osm_place_search_radius_meters: int = max(500, min(25_000, int(os.getenv("OSM_PLACE_SEARCH_RADIUS_METERS", "5000"))))
     osm_router_base_url: str = os.getenv("OSM_ROUTER_BASE_URL", "https://router.project-osrm.org").rstrip("/")
     osm_router_profile: str = os.getenv("OSM_ROUTER_PROFILE", "driving")
     osm_router_timeout_seconds: int = max(1, int(os.getenv("OSM_ROUTER_TIMEOUT_SECONDS", "12")))
@@ -79,6 +92,10 @@ class Config:
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "").rstrip("/")
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     model_name: str = os.getenv("MODEL_NAME", "")
+    # OpenAI-compatible gateways vary in which generation controls they accept.
+    # Keep them opt-in so an Azure/LiteLLM deployment works with its native defaults.
+    agent_max_tokens: int = optional_token_limit(os.getenv("AGENT_MAX_TOKENS", ""))
+    agent_temperature: float | None = optional_float(os.getenv("AGENT_TEMPERATURE", ""))
 
     @property
     def socket_port(self) -> int:

@@ -36,7 +36,7 @@ def _coordinates(value: Any, label: str) -> tuple[float, float]:
 class AgentDependencies:
     suggest_cities: Callable[[str, str], list[dict[str, Any]]]
     resolve_city: Callable[[str, str], dict[str, Any] | None]
-    search_places: Callable[[str, str, float | None, float | None], tuple[list[dict[str, Any]], bool]]
+    search_places: Callable[[str, str, float | None, float | None], dict[str, Any]]
     plan_route: Callable[[list[list[float]], str], dict[str, Any]]
     workspace_snapshot: Callable[[], dict[str, Any]]
     clear_workspace: Callable[[], None]
@@ -50,6 +50,8 @@ class AgentRunContext:
     entities: dict[str, dict[str, Any]] = field(default_factory=dict)
     routes: dict[str, dict[str, Any]] = field(default_factory=dict)
     next_ref: int = 1
+    requires_presentation: bool = False
+    presented: bool = False
 
 
 AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -73,7 +75,7 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_places",
-            "description": "Find businesses, landmarks, attractions, food, coffee, or other places. Uses local/OSM data first and Serp fallback when needed.",
+            "description": "Find businesses, landmarks, attractions, food, coffee, or other places. The backend enforces local and OpenStreetMap discovery before any SerpApi fallback.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -192,6 +194,7 @@ class AgentTools:
         locations = [self._output_entity(self._register_entity(context, item, "city")) for item in candidates[:6] if self._location(item)]
         if not locations:
             return {"locations": [], "message": "No matching city was found."}
+        context.requires_presentation = True
         return {"locations": locations}
 
     def _search_places(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -204,9 +207,21 @@ class AgentTools:
             center = context.map_context.get("center")
             lon, lat = _coordinates(center, "Map center") if center else (None, None)
             country = str(arguments.get("countryCode") or context.map_context.get("countryCode") or "")[:2].upper()
-        results, stored = self.dependencies.search_places(query, country, lat, lon)
+        discovery = self.dependencies.search_places(query, country, lat, lon)
+        results = discovery.get("results") if isinstance(discovery, dict) else None
+        if not isinstance(results, list):
+            raise ServiceError("The place-discovery service returned an invalid response.", 503)
         places = [self._output_entity(self._register_entity(context, item, "place")) for item in results[:20] if self._location(item)]
-        return {"places": places, "source": "stored" if stored else "osm-or-serp"}
+        if places:
+            context.requires_presentation = True
+        return {
+            "places": places,
+            "source": str(discovery.get("source") or "unknown"),
+            "lookupStage": str(discovery.get("lookupStage") or "unknown"),
+            "stored": bool(discovery.get("stored")),
+            "fallbackReason": str(discovery.get("fallbackReason") or ""),
+            "serpEligible": bool(discovery.get("serpEligible")),
+        }
 
     def _plan_route(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
         references = arguments.get("waypointRefs")
@@ -223,6 +238,7 @@ class AgentTools:
         route = self.dependencies.plan_route(waypoints, str(arguments.get("profile") or "driving"))
         route_ref = f"route:{route.get('id') or len(context.routes) + 1}"
         context.routes[route_ref] = {"route": route, "stops": stops}
+        context.requires_presentation = True
         summary_value = route.get("summary")
         summary = cast(dict[str, Any], summary_value) if isinstance(summary_value, dict) else {}
         return {
@@ -258,6 +274,8 @@ class AgentTools:
         elif "routeId" in state:
             state.pop("routeId", None)
         self.dependencies.save_workspace_state(state)
+        context.presented = True
+        context.requires_presentation = False
         workspace = self.dependencies.workspace_snapshot()
         update = {
             "selectedCity": selected_city,
@@ -276,6 +294,8 @@ class AgentTools:
         self.dependencies.clear_workspace()
         context.entities.clear()
         context.routes.clear()
+        context.presented = True
+        context.requires_presentation = False
         return {
             "cleared": True,
             "mapUpdate": {

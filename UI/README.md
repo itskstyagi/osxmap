@@ -76,12 +76,14 @@ The route planner keeps the main task focused: type a start, stop, or
 destination directly into its row, then arrange the ordered stops from A
 through the destination. As the user types, the row offers only matching
 places stored from earlier searches; it does not call an external provider.
-Pressing Enter intentionally searches Serp and marks every coordinate-bearing
-result from that response on the map. Selecting a result marker or suggestion
-assigns it to the active stop. Plans support up to 50 stops, including repeated
-stops, and can be reordered or edited before tracing. Map pins and explicit
-location results can also fill the active stop. Area measurement and saved-pin
-maintenance live under `More map tools` so they do not compete with routing.
+Pressing Enter searches local and OpenStreetMap data first, then uses SerpApi
+only when those OSM stages have no usable result. The status line names the
+actual source and fallback reason, and every coordinate-bearing result is
+marked on the map. Selecting a result marker or suggestion assigns it to the
+active stop. Plans support up to 50 stops, including repeated stops, and can be
+reordered or edited before tracing. Map pins and explicit location results can
+also fill the active stop. Area measurement and saved-pin maintenance live
+under `More map tools` so they do not compete with routing.
 
 Pins, areas, the selected city, and the active route are restored from the
 local workspace on reload. Search-result markers remain transient. `Clear

@@ -479,14 +479,21 @@ class Cache:
                     canonical_places.append(place)
         return canonical_places
 
-    def search_places(self, normalized_query: str, limit: int | None = None) -> list[dict[str, Any]]:
+    def search_places(self, normalized_query: str, limit: int | None = None, provider: str = "", country_code: str = "") -> list[dict[str, Any]]:
         """Return stored places whose normalized name contains the query substring."""
         pattern = f"%{normalized_query}%"
         statement = (
             "SELECT place_id, provider, provider_id, name, address, country_code, latitude, longitude, bbox_json, provider_payload_json "
-            "FROM places WHERE normalized_name LIKE ? ORDER BY updated_at DESC, place_id"
+            "FROM places WHERE normalized_name LIKE ?"
         )
         parameters: list[Any] = [pattern]
+        if provider:
+            statement += " AND provider = ?"
+            parameters.append(provider)
+        if country_code:
+            statement += " AND country_code = ?"
+            parameters.append(country_code.upper())
+        statement += " ORDER BY updated_at DESC, place_id"
         if limit is not None:
             statement += " LIMIT ?"
             parameters.append(limit)
@@ -845,6 +852,17 @@ def suggest_locations(query: str, country_code: str) -> list[dict[str, Any]]:
     return results
 
 
+def resolve_agent_city(query: str, country_code: str) -> dict[str, Any] | None:
+    """Return a city only when its short OSM name uniquely matches the request."""
+    candidates = suggest_locations(query, country_code)
+    city_name = normalize_query(query).split(",", 1)[0]
+    exact = [
+        candidate for candidate in candidates
+        if normalize_query(str(candidate.get("shortName") or "")) == city_name
+    ]
+    return exact[0] if len(exact) == 1 else None
+
+
 def place_from_nominatim(item: dict[str, Any]) -> dict[str, Any] | None:
     location = location_result(item)
     if not location:
@@ -945,18 +963,132 @@ def public_place(place: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in place.items() if key != "providerPayload"}
 
 
+PLACE_LOOKUP_POLICY_VERSION = "osm-first-v2"
+# Query terms map only to a reviewed, finite OSM tag taxonomy. User text never
+# becomes Overpass QL, which keeps discovery bounded and injection-free.
+OSM_PLACE_TAXONOMY: tuple[tuple[tuple[str, ...], tuple[tuple[str, str], ...]], ...] = (
+    (("coffee", "cafe", "cafes"), (("amenity", "cafe"),)),
+    (("restaurant", "restaurants", "food", "dining"), (("amenity", "restaurant"), ("amenity", "fast_food"))),
+    (("museum", "museums"), (("tourism", "museum"),)),
+    (("park", "parks", "playground"), (("leisure", "park"), ("leisure", "playground"))),
+    (("hotel", "hotels", "hostel", "lodging"), (("tourism", "hotel"), ("tourism", "hostel"), ("tourism", "guest_house"))),
+    (("pharmacy", "pharmacies"), (("amenity", "pharmacy"),)),
+    (("hospital", "hospitals", "clinic", "clinics", "doctor", "doctors"), (("amenity", "hospital"), ("amenity", "clinic"), ("amenity", "doctors"))),
+    (("library", "libraries"), (("amenity", "library"),)),
+    (("supermarket", "supermarkets", "grocery", "groceries"), (("shop", "supermarket"), ("shop", "convenience"))),
+    (("gas", "fuel", "petrol"), (("amenity", "fuel"),)),
+    (("bank", "banks", "atm"), (("amenity", "bank"), ("amenity", "atm"))),
+    (("attraction", "attractions", "landmark", "landmarks"), (("tourism", "attraction"),)),
+)
+
+
+def osm_category_tags(query: str) -> tuple[tuple[str, str], ...]:
+    normalized = normalize_query(query)
+    for terms, tags in OSM_PLACE_TAXONOMY:
+        if any(term in normalized for term in terms):
+            return tags
+    return ()
+
+
+def osm_place_from_element(item: dict[str, Any], country_code: str) -> dict[str, Any] | None:
+    tags = item.get("tags")
+    if not isinstance(tags, dict):
+        return None
+    point = item.get("center") if isinstance(item.get("center"), dict) else item
+    coordinates = valid_coordinate(point.get("lon"), point.get("lat")) if isinstance(point, dict) else None
+    if not coordinates:
+        return None
+    osm_type = str(item.get("type") or "node")
+    osm_id = str(item.get("id") or "").strip()
+    name = str(tags.get("name") or tags.get("brand") or "").strip()
+    if not osm_id or not name:
+        return None
+    lon, lat = coordinates
+    address_parts = [
+        " ".join(part for part in (str(tags.get("addr:housenumber") or "").strip(), str(tags.get("addr:street") or "").strip()) if part),
+        str(tags.get("addr:city") or "").strip(),
+        str(tags.get("addr:postcode") or "").strip(),
+    ]
+    return {
+        "id": f"openstreetmap:{osm_type}:{osm_id}",
+        "provider": "openstreetmap",
+        "providerId": f"{osm_type}:{osm_id}",
+        "name": name[:160],
+        "address": ", ".join(part for part in address_parts if part)[:500],
+        "countryCode": country_code.upper(),
+        "lat": lat,
+        "lon": lon,
+        "bbox": [lon, lat, lon, lat],
+        "providerPayload": {"osmType": osm_type, "osmId": osm_id, "tags": redact_provider_payload(tags)},
+    }
+
+
+def rank_places_by_context(places: list[dict[str, Any]], country_code: str, lat: float | None, lon: float | None) -> list[dict[str, Any]]:
+    if lat is None or lon is None:
+        return places
+    center = [lon, lat]
+    country = country_param(country_code).upper()
+    return sorted(
+        places,
+        key=lambda place: (
+            0 if not country or str(place.get("countryCode") or "").upper() == country else 1,
+            distance_meters(center, [float(place["lon"]), float(place["lat"])]),
+            str(place.get("name") or ""),
+        ),
+    )
+
+
+def search_osm_category_places(query: str, country_code: str, lat: float | None, lon: float | None) -> list[dict[str, Any]]:
+    """Discover known POI categories from nearby OSM elements before web search."""
+    tags = osm_category_tags(query)
+    if not tags or lat is None or lon is None:
+        return []
+    clauses = "\n".join(
+        f'  nwr["{key}"="{value}"](around:{CONFIG.osm_place_search_radius_meters},{lat:.6f},{lon:.6f});'
+        for key, value in tags
+    )
+    payload = fetch_overpass_payload(f"""[out:json][timeout:25][maxsize:8388608];
+(
+{clauses}
+);
+out center;""")
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        raise ServiceError("OpenStreetMap returned an invalid response.", 503)
+    places: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for element in elements:
+        place = osm_place_from_element(element, country_code) if isinstance(element, dict) else None
+        if place and place["id"] not in seen:
+            seen.add(place["id"])
+            places.append(place)
+    if places:
+        CACHE.put_places(places)
+    return rank_places_by_context(places, country_code, lat, lon)[:20]
+
+
 def local_place_suggestions(query: str) -> list[dict[str, Any]]:
     normalized = normalize_query(query)
     return [public_place(place) for place in CACHE.search_places(normalized, limit=8)] if len(normalized) >= 2 else []
 
 
-def lookup_places(query: str, country_code: str, lat: float | None, lon: float | None, provider: str = "") -> tuple[list[dict[str, Any]], bool]:
+def place_discovery(results: list[dict[str, Any]], source: str, lookup_stage: str, stored: bool = False, fallback_reason: str = "", serp_eligible: bool = False) -> dict[str, Any]:
+    return {
+        "results": [public_place(place) for place in results],
+        "source": source,
+        "lookupStage": lookup_stage,
+        "stored": stored,
+        "fallbackReason": fallback_reason,
+        "serpEligible": serp_eligible,
+    }
+
+
+def lookup_places(query: str, country_code: str, lat: float | None, lon: float | None) -> dict[str, Any]:
     normalized = normalize_query(query)
     if len(normalized) < 2:
-        return [], True
-    if provider == "serp":
-        return [public_place(place) for place in search_serp_places(query, lat, lon, country_code)], False
+        return place_discovery([], "openstreetmap", "invalid-query", stored=True)
     context = {
+        "policy": PLACE_LOOKUP_POLICY_VERSION,
         "query": normalized,
         "countryCode": country_param(country_code),
         "lat": round(lat, 2) if lat is not None else None,
@@ -965,18 +1097,27 @@ def lookup_places(query: str, country_code: str, lat: float | None, lon: float |
     lookup_key = request_hash(context)
     stored = CACHE.get_place_lookup(lookup_key)
     if stored is not None:
-        return stored, True
-    cached_places = CACHE.search_places(normalized)
+        osm_stored = [place for place in stored if place.get("provider") == "openstreetmap"]
+        if osm_stored:
+            return place_discovery(rank_places_by_context(osm_stored, country_code, lat, lon), "openstreetmap", "osm-lookup-cache", stored=True)
+    cached_places = CACHE.search_places(normalized, provider="openstreetmap", country_code=country_param(country_code).upper())
     if cached_places:
         CACHE.put_place_lookup(lookup_key, context, cached_places)
-        return cached_places, True
+        return place_discovery(rank_places_by_context(cached_places, country_code, lat, lon), "openstreetmap", "local-osm-cache", stored=True)
+    category_places = search_osm_category_places(query, country_code, lat, lon)
+    if category_places:
+        CACHE.put_place_lookup(lookup_key, context, category_places)
+        return place_discovery(category_places, "openstreetmap", "osm-category-search")
     places = search_nominatim_places(query, country_code, lat, lon)
-    if not places:
-        places = search_serp_places(query, lat, lon, country_code)
-    places = CACHE.put_places(places)
-    results = [public_place(place) for place in places]
-    CACHE.put_place_lookup(lookup_key, context, results)
-    return results, False
+    if places:
+        CACHE.put_places(places)
+        results = rank_places_by_context(places, country_code, lat, lon)
+        CACHE.put_place_lookup(lookup_key, context, results)
+        return place_discovery(results, "openstreetmap", "nominatim-search")
+    fallback_reason = "no-usable-osm-result"
+    places = search_serp_places(query, lat, lon, country_code)
+    CACHE.put_place_lookup(lookup_key, context, places)
+    return place_discovery(places, "serpapi", "serp-fallback", fallback_reason=fallback_reason, serp_eligible=True)
 
 
 def detect_country(lat: float | None, lon: float | None) -> dict[str, str]:
@@ -1454,7 +1595,7 @@ def save_workspace_state(state: Any) -> dict[str, Any]:
 REALTIME = RealtimeHub(CONFIG)
 AGENT_TOOLS = AgentTools(AgentDependencies(
     suggest_cities=suggest_locations,
-    resolve_city=resolve_location,
+    resolve_city=resolve_agent_city,
     search_places=lambda query, country, lat, lon: lookup_places(query, country, lat, lon),
     plan_route=get_route,
     workspace_snapshot=workspace_snapshot,
@@ -1673,31 +1814,52 @@ def number(value: Any) -> float:
         return 0.0
 
 
+def overpass_cooldown_seconds() -> int:
+    with OVERPASS_UNAVAILABLE_LOCK:
+        return max(0, math.ceil(OVERPASS_UNAVAILABLE_UNTIL - time.monotonic()))
+
+
+def pause_overpass(seconds: int) -> int:
+    global OVERPASS_UNAVAILABLE_UNTIL
+    with OVERPASS_UNAVAILABLE_LOCK:
+        OVERPASS_UNAVAILABLE_UNTIL = max(OVERPASS_UNAVAILABLE_UNTIL, time.monotonic() + seconds)
+        return max(1, math.ceil(OVERPASS_UNAVAILABLE_UNTIL - time.monotonic()))
+
+
+def fetch_overpass_payload(query: str) -> dict[str, Any]:
+    """Run a trusted, bounded Overpass query through the shared cooldown policy."""
+    cooldown = overpass_cooldown_seconds()
+    if cooldown:
+        raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, cooldown)
+
+    def task() -> dict[str, Any]:
+        cooldown = overpass_cooldown_seconds()
+        if cooldown:
+            raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, cooldown)
+        body = urllib.parse.urlencode({"data": query}).encode("utf-8")
+        try:
+            payload = fetch_json(
+                CONFIG.overpass_endpoint,
+                {"User-Agent": CONFIG.user_agent, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "Accept": "application/json"},
+                40,
+                "POST",
+                body,
+            )
+        except ServiceError as error:
+            if not error.retry_after:
+                raise
+            retry_after = pause_overpass(max(error.retry_after, CONFIG.overpass_backoff_seconds))
+            raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, retry_after) from error
+        if not isinstance(payload, dict):
+            raise ServiceError("OpenStreetMap returned an invalid response.", 503)
+        return payload
+
+    return OVERPASS_QUEUE.run(task)
+
+
 def fetch_overpass_features(bbox: list[float]) -> list[dict[str, Any]]:
     west, south, east, north = bbox
-
-    def remaining_cooldown() -> int:
-        with OVERPASS_UNAVAILABLE_LOCK:
-            return max(0, math.ceil(OVERPASS_UNAVAILABLE_UNTIL - time.monotonic()))
-
-    def pause(seconds: int) -> int:
-        global OVERPASS_UNAVAILABLE_UNTIL
-        with OVERPASS_UNAVAILABLE_LOCK:
-            OVERPASS_UNAVAILABLE_UNTIL = max(OVERPASS_UNAVAILABLE_UNTIL, time.monotonic() + seconds)
-            return max(1, math.ceil(OVERPASS_UNAVAILABLE_UNTIL - time.monotonic()))
-
-    def rate_limit_error(seconds: int) -> ServiceError:
-        return ServiceError("OpenStreetMap data is temporarily rate limited.", 503, seconds)
-
-    cooldown = remaining_cooldown()
-    if cooldown:
-        raise rate_limit_error(cooldown)
-
-    def task() -> list[dict[str, Any]]:
-        cooldown = remaining_cooldown()
-        if cooldown:
-            raise rate_limit_error(cooldown)
-        query = f"""[out:json][timeout:25][maxsize:67108864];
+    query = f"""[out:json][timeout:25][maxsize:67108864];
 (
   nwr[\"building\"]({south},{west},{north},{east});
   nwr[\"building:part\"]({south},{west},{north},{east});
@@ -1709,16 +1871,11 @@ out geom;
   nwr[\"shop\"~\"^(supermarket|convenience)$\"]({south},{west},{north},{east});
 );
 out center;"""
-        body = urllib.parse.urlencode({"data": query}).encode("utf-8")
-        try:
-            payload = fetch_json(CONFIG.overpass_endpoint, {"User-Agent": CONFIG.user_agent, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "Accept": "application/json"}, 40, "POST", body)
-        except ServiceError as error:
-            if not error.retry_after:
-                raise
-            raise rate_limit_error(pause(max(error.retry_after, CONFIG.overpass_backoff_seconds))) from error
-        return [feature for element in payload.get("elements", []) for feature in (raw_feature(element), poi_feature(element)) if feature]
-
-    return OVERPASS_QUEUE.run(task)
+    payload = fetch_overpass_payload(query)
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        raise ServiceError("OpenStreetMap returned an invalid response.", 503)
+    return [feature for element in elements if isinstance(element, dict) for feature in (raw_feature(element), poi_feature(element)) if feature]
 
 
 def tile_bbox(x: int, y: int, z: int) -> list[float]:
@@ -2599,10 +2756,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if (lat is None) != (lon is None) or (lat is not None and not valid_coordinate(lon, lat)):
                     raise ServiceError("Place context coordinates must include a valid longitude and latitude.", 400)
                 provider = query.get("provider", [""])[0].strip().lower()
-                if provider not in {"", "serp"}:
-                    raise ServiceError("Unsupported place search provider.", 400)
-                results, stored = lookup_places(value, query.get("countryCode", [""])[0], lat, lon, provider)
-                self.send_json(200, {"results": results, "stored": stored, "provider": provider or "osm-first"})
+                if provider:
+                    raise ServiceError("Direct provider selection is not supported; place discovery always starts with OpenStreetMap.", 400)
+                discovery = lookup_places(value, query.get("countryCode", [""])[0], lat, lon)
+                self.send_json(200, discovery)
                 return
             if parsed.path == "/api/places/suggest":
                 value = query.get("q", [""])[0].strip()[:160]

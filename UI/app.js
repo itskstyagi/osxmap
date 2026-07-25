@@ -1520,21 +1520,21 @@ class CityExplorer {
     const stop = this.routePlan()[index];
     const query = stop?.query.trim() || '';
     if (query.length < 2) {
-      this.setGeoStatus('Enter at least two characters before searching Serp.', true);
+      this.setGeoStatus('Enter at least two characters before searching for places.', true);
       return;
     }
     clearTimeout(this.routeStopTimers.get(index));
     this.routeStopControllers.get(index)?.abort();
     const controller = new AbortController();
     this.routeStopControllers.set(index, controller);
-    const params = new URLSearchParams({ q: query, provider: 'serp' });
+    const params = new URLSearchParams({ q: query });
     const context = this.placeContext();
     if (this.country.countryCode) params.set('countryCode', this.country.countryCode);
     if (context) {
       params.set('lat', String(context.lat));
       params.set('lon', String(context.lon));
     }
-    this.setGeoStatus('Searching Serp for matching places...');
+    this.setGeoStatus('Searching local and OpenStreetMap places...');
     try {
       const response = await jsonRequest(`/api/places?${params}`, controller.signal);
       if (this.routePlan()[index] !== stop || stop.query !== query) return;
@@ -1542,9 +1542,11 @@ class CityExplorer {
       this.renderSearchResults();
       stop.suggestions = this.searchResults;
       this.renderRouteStopSuggestions(index);
+      const source = response.source === 'serpapi' ? 'Serp fallback' : 'OpenStreetMap';
+      const fallback = response.fallbackReason ? ` after ${response.fallbackReason.replaceAll('-', ' ')}` : '';
       this.setGeoStatus(this.searchResults.length
-        ? `Serp returned ${this.searchResults.length} place${this.searchResults.length === 1 ? '' : 's'}; every result is marked on the map.`
-        : 'Serp returned no places for that search.', !this.searchResults.length);
+        ? `${source} returned ${this.searchResults.length} place${this.searchResults.length === 1 ? '' : 's'}${fallback}; every result is marked on the map.`
+        : `${source} returned no places for that search.`, !this.searchResults.length);
     } catch (error) {
       if (error.name !== 'AbortError') this.setGeoStatus(error.message, true);
     }

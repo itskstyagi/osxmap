@@ -47,9 +47,13 @@ class RealtimeHub:
         self._ready = threading.Event()
         self._start_error: Exception | None = None
         self._message_handler: Callable[[str, dict[str, Any]], None] | None = None
+        self._session_closed_handler: Callable[[str], None] | None = None
 
     def set_message_handler(self, handler: Callable[[str, dict[str, Any]], None]) -> None:
         self._message_handler = handler
+
+    def set_session_closed_handler(self, handler: Callable[[str], None]) -> None:
+        self._session_closed_handler = handler
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -194,7 +198,11 @@ class RealtimeHub:
             asyncio.create_task(previous.websocket.close(code=4001, reason="Session reconnected"))
 
     def _remove_session(self, session_id: str, websocket: Any) -> None:
+        removed = False
         with self._lock:
             current = self._sessions.get(session_id)
             if current and current.websocket is websocket:
                 self._sessions.pop(session_id, None)
+                removed = True
+        if removed and self._session_closed_handler:
+            self._session_closed_handler(session_id)
