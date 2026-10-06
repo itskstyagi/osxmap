@@ -3,6 +3,8 @@ import { AGENT_SOCKET_URL, API_BASE_URL, apiPath } from './config.js';
 const TILE_ZOOM = 14;
 const ACCENT = '#315efb';
 const PREVIEW_LAYER = 'local-buildings-preview';
+const TERRAIN_SOURCE = 'local-terrain-dem';
+const TERRAIN_TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
 const FOCUS_SOURCE = 'local-city-focus';
 const GEOGRAPHY_SOURCE = 'local-geography';
 const SEARCH_RESULTS_SOURCE = 'local-search-results';
@@ -347,7 +349,7 @@ function addLocalLayers(map, theme) {
 
 class CityExplorer {
   constructor() {
-    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'intro-card', 'use-location', 'use-approximate-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-stops', 'route-stop-count', 'route-plan-hint', 'add-route-stop', 'trace-route', 'pin-list', 'area-list', 'geo-status', 'toggle-geo-tools', 'geo-content', 'toggle-manual-controls', 'manual-controls-content', 'agent-composer', 'agent-input', 'agent-submit', 'agent-cancel', 'agent-question', 'agent-question-text', 'agent-question-choices', 'agent-connection', 'agent-request', 'agent-tool'].map((id) => [id, document.getElementById(id)]));
+    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'use-location', 'use-approximate-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-stops', 'route-stop-count', 'route-plan-hint', 'add-route-stop', 'trace-route', 'pin-list', 'area-list', 'geo-status', 'toggle-geo-tools', 'geo-content', 'toggle-manual-controls', 'manual-controls-content', 'agent-composer', 'agent-input', 'agent-submit', 'agent-cancel', 'agent-question', 'agent-question-text', 'agent-question-choices', 'agent-connection', 'agent-request', 'agent-tool'].map((id) => [id, document.getElementById(id)]));
     this.theme = localStorage.getItem('theme') || 'dark';
     this.country = { country: '', countryCode: '', method: 'detecting' };
     this.selected = null;
@@ -361,6 +363,7 @@ class CityExplorer {
     this.buildings = 0;
     this.generation = 0;
     this.previewVisible = true;
+    this.terrainEnabled = false;
     this.suggestionController = null;
     this.suggestionTimer = null;
     this.routeStopControllers = new Map();
@@ -389,8 +392,7 @@ class CityExplorer {
     this.setTheme(this.theme);
     this.bindUi();
     this.createMap();
-    this.initializeLocation();
-    this.loadWorkspace();
+    this.bootstrap();
     this.connectAgentSocket();
   }
 
@@ -808,7 +810,7 @@ class CityExplorer {
   applyAgentMapUpdate(update) {
     if (!update || typeof update !== 'object') return;
     if (update.clear === true) {
-      this.clearWorkspaceLocal(true);
+      this.clearWorkspaceLocal(false);
       this.setGeoStatus('The map agent cleared the workspace.');
       return;
     }
@@ -834,6 +836,8 @@ class CityExplorer {
     this.map = new window.maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/positron', center: [8, 31], zoom: 2.8, pitch: 0, bearing: 0, maxPitch: 78, attributionControl: false, antialias: true });
     this.map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'bottom-right');
     this.map.on('style.load', () => {
+      this.addTerrainSource();
+      this.applyTerrain();
       addLocalLayers(this.map, this.theme);
       if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', this.previewVisible ? 'visible' : 'none');
       this.map.getSource('local-city')?.setData({ type: 'FeatureCollection', features: [...this.features.values()] });
@@ -878,12 +882,50 @@ class CityExplorer {
     requestAnimationFrame(() => this.map.resize());
   }
 
+  addTerrainSource() {
+    if (!this.map.getSource(TERRAIN_SOURCE)) {
+      this.map.addSource(TERRAIN_SOURCE, {
+        type: 'raster-dem',
+        tiles: [TERRAIN_TILE_URL],
+        tileSize: 256,
+        maxzoom: 15,
+        encoding: 'terrarium',
+        attribution: '<a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md">Terrain tiles</a> by Mapzen',
+      });
+    }
+  }
+
+  applyTerrain() {
+    const active = this.terrainEnabled && Boolean(this.map?.getSource(TERRAIN_SOURCE));
+    try {
+      this.map?.setTerrain(active ? { source: TERRAIN_SOURCE, exaggeration: 1.25 } : null);
+    } catch {
+      // Keep map navigation available when elevation tiles cannot be initialized.
+      this.terrainEnabled = false;
+    }
+    const button = document.querySelector('[data-map-action="pitch"]');
+    button?.setAttribute('aria-pressed', String(this.terrainEnabled));
+    button?.setAttribute('aria-label', this.terrainEnabled ? 'Disable 3D terrain view' : 'Enable 3D terrain view');
+  }
+
+  setTerrainView(enabled, duration = 500) {
+    this.terrainEnabled = enabled;
+    this.applyTerrain();
+    this.map.easeTo({ pitch: this.terrainEnabled ? 60 : 0, duration, essential: true });
+  }
+
   setTheme(theme) {
     this.theme = theme === 'light' ? 'light' : 'dark';
     document.documentElement.dataset.theme = this.theme;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', this.theme === 'dark' ? '#111113' : '#ecece8');
     localStorage.setItem('theme', this.theme);
     if (this.map?.isStyleLoaded()) applyMonochrome(this.map, this.theme);
+  }
+
+  async bootstrap() {
+    // Restore additions without allowing an old city to override the user's current map anchor.
+    await this.loadWorkspace(false);
+    await this.initializeLocation();
   }
 
   async detectCountry() {
@@ -893,23 +935,28 @@ class CityExplorer {
   }
 
   renderRegion() {
-    this.elements['region-label'].textContent = `Search region: ${this.country.country || this.country.countryCode || 'worldwide'} / location optional`;
+    this.elements['region-label'].textContent = `Search region: ${this.country.country || this.country.countryCode || 'worldwide'} / Geo-IP map anchor`;
     this.elements['status-dot'].classList.remove('pulse');
   }
 
   async initializeLocation() {
     if (this.initializeLocationFromUrl()) return;
-    this.detectCountry();
+    this.setGeoStatus('Opening your approximate Geo-IP location...');
+    try {
+      const detected = await ipLocation();
+      this.applyIpLocation(detected, { immediate: true });
+      this.setGeoStatus(`Opened your approximate Geo-IP location: ${detected.location.name}.`);
+    } catch {
+      this.detectCountry();
+      this.setGeoStatus('Geo-IP location is unavailable. Search for a place to set the map anchor.', true);
+    }
   }
 
   async useApproximateLocation() {
     this.setGeoStatus('Finding an approximate location through the configured IP providers...');
     try {
       const detected = await ipLocation();
-      this.country = detected.country;
-      this.geo.context = { lat: detected.location.lat, lon: detected.location.lon, accuracy: null, source: 'ip', countryCode: detected.country.countryCode || '' };
-      this.renderRegion();
-      this.chooseLocation(detected.location);
+      this.applyIpLocation(detected);
       this.chooseRouteStop(this.activeRouteStopIndex, { id: 'approximate-location', name: `Approximate location / ${detected.location.name}`, lat: detected.location.lat, lon: detected.location.lon, countryCode: detected.country.countryCode || '' });
       this.setGeoStatus('Added an approximate IP-based location to the route plan.');
     } catch (error) {
@@ -989,17 +1036,23 @@ class CityExplorer {
     }
   }
 
-  chooseLocation(location) {
-    this.selected = location;
-    if (location.countryCode) this.country = { country: location.country || '', countryCode: location.countryCode, method: 'selected' };
-    this.geo.context = { ...this.geo.context, lat: location.lat, lon: location.lon, source: 'selected', countryCode: location.countryCode || this.country.countryCode || '' };
-    this.elements['search-input'].value = location.name;
-    this.renderSuggestions([]);
-    this.setStream({ loaded: 0, total: 9, buildings: 0, inferred: 0, active: true, preview: true, source: '', degraded: false });
-    this.resetMapForLocation();
+  applyIpLocation(detected, { immediate = false } = {}) {
+    this.country = { ...detected.country, method: 'geoip' };
+    this.chooseLocation(detected.location, { source: 'geoip', immediate });
   }
 
-  resetMapForLocation() {
+  chooseLocation(location, { source = 'selected', immediate = false } = {}) {
+    this.selected = location;
+    if (location.countryCode) this.country = { country: location.country || '', countryCode: location.countryCode, method: source };
+    this.geo.context = { ...this.geo.context, lat: location.lat, lon: location.lon, source, countryCode: location.countryCode || this.country.countryCode || '' };
+    this.elements['search-input'].value = location.name;
+    this.renderSuggestions([]);
+    this.renderRegion();
+    this.setStream({ loaded: 0, total: 9, buildings: 0, inferred: 0, active: true, preview: true, source: '', degraded: false });
+    this.resetMapForLocation({ immediate });
+  }
+
+  resetMapForLocation({ immediate = false } = {}) {
     const location = this.selected;
     this.features.clear(); this.tileFeatures.clear(); this.tileMetadata.clear(); this.loaded.clear(); this.failed.clear();
     this.buildings = 0; this.inferred = 0; this.total = 9; this.previewVisible = true; this.generation += 1;
@@ -1007,7 +1060,11 @@ class CityExplorer {
     if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', 'visible');
     if (this.map.getLayer('local-selection')) this.map.setFilter('local-selection', ['==', ['get', 'sourceId'], '__none__']);
     this.map.getSource(FOCUS_SOURCE)?.setData(this.focusFeature(location));
-    this.map.flyTo({ center: [location.lon, location.lat], zoom: 15.5, pitch: 60, bearing: -20, duration: 1800, essential: true });
+    this.terrainEnabled = true;
+    this.applyTerrain();
+    const camera = { center: [location.lon, location.lat], zoom: 15.5, pitch: 60, bearing: -20 };
+    if (immediate) this.map.jumpTo(camera);
+    else this.map.flyTo({ ...camera, duration: 1800, essential: true });
     this.worker.postMessage({ type: 'reset', apiBaseUrl: API_BASE_URL, context: { region: location.id, lat: location.lat, lon: location.lon }, tiles: spiralTiles(location.lon, location.lat, 1) });
   }
 
@@ -1078,8 +1135,7 @@ class CityExplorer {
   }
 
   updateIntroCard() {
-    const hasRouteStop = this.routePlan().some((stop) => Boolean(stop.place));
-    this.elements['intro-card'].classList.toggle('is-hidden', Boolean(this.selected) || hasRouteStop);
+    // The map is always anchored to Geo-IP or an explicitly selected location.
   }
 
   setLoading(loading) { this.elements['search-loader'].classList.toggle('is-hidden', !loading); }
@@ -1423,16 +1479,16 @@ class CityExplorer {
     this.elements['route-stop-count'].textContent = `${selectedCount} STOP${selectedCount === 1 ? '' : 'S'}`;
     this.elements['trace-route'].disabled = !complete;
     this.elements['route-plan-hint'].textContent = !complete
-      ? 'Type to reuse previously searched places. Press Enter to search Serp and show every match on the map.'
+        ? 'Type to reuse previously searched places. Press Enter to search OpenStreetMap first and show every match on the map.'
       : `${selectedCount} stops in order. Use ^ and v to rearrange the plan.`;
   }
 
-  async loadWorkspace() {
+  async loadWorkspace(restoreLocation = true) {
     try {
       const workspace = await jsonRequest('/api/workspace');
       this.applyWorkspaceSnapshot(workspace);
       const selected = this.agentLocation(this.geo.state?.context?.selectedCity);
-      if (selected) this.chooseLocation(selected);
+      if (selected && restoreLocation) this.chooseLocation(selected);
       const routeId = typeof this.geo.state?.routeId === 'string' ? this.geo.state.routeId : '';
       if (routeId) {
         try {
@@ -1453,7 +1509,7 @@ class CityExplorer {
       this.renderGeography();
       this.renderSearchResults();
       this.updateIntroCard();
-      if (this.geo.pins.length || this.geo.areas.length || this.geo.route || selected) this.setGeoStatus('Restored the saved workspace.');
+      if (this.geo.pins.length || this.geo.areas.length || this.geo.route || (selected && restoreLocation)) this.setGeoStatus('Restored the saved workspace.');
     } catch (error) {
       this.setGeoStatus(error.message, true);
     }
@@ -1831,8 +1887,12 @@ class CityExplorer {
     if (!this.map) return;
     if (action === 'in') this.map.zoomIn({ duration: 250 });
     if (action === 'out') this.map.zoomOut({ duration: 250 });
-    if (action === 'pitch') this.map.easeTo({ pitch: this.map.getPitch() > 30 ? 0 : 60, duration: 500 });
-    if (action === 'reset' && this.selected) this.map.flyTo({ center: [this.selected.lon, this.selected.lat], zoom: 15.5, pitch: 60, bearing: -20 });
+    if (action === 'pitch') this.setTerrainView(!this.terrainEnabled);
+    if (action === 'reset' && this.selected) {
+      this.terrainEnabled = true;
+      this.applyTerrain();
+      this.map.flyTo({ center: [this.selected.lon, this.selected.lat], zoom: 15.5, pitch: 60, bearing: -20 });
+    }
   }
 }
 

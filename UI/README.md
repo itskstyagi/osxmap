@@ -60,17 +60,22 @@ without removing the direct workflow.
 
 ## Location And Geography Tools
 
-The application starts without collecting a location. `ADD MY LOCATION` asks
-for browser permission and assigns that coordinate to the active route stop.
-`ADD APPROX. LOCATION` explicitly requests a public IP from `api.ipify.org`
-and resolves it through `ip-api.services.brahmai.in`, then assigns the
-resulting approximate coordinate to the active stop. Both providers receive
-the request information needed to perform that lookup. The browser locale
-supplies only an initial country bias until a user chooses a location, city,
-or place.
+At startup, the application requests the browser's public IP from
+`api.ipify.org` and resolves its approximate location through
+`ip-api.services.brahmai.in`. The resulting Geo-IP location becomes the map
+anchor and starts the normal nearby building-data stream; it does not create a
+route stop or persist the coordinate. A shared city URL takes precedence. If
+the Geo-IP lookup fails, the map remains available with a locale-derived
+country bias until a location is selected. `ADD MY LOCATION` still asks for
+browser permission and assigns that coordinate to the active route stop.
+`ADD APPROX. LOCATION` uses the same Geo-IP lookup and also assigns it to the
+active route stop. Both Geo-IP providers receive the request information needed
+to perform that lookup.
 
-The UI loads MapLibre GL and the OpenFreeMap base style from their public CDN
-and hosts; self-host those resources for production or offline deployments.
+The UI loads MapLibre GL, the OpenFreeMap base style, and public Terrarium
+elevation tiles. Selecting a city opens its 3D terrain view; the `3D` control
+switches terrain and camera pitch together. Self-host these resources for
+production or offline deployments.
 
 The route planner keeps the main task focused: type a start, stop, or
 destination directly into its row, then arrange the ordered stops from A

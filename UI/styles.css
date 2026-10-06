@@ -679,6 +679,10 @@ button {
   color: #fff;
   background: var(--accent);
 }
+.map-controls button[aria-pressed="true"] {
+  color: #fff;
+  background: var(--accent);
+}
 .stream-card {
   display: block;
   position: absolute;

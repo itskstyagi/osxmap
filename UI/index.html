@@ -7,9 +7,9 @@
     <meta name="description" content="A monochrome 3D city explorer with OSM-first place, pin, area, and routing tools.">
     <title>Monument / City Explorer</title>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-    <link rel="stylesheet" href="./styles.css?v=20260725-6">
+    <link rel="stylesheet" href="./styles.css?v=20260725-9">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
-    <script type="module" src="./app.js?v=20260725-6"></script>
+    <script type="module" src="./app.js?v=20260725-9"></script>
   </head>
   <body>
     <main class="app-shell">
@@ -31,8 +31,8 @@
               <form id="route-form" class="route-form">
                 <div class="route-planner-heading"><span>YOUR STOPS</span><b id="route-stop-count">0 STOPS</b></div>
                 <div id="route-stops" class="route-stops" aria-label="Ordered route stops"></div>
-                <div class="route-actions"><button id="add-route-stop" type="button">ADD STOP</button><button id="trace-route" type="submit">TRACE PLAN</button></div>
-                <p id="route-plan-hint" class="route-plan-hint">Type to search places saved from earlier searches. Press Enter to search Serp.</p>
+              <div class="route-actions"><button id="add-route-stop" type="button">ADD STOP</button><button id="trace-route" type="submit">TRACE PLAN</button></div>
+              <p id="route-plan-hint" class="route-plan-hint">Type to search places saved from earlier searches. Press Enter to search OpenStreetMap first.</p>
               </form>
               <div class="geo-actions"><button id="pin-mode" type="button" aria-pressed="false">PIN STOP ON MAP</button><button id="use-location" type="button">ADD MY LOCATION</button><button id="use-approximate-location" type="button">ADD APPROX. LOCATION</button></div>
               <details class="utility-tools">
@@ -45,7 +45,7 @@
                   <div id="area-list" class="area-list" aria-label="Saved areas"></div>
                 </div>
               </details>
-              <p id="geo-status" class="geo-status" aria-live="polite">The map starts clear. Add route stops, then trace the plan.</p>
+              <p id="geo-status" class="geo-status" aria-live="polite">Opening your approximate Geo-IP location.</p>
             </div>
           </section>
           </section>
@@ -59,8 +59,7 @@
           <div class="stream-track"><i id="stream-progress"></i></div>
           <div class="stream-detail"><span id="stream-buildings">0 buildings</span><span id="stream-source">cache / open data</span></div>
         </div>
-        <section id="intro-card" class="intro-card"><p>01 / SEARCH</p><h1>Every city,<br>drawn from open data.</h1><span>Enter a place to stream its built form from the center outward.</span></section>
-        <nav class="map-controls" aria-label="Map controls"><button type="button" data-map-action="in" aria-label="Zoom in">+</button><button type="button" data-map-action="out" aria-label="Zoom out">-</button><button type="button" data-map-action="pitch" aria-label="Toggle map pitch">3D</button><button type="button" data-map-action="reset" aria-label="Reset city view">R</button></nav>
+        <nav class="map-controls" aria-label="Map controls"><button type="button" data-map-action="in" aria-label="Zoom in">+</button><button type="button" data-map-action="out" aria-label="Zoom out">-</button><button type="button" data-map-action="pitch" aria-label="Enable 3D terrain view" aria-pressed="false">3D</button><button type="button" data-map-action="reset" aria-label="Reset map view">R</button></nav>
         <aside id="agent-hud" class="agent-hud" aria-live="polite">
           <div class="agent-hud-heading"><span>MAP AGENT</span><b id="agent-connection">CONNECTING</b></div>
           <div class="agent-hud-stage"><span>REQUEST</span><strong id="agent-request">Waiting for connection</strong></div>

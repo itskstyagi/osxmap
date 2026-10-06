@@ -5,3 +5,4 @@ dist/
 data/
 !.gitkeep
 __pycache__/
+.conda_env/
