@@ -91,11 +91,11 @@ def validate_web_url(url: str) -> str:
         raise ServiceError("Web source URL is not allowed.", 400) from None
 
 
-def _time_left(deadline):
+def _time_left(deadline, maximum=10):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise ServiceError("Web source request timed out.", 504)
-    return min(10, remaining)
+    return min(maximum, remaining)
 
 
 def _resolve_public(host, port, deadline):
@@ -169,22 +169,51 @@ def _abort_connection(connection):
 
 def fetch_web_document(url: str) -> dict:
     """Fetch one public document without proxies, cookies, credentials, or external resources."""
-    current, deadline = validate_web_url(url), time.monotonic() + 20
+    fetched = _fetch_public_bytes(url, MAX_RAW_BYTES, 20, None, 10)
+    return parse_web_document(fetched["raw"], fetched["content_type"], fetched["final_url"])
+
+
+def fetch_public_bytes(url: str, *, max_bytes=MAX_RAW_BYTES, timeout=20, allowed_media_types=None) -> dict:
+    """Return {raw: bytes, content_type: str, final_url: str} from a vetted public URL.
+
+    No proxies, credentials, cookies, compression, partial responses, or secondary DNS
+    lookups are used. Redirects share the total timeout (at most 120 seconds); socket
+    inactivity is limited to 10 seconds. The byte budget is at most 64 MiB. An explicit
+    collection of MIME types enables binary responses; None retains the text allowlist.
+    Callers must decode the bounded bytes, never give the URL to another network reader.
+    """
+    if (type(max_bytes) is not int or not 0 < max_bytes <= 64 * 1024 * 1024
+            or type(timeout) not in {int, float} or not math.isfinite(timeout) or not 0 < timeout <= 120):
+        raise ServiceError("Web source byte or timeout limit is invalid.", 400)
+    if allowed_media_types is not None:
+        if (not isinstance(allowed_media_types, (tuple, list, set, frozenset)) or not 0 < len(allowed_media_types) <= 32
+                or any(not isinstance(media, str) or len(media) > 100 or not re.fullmatch(
+                    r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", media) for media in allowed_media_types)):
+            raise ServiceError("Web source allowed media types are invalid.", 400)
+        allowed_media_types = frozenset(allowed_media_types)
+    return _fetch_public_bytes(url, max_bytes, timeout, allowed_media_types, timeout)
+
+
+def _fetch_public_bytes(url, max_bytes, timeout, allowed_media_types, request_timeout):
+    current, deadline = validate_web_url(url), time.monotonic() + timeout
+    size_error = ("Web source exceeds the 4 MiB limit." if max_bytes == MAX_RAW_BYTES
+                  else f"Web source exceeds the {max_bytes} byte limit.")
     for redirects in range(4):
-        request_deadline = min(deadline, time.monotonic() + 10)
+        request_deadline = min(deadline, time.monotonic() + request_timeout)
         parts = urlsplit(current)
         port = parts.port or (443 if parts.scheme == "https" else 80)
         address = _resolve_public(parts.hostname, port, request_deadline)
         connection_type = _PinnedHTTPSConnection if parts.scheme == "https" else _PinnedHTTPConnection
         connection = connection_type(parts.hostname, port, address, request_deadline)
         response = None
-        timer = threading.Timer(_time_left(request_deadline), _abort_connection, args=(connection,))
+        timer = threading.Timer(_time_left(request_deadline, request_timeout), _abort_connection, args=(connection,))
         timer.daemon = True
         timer.start()  # Also bounds slow/trickling response headers, not just individual socket reads.
         try:
             target = parts.path + ("?" + parts.query if parts.query else "")
             connection.request("GET", target, headers={"User-Agent": "Meridian/source-reader",
-                "Accept": "text/html, application/geo+json, application/json, text/csv, text/plain;q=0.8",
+                "Accept": (", ".join(sorted(allowed_media_types)) if allowed_media_types is not None else
+                           "text/html, application/geo+json, application/json, text/csv, text/plain;q=0.8"),
                 "Accept-Encoding": "identity"})
             response = connection.getresponse()
             _time_left(request_deadline)
@@ -201,24 +230,28 @@ def fetch_web_document(url: str) -> dict:
             if response.getheader("Content-Encoding", "").strip().lower() not in {"", "identity"}:
                 raise ServiceError("Web source compression is unsupported; identity encoding is required.", 415)
             content_type = response.getheader("Content-Type", "")
-            _media_type(content_type)
+            if allowed_media_types is None:
+                _media_type(content_type)
+            elif (not isinstance(content_type, str) or len(content_type) > 512
+                  or content_type.split(";", 1)[0].strip().lower() not in allowed_media_types):
+                raise ServiceError("Web source format is unsupported for this binary reader.", 415)
             length = response.getheader("Content-Length")
             if length is not None:
                 if not re.fullmatch(r"[0-9]{1,12}", length.strip()):
                     raise ServiceError("Web source response length is invalid.", 502)
-                if int(length) > MAX_RAW_BYTES:
-                    raise ServiceError("Web source exceeds the 4 MiB limit.", 413)
+                if int(length) > max_bytes:
+                    raise ServiceError(size_error, 413)
             chunks, total = [], 0
             while True:
                 if connection._transport_socket is not None:
                     connection._transport_socket.settimeout(_time_left(request_deadline))
-                chunk = response.read1(min(65536, MAX_RAW_BYTES + 1 - total))
+                chunk = response.read1(min(65536, max_bytes + 1 - total))
                 _time_left(request_deadline)
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > MAX_RAW_BYTES:
-                    raise ServiceError("Web source exceeds the 4 MiB limit.", 413)
+                if total > max_bytes:
+                    raise ServiceError(size_error, 413)
                 chunks.append(chunk)
             if length is not None and total != int(length):
                 raise ServiceError("Web source response was incomplete.", 502)
@@ -233,7 +266,7 @@ def fetch_web_document(url: str) -> dict:
             if response is not None:
                 response.close()
             connection.close()
-        return parse_web_document(raw, content_type, current)
+        return {"raw": raw, "content_type": content_type, "final_url": current}
 
 
 def _media_type(content_type):
