@@ -437,9 +437,31 @@ class MapAgentService:
         output = dict(result)
         output.pop("mapUpdate", None)
         if "text" in output and isinstance(output.get("text"), str):
-            output["text"] = output["text"][:16000]
+            output["text"] = output["text"][:12000]
         if isinstance(output.get("tables"), list):
-            output["tables"] = [{"headers": table["headers"], "rows": table["rows"][:40], "returnedRows": min(40, len(table["rows"])), "totalReadRows": len(table["rows"])} for table in output["tables"][:4]]
+            budget = 16000
+            tables = []
+            for index, table in enumerate(output["tables"][:4]):
+                rows = []
+                for row in table["rows"][:40]:
+                    size = len(json.dumps(row, ensure_ascii=False).encode("utf-8"))
+                    if size > budget:
+                        break
+                    rows.append(row)
+                    budget -= size
+                tables.append({"tableIndex": index, "headers": table["headers"], "rows": rows, "returnedRows": len(rows), "totalReadRows": len(table["rows"])})
+            output["tables"] = tables
+        if isinstance(output.get("links"), list):
+            output["links"] = output["links"][:10]
+        if len(json.dumps(output, ensure_ascii=False).encode("utf-8")) > 48000:
+            output["truncationNote"] = "Source content is bounded; omitted text/rows/links are not available as evidence. Row indices of retained rows remain unchanged."
+            while len(json.dumps(output, ensure_ascii=False).encode("utf-8")) > 48000:
+                if output.get("links"):
+                    output["links"].pop()
+                elif len(output.get("text", "")) > 1000:
+                    output["text"] = output["text"][:-1000]
+                else:
+                    break
         return output
 
     @staticmethod

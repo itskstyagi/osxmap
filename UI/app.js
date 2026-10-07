@@ -44,7 +44,7 @@ function coordinateQuery(query) {
 }
 
 function mapInstruction(query) {
-  return /^(?:find|show|hide|what|where|which|how|tell|take|plan|create|draw|go|zoom|clear|save|pin|add|remove|turn|enable|disable|switch|search|route|navigate|locate|analy[sz]e|summari[sz]e|compare|filter|visuali[sz]e|undo|redo|duplicate|open)\b/i.test(query) ||
+  return /^(?:find|show|hide|what|where|which|how|tell|take|plan|create|draw|go|zoom|clear|save|pin|add|remove|turn|enable|disable|switch|search|route|navigate|locate|analy[sz]e|summari[sz]e|compare|filter|visuali[sz]e|undo|redo|duplicate|open|research|browse|investigate|fetch|download|load)\b/i.test(query) ||
     /\S\s+to\s+\S|\b(?:near|nearby|around|above|below)\b|\?$|\b(?:on|off)\s*$/i.test(query);
 }
 
@@ -1040,6 +1040,8 @@ class CityExplorer {
   }
 
   applyLocalInstruction(query) {
+    this.agentApplicationError = '';
+    this.renderAgentSources([]);
     const normalized = query.toLowerCase().trim().replace(/[.!]$/, '');
     if (normalized === 'open studio' || normalized === 'switch to studio') {
       this.setProductMode('studio');

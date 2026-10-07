@@ -353,6 +353,9 @@ class FakeSocket:
     def shutdown(self, how):
         self.closed = True
 
+    def do_handshake(self):
+        pass
+
     def close(self):
         self.closed = True
 
