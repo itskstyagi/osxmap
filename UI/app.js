@@ -465,8 +465,19 @@ class CityExplorer {
     const sidebar = el['manual-controls-content'].closest('.manual-sidebar');
     sidebar.prepend(document.querySelector('.floating-toolbar'));
     el['manual-controls-content'].prepend(document.querySelector('.map-mode-panel'), document.querySelector('.map-controls'));
-    el['manual-controls-content'].append(document.getElementById('map-notice'), document.querySelector('.workspace-metrics'), document.querySelector('.route-summary'), document.getElementById('agent-hud'), el['agent-question']);
+    el['manual-controls-content'].append(document.getElementById('map-notice'), el['agent-question']);
+    const information = document.getElementById('info-drawer-content');
+    information.prepend(document.querySelector('.route-summary'), document.querySelector('.workspace-metrics'), document.getElementById('agent-hud'));
     sidebar.append(el['agent-composer']);
+    document.getElementById('toggle-info-drawer').addEventListener('click', () => this.setInfoDrawerOpen(information.hidden));
+    document.getElementById('clear-map-cache').addEventListener('click', () => {
+      navigator.serviceWorker?.controller?.postMessage({ type: 'clear-map-cache' });
+    });
+    navigator.serviceWorker?.addEventListener('message', (event) => {
+      if (event.data?.type === 'map-cache-stats') document.getElementById('cache-status').textContent = `${event.data.entries} resources / ${(event.data.bytes / 1048576).toFixed(1)} MB`;
+    });
+    document.getElementById('cache-status').textContent = navigator.serviceWorker?.controller ? 'Cache ready / 96 MB limit' : 'Local cache unavailable; browser caching remains active';
+    navigator.serviceWorker?.controller?.postMessage({ type: 'map-cache-stats' });
     document.querySelectorAll('button[data-map-mode]').forEach((button) => button.addEventListener('click', () => this.setMapMode(button.dataset.mapMode)));
     document.querySelectorAll('button[data-workspace-view]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView(button.dataset.workspaceView)));
     document.getElementById('theme-toggle')?.addEventListener('click', () => this.setTheme(this.theme === 'dark' ? 'light' : 'dark'));
@@ -500,6 +511,17 @@ class CityExplorer {
     toggle.querySelector('b').textContent = open ? 'CLOSE' : 'OPEN';
   }
 
+  setInfoDrawerOpen(open) {
+    const content = document.getElementById('info-drawer-content');
+    const toggle = document.getElementById('toggle-info-drawer');
+    content.hidden = !open;
+    document.querySelector('.info-drawer').classList.toggle('is-open', open);
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.setAttribute('aria-label', `${open ? 'Collapse' : 'Expand'} map information`);
+    if (open && window.innerWidth <= 900) this.setManualControlsOpen(false);
+    if (open) navigator.serviceWorker?.controller?.postMessage({ type: 'map-cache-stats' });
+  }
+
   setGeoToolsOpen(open) {
     this.geoToolsOpen = open;
     const panel = this.elements['geo-content'].closest('.geo-panel');
@@ -522,6 +544,7 @@ class CityExplorer {
     const active = this.agentSubmitting || Boolean(this.agentRunId);
     const activityPanel = document.getElementById('agent-hud');
     if (active && activityPanel) activityPanel.open = true;
+    if (this.agentQuestionOpen) this.setInfoDrawerOpen(true);
     el['agent-submit'].disabled = !this.agentSocketReady || active;
     el['agent-submit'].textContent = active ? 'WORKING' : 'SEND';
     el['agent-cancel'].classList.toggle('is-hidden', !active);
@@ -897,10 +920,10 @@ class CityExplorer {
 
   createMap() {
     if (window.mlcontour) {
-      this.contourDem = new window.mlcontour.DemSource({ url: TERRAIN_TILE_URL, encoding: 'terrarium', maxzoom: 13, worker: true });
+      this.contourDem = new window.mlcontour.DemSource({ url: TERRAIN_TILE_URL, encoding: 'terrarium', maxzoom: 13, worker: true, cacheSize: 200 });
       this.contourDem.setupMaplibre(window.maplibregl);
     }
-    this.map = new window.maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/positron', center: [-122.48, 37.82], zoom: 11, pitch: this.terrainEnabled ? 45 : 0, bearing: -12, maxPitch: 78, attributionControl: false, antialias: true });
+    this.map = new window.maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/positron', center: [-122.48, 37.82], zoom: 11, pitch: this.terrainEnabled ? 45 : 0, bearing: -12, maxPitch: 78, attributionControl: false, antialias: true, maxTileCacheSize: 512, maxTileCacheZoomLevels: 5 });
     this.map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'bottom-right');
     this.map.addControl(new window.maplibregl.ScaleControl({ maxWidth: 100, unit: 'metric' }), 'bottom-left');
     this.map.on('style.load', () => {
@@ -1021,6 +1044,7 @@ class CityExplorer {
     const utility = document.querySelector('.utility-tools');
     if (utility) utility.open = view === 'workspace';
     if (view === 'routes') this.setMapMode('route');
+    if (view === 'workspace') this.setInfoDrawerOpen(true);
     if (view === 'explore') this.elements['search-input'].focus();
     this.updateDashboard();
   }
@@ -2088,4 +2112,17 @@ class CityExplorer {
   }
 }
 
-window.addEventListener('DOMContentLoaded', () => new CityExplorer());
+window.addEventListener('DOMContentLoaded', async () => {
+  if ('serviceWorker' in navigator) {
+    try {
+      await Promise.race([
+        navigator.serviceWorker.register('./map-cache-worker.js').then(async () => {
+          await navigator.serviceWorker.ready;
+          if (!navigator.serviceWorker.controller) await new Promise((resolve) => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true }));
+        }),
+        new Promise((resolve) => window.setTimeout(resolve, 1200)),
+      ]);
+    } catch { /* Cache is optional, including on non-secure origins. */ }
+  }
+  new CityExplorer();
+});
