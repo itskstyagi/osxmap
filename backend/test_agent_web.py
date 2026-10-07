@@ -75,7 +75,99 @@ class SerpWebProviderTests(BackendCase):
                 self.assertEqual(params["engine"], engine)
                 self.assertEqual(params["hl"], "en")
                 self.assertEqual(params.get("gl"), "in" if engine != "google_scholar" else None)
+                self.assertEqual(params.get("num"), "8" if engine == "google_scholar" else None)
                 self.assertIn("not verified numeric observations", result["caveat"])
+
+    def test_relevance_precedes_cap_without_excluding_global_or_hdx_sources(self):
+        unrelated = [
+            {"title": "Comoros poverty estimates" if index % 2 else "Cote d'Ivoire conservation areas", "link": f"https://data.humdata.org/dataset/unrelated-{index}.csv", "snippet": "Official CSV GeoJSON dataset download. " + "Population statistics. " * 20}
+            for index in range(10)
+        ]
+        relevant = [
+            {"title": "WorldPop India population 2020", "link": "https://data.worldpop.org/GIS/Population/Global_2000_2020_1km/2020/IND/", "snippet": "Gridded population GeoTIFF downloads for India."},
+            {"title": "Noida Census 2011", "link": "https://censusindia.gov.in/noida", "snippet": "Official ward population census for Noida, India."},
+            {"title": "Noida population observations", "link": "https://data.humdata.org/dataset/noida-population.csv", "snippet": "Ward population counts for Noida, India."},
+            {"title": "WorldPop global gridded estimates", "link": "https://hub.worldpop.org/geodata/listing?id=29", "snippet": "Global population counts, downloadable GeoTIFF grids."},
+        ]
+        for engine, root in (("google", "organic_results"), ("google_news", "news_results"), ("google_scholar", "organic_results")):
+            with self.subTest(engine=engine), mock.patch.object(server, "CACHE", self.cache), mock.patch.object(server, "fetch_serp_response", return_value={root: unrelated + relevant}):
+                result = server.search_serp_web("Noida India population GeoJSON CSV official census ward dataset", engine, "IN")
+            urls = [item["url"] for item in result["results"]]
+            self.assertEqual(len(urls), 8)
+            self.assertEqual(set(urls[:4]), {item["link"] for item in relevant})
+            self.assertEqual(result["results"][0]["title"], "Noida Census 2011")
+
+    def test_population_authority_is_host_bounded_and_not_a_general_search_bias(self):
+        unrelated = [{"title": "Global gridded estimates", "link": f"https://worldpop.org.example.org/grids/{index}"} for index in range(10)]
+        official = [
+            {"title": "Global gridded estimates", "link": "https://hub.worldpop.org/geodata/summary?id=29"},
+            {"title": "India gridded estimates", "link": "https://data.worldpop.org/grids/IND/"},
+        ]
+        with mock.patch.object(server, "CACHE", self.cache), mock.patch.object(server, "fetch_serp_response", return_value={"organic_results": unrelated + official}):
+            population = server.search_serp_web("Noida population", "google", "IN")
+            general = server.search_serp_web("bridge maintenance", "google", "")
+        self.assertEqual([item["url"] for item in population["results"][:2]], [item["link"] for item in official])
+        self.assertEqual([item["url"] for item in general["results"]], [item["link"] for item in unrelated[:8]])
+
+    def test_challenge_garbage_is_removed_but_usable_citations_survive(self):
+        challenge = "JavaScript is disabled. In order to continue, we need to verify that you're not a robot. This requires JavaScript. Enable JavaScript and then reload the page."
+        payload = {"organic_results": [
+            {"title": "Untitled", "link": "https://data.humdata.org/dataset/comoros-poverty", "snippet": challenge},
+            {"title": "Just a moment...", "link": "https://example.org/challenge", "snippet": "Checking your browser. Please wait."},
+            {"title": "CAPTCHA", "link": "https://example.org/captcha"},
+            {"title": "Untitled", "link": "https://example.org/empty"},
+            {"title": "Noida census archive", "link": "https://data.humdata.org/dataset/noida-census", "snippet": challenge},
+            {"title": "Untitled", "link": "https://data.humdata.org/dataset/noida-counts", "snippet": "Noida population counts from the census. " + challenge},
+            {"title": "CAPTCHA usability research", "link": "https://example.org/research", "snippet": "A study of accessible browser challenges and human verification design."},
+        ]}
+        with mock.patch.object(server, "CACHE", self.cache), mock.patch.object(server, "fetch_serp_response", return_value=payload):
+            result = server.search_serp_web("Noida population", "google", "IN")
+        by_url = {item["url"]: item for item in result["results"]}
+        self.assertEqual(set(by_url), {item["link"] for item in payload["organic_results"][-3:]})
+        self.assertEqual(by_url["https://data.humdata.org/dataset/noida-census"]["snippet"], "")
+        self.assertEqual(by_url["https://data.humdata.org/dataset/noida-counts"]["snippet"], "Noida population counts from the census.")
+
+    def test_canonical_duplicates_keep_best_usable_citation_and_stable_ties(self):
+        blocked = {"title": "Untitled", "link": "https://EXAMPLE.ORG/wards#blocked", "snippet": "Please verify you are human."}
+        weak = {"title": "Archive", "link": "https://example.org/wards#preview"}
+        useful = {"title": "Noida population census", "link": "https://example.org/wards#table", "snippet": "Ward counts from the census.", "source": "First publisher"}
+        other = [{"title": "Research archive", "link": f"https://example.org/{index}"} for index in range(10)]
+        payload = {"organic_results": [blocked] + [weak] * 10 + other + [useful, {**useful, "source": "Later publisher"}]}
+        with mock.patch.object(server, "CACHE", self.cache), mock.patch.object(server, "fetch_serp_response", return_value=payload):
+            result = server.search_serp_web("Noida population census", "google", "IN")
+        self.assertEqual(len(result["results"]), 8)
+        self.assertEqual(result["results"][0]["url"], "https://example.org/wards")
+        self.assertEqual(result["results"][0]["title"], useful["title"])
+        self.assertEqual(result["results"][0]["publisher"], "First publisher")
+        self.assertEqual([item["url"] for item in result["results"][1:]], [item["link"] for item in other[:7]])
+
+    def test_general_research_and_equal_matches_keep_provider_order(self):
+        items = [{"title": "Bridge maintenance research", "link": f"https://example.org/{name}", "snippet": "Civil engineering findings."} for name in ("z", "a.csv", "b", "c", "d", "e", "f", "g", "h")]
+        with mock.patch.object(server, "CACHE", self.cache), mock.patch.object(server, "fetch_serp_response", return_value={"organic_results": items}):
+            result = server.search_serp_web("bridge maintenance", "google", "")
+        self.assertEqual([item["url"] for item in result["results"]], [item["link"] for item in items[:8]])
+
+    def test_query_terms_normalize_accents_url_escapes_and_word_boundaries(self):
+        items = [
+            {"title": "Cambridge maintenance", "link": "https://example.org/cambridge.csv"},
+            {"title": "Archive", "link": "https://example.org/S%C3%A3o_Paulo/bridge-maintenance"},
+            {"title": "S\u00e3o Paulo bridge maintenance", "link": "https://example.org/study"},
+        ]
+        with mock.patch.object(server, "CACHE", self.cache), mock.patch.object(server, "fetch_serp_response", return_value={"organic_results": items}):
+            result = server.search_serp_web("SAO PAULO bridge maintenance", "google", "")
+        self.assertEqual([item["url"] for item in result["results"]], [items[index]["link"] for index in (1, 2, 0)])
+
+    def test_google_supplemental_sources_are_ranked_before_final_cap(self):
+        payload = {
+            "organic_results": [{"title": "Poverty data", "link": f"https://example.org/unrelated-{index}.csv"} for index in range(10)],
+            "knowledge_graph": {"title": "Noida population", "description": "India census counts.", "source": {"link": "https://example.org/census", "name": "Census office"}},
+            "answer_box": {"title": "Noida population census", "link": "https://example.org/answer", "snippet": "Official India counts."},
+        }
+        with mock.patch.object(server, "CACHE", self.cache), mock.patch.object(server, "fetch_serp_response", return_value=payload):
+            result = server.search_serp_web("Noida India population census", "google", "IN")
+        self.assertEqual(len(result["results"]), 8)
+        self.assertEqual({item["kind"] for item in result["results"][:2]}, {"knowledge-source", "answer-source"})
+        self.assertEqual({item["url"] for item in result["results"][:2]}, {"https://example.org/census", "https://example.org/answer"})
 
     def test_news_clusters_are_flattened_and_invalid_or_credential_links_are_omitted(self):
         payload = {"news_results": [{"stories": [{"title": "Valid", "link": "https://example.org/a"}, {"title": "Invalid", "link": "http://127.0.0.1/admin"}, {"title": "Credential", "link": "https://example.org/data?api_key=hidden"}]}]}
