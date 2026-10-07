@@ -10,10 +10,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20261007-16">
+    <link rel="stylesheet" href="./styles.css?v=20261007-18">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
     <script defer src="https://unpkg.com/maplibre-contour@0.0.5/dist/index.min.js"></script>
-    <script type="module" src="./app.js?v=20261007-12"></script>
+    <script type="module" src="./app.js?v=20261007-18"></script>
   </head>
   <body>
     <main class="app-shell">
@@ -28,6 +28,7 @@
       <div class="topbar-actions app-actions" role="group" aria-label="Appearance and display">
         <button id="theme-toggle" class="icon-button" type="button" aria-label="Toggle light and dark theme" aria-pressed="false" title="Toggle theme"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 14.1A8.4 8.4 0 0 1 9.9 4a8.4 8.4 0 1 0 10.2 10.1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>
         <button id="fullscreen-toggle" class="icon-button" type="button" aria-label="Toggle fullscreen" aria-pressed="false" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+        <button id="view-mode-toggle" class="icon-button" type="button" aria-label="Enter view mode" aria-pressed="false" title="View mode: hide panels"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/><path class="view-mode-slash" d="m4 4 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
       </div>
       <aside class="manual-sidebar" aria-label="Manual map controls">
         <button id="toggle-manual-controls" class="manual-toggle" type="button" aria-expanded="true" aria-controls="manual-controls-content"><span><i class="panel-icon" aria-hidden="true"></i>Map controls</span><b>Close</b></button>

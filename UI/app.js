@@ -392,6 +392,7 @@ class CityExplorer {
     this.theme = localStorage.getItem('theme') || 'dark';
     this.mapMode = ['satellite', 'route', 'terrain'].includes(localStorage.getItem('mapMode')) ? localStorage.getItem('mapMode') : 'satellite';
     this.workspaceView = 'explore';
+    this.viewMode = false;
     this.country = { country: '', countryCode: '', method: 'detecting' };
     this.selected = null;
     this.stream = { loaded: 0, total: 0, buildings: 0, inferred: 0, active: false, preview: false, source: '', degraded: false };
@@ -501,6 +502,7 @@ class CityExplorer {
     document.querySelectorAll('button[data-map-mode]').forEach((button) => button.addEventListener('click', () => this.setMapMode(button.dataset.mapMode)));
     document.querySelectorAll('button[data-workspace-view]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView(button.dataset.workspaceView)));
     document.getElementById('theme-toggle')?.addEventListener('click', () => this.setTheme(this.theme === 'dark' ? 'light' : 'dark'));
+    document.getElementById('view-mode-toggle').addEventListener('click', () => this.setViewMode(!this.viewMode));
     document.getElementById('focus-route')?.addEventListener('click', () => this.focusRoute());
     document.getElementById('fullscreen-toggle')?.addEventListener('click', async () => {
       try {
@@ -518,6 +520,16 @@ class CityExplorer {
       window.clearInterval(this.clockTimer);
       this.agentSocket?.close();
     });
+  }
+
+  setViewMode(enabled) {
+    this.viewMode = enabled;
+    document.documentElement.dataset.viewMode = String(enabled);
+    const toggle = document.getElementById('view-mode-toggle');
+    toggle.setAttribute('aria-pressed', String(enabled));
+    toggle.setAttribute('aria-label', enabled ? 'Exit view mode' : 'Enter view mode');
+    toggle.setAttribute('title', enabled ? 'Exit view mode (Esc)' : 'View mode: hide panels');
+    toggle.focus({ preventScroll: true });
   }
 
   setManualControlsOpen(open) {
@@ -1005,7 +1017,7 @@ class CityExplorer {
       this.operate('reset');
     });
     this.map.on('click', (event) => {
-      if (!this.pinMode) return;
+      if (!this.pinMode || this.viewMode) return;
       const interactiveLayers = [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred', 'local-poi-marker', 'local-search-result', 'geo-pin', 'geo-route-stop', 'geo-area-fill', 'geo-route', 'geo-route-search']
         .filter((layer) => this.map.getLayer(layer));
       if (interactiveLayers.length && this.map.queryRenderedFeatures(event.point, { layers: interactiveLayers }).length) return;
@@ -1476,6 +1488,7 @@ class CityExplorer {
   }
 
   showBuilding(event) {
+    if (this.viewMode) return;
     const feature = event.features?.[0];
     if (!feature) return;
     const properties = feature.properties || {};
@@ -1535,6 +1548,7 @@ class CityExplorer {
   }
 
   showPoi(event) {
+    if (this.viewMode) return;
     const feature = event.features?.[0];
     if (!feature) return;
     const content = document.createElement('div');
@@ -2207,6 +2221,11 @@ class CityExplorer {
   handleShortcut(event) {
     const target = event.target;
     if (target instanceof Element && target.closest('dialog[open]')) return;
+    if (event.key === 'Escape' && this.viewMode) {
+      event.preventDefault();
+      this.setViewMode(false);
+      return;
+    }
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === 'Escape' && this.agentQuestionOpen) {
@@ -2222,6 +2241,7 @@ class CityExplorer {
     }
     if (event.key === '/') {
       event.preventDefault();
+      if (this.viewMode) this.setViewMode(false);
       this.setManualControlsOpen(true);
       this.elements['search-input'].focus();
       return;

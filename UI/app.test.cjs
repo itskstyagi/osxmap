@@ -126,6 +126,7 @@ function setup({ mobile = false } = {}) {
   };
   const context = vm.createContext({
     document, window, navigator: {}, AbortController, AbortSignal, URL, URLSearchParams,
+    Element, HTMLInputElement: class extends Element {}, HTMLTextAreaElement: class extends Element {},
     API_BASE_URL: '', AGENT_SOCKET_URL: '', apiPath: (path) => path,
     setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: window.clearTimeout,
@@ -183,13 +184,68 @@ function buildingMap() {
 test('display controls stay outside the sidebar after UI initialization', () => {
   const { app, document } = setup({ mobile: true });
   app.bindUi();
-  for (const id of ['theme-toggle', 'fullscreen-toggle']) {
+  for (const id of ['theme-toggle', 'fullscreen-toggle', 'view-mode-toggle']) {
     const control = document.getElementById(id);
     assert.equal(control.closest('.manual-sidebar'), null);
     assert.equal(control.closest('.app-actions').parent, document.querySelector('.app-shell'));
     assert.equal(control.listeners.get('click').length, 1);
   }
   assert.equal(document.querySelector('.workspace-nav').closest('.manual-sidebar'), document.querySelector('.manual-sidebar'));
+});
+
+test('view mode toggles accessibly without changing panel or workspace state', async () => {
+  const { app, document } = setup();
+  app.bindUi();
+  app.setInfoDrawerOpen(true);
+  app.setGeoToolsOpen(true);
+  const workspace = app.geo;
+  const toggle = document.getElementById('view-mode-toggle');
+  await toggle.click();
+  assert.equal(app.viewMode, true);
+  assert.equal(document.documentElement.dataset.viewMode, 'true');
+  assert.equal(toggle.getAttribute('aria-pressed'), 'true');
+  assert.equal(toggle.getAttribute('aria-label'), 'Exit view mode');
+  assert.equal(toggle.focused, true);
+  await toggle.click();
+  assert.equal(app.viewMode, false);
+  assert.equal(document.documentElement.dataset.viewMode, 'false');
+  assert.equal(toggle.getAttribute('aria-pressed'), 'false');
+  assert.equal(app.manualControlsOpen, true);
+  assert.equal(app.geoToolsOpen, true);
+  assert.equal(document.getElementById('info-drawer-content').hidden, false);
+  assert.equal(app.geo, workspace);
+});
+
+test('Escape exits view mode before canceling pending interactions; search restores the UI', () => {
+  const { app } = setup();
+  app.setViewMode(true);
+  app.agentQuestionOpen = true;
+  app.pinMode = true;
+  app.cancelAgentRequest = () => assert.fail('Exiting view mode must not cancel the agent');
+  const escape = event('Escape');
+  app.handleShortcut(escape);
+  assert.equal(escape.prevented, true);
+  assert.equal(app.viewMode, false);
+  assert.equal(app.pinMode, true);
+  app.setViewMode(true);
+  const search = event('/');
+  app.handleShortcut(search);
+  assert.equal(app.viewMode, false);
+  assert.equal(app.manualControlsOpen, true);
+  assert.equal(app.elements['search-input'].focused, true);
+});
+
+test('view mode suppresses new building and POI cards but keeps map shortcuts', () => {
+  const { app } = setup();
+  app.setViewMode(true);
+  app.showBuilding({ features: [{ properties: { height: 34 } }] });
+  app.showPoi({ features: [{ properties: { name: 'Test place' } }] });
+  assert.equal(app.buildingPopup, undefined);
+  app.operate = action => assert.equal(action, 'in');
+  const zoom = event('+');
+  app.handleShortcut(zoom);
+  assert.equal(zoom.prevented, true);
+  assert.equal(app.viewMode, true);
 });
 
 test('desktop route fitting accounts for the actual widened sidebar', () => {
