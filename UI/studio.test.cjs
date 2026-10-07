@@ -357,3 +357,75 @@ test('sourced population cannot silently combine observation years', () => {
   assert.throws(() => instance.applySourcedDataset({ data: collection(), field: 'value', visualization: 'heatmap', scope: { type: 'workspace' } }), /multiple observation times/);
   assert.equal(instance.workspace.layers.length, 1);
 });
+
+test('sourced heatmap fitting uses its frozen scope, not the wider remote dataset or current viewport', (t) => {
+  const previous = global.window;
+  global.window = { innerWidth: 1440, innerHeight: 1000, matchMedia: () => ({ matches: true }) };
+  t.after(() => { global.window = previous; });
+  const instance = controller();
+  instance.setTab = () => {};
+  const fits = [];
+  instance.app.map.fitBounds = (bounds) => fits.push(bounds);
+  const input = collection();
+  for (const feature of input.features) delete feature.properties.observedAt;
+  input.features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [77.4, 28.6] }, properties: { value: 100 } });
+  const scope = { type: 'selection', bounds: [-3.2, 49.8, -2.8, 51.2] };
+  const layer = instance.applySourcedDataset({ name: 'Frozen study', data: input, field: 'value', units: 'people per grid cell', visualization: 'heatmap', scope, source: { name: 'Raster fixture', method: 'raster-window', referenceYear: 2020 } });
+  instance.workspace.region = [70, 20, 80, 30];
+  instance.focusLayer(layer);
+  assert.deepEqual(fits.at(-1), [[-3.2, 49.8], [-2.8, 51.2]]);
+  assert.equal(instance.renderedLayer(layer).inputCount, 2);
+  assert.match(instance.statusMessage, /2 extracted raster cells.*reference year 2020/);
+  assert.equal(instance.workspace.datasets[layer.datasetId].features.length, 5);
+  layer.scopeBounds = [170, -5, -175, 5];
+  instance.focusLayer(layer);
+  assert.deepEqual(fits.at(-1), [[170, -5], [185, 5]]);
+  layer.ignoreRegion = true;
+  layer.scopeBounds = null;
+  layer.filters.min = 100;
+  instance.focusLayer(layer);
+  assert.deepEqual(fits.at(-1), [[77.4, 28.6], [77.4, 28.6]], 'Without a frozen scope, fit matching extracted values only');
+});
+
+test('raster legend and insights expose real reference metadata and trustworthy zero-value framing', (t) => {
+  const previous = global.document;
+  const node = (tagName) => ({
+    tagName, children: [], style: {}, attributes: {}, value: '',
+    get textContent() { return [this.value, ...this.children.map((child) => child.textContent)].filter(Boolean).join(' '); },
+    set textContent(value) { this.value = value; this.children = []; },
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.value = ''; this.children = children; },
+    setAttribute(key, value) { this.attributes[key] = value; },
+  });
+  global.document = { createElement: node };
+  t.after(() => { global.document = previous; });
+  const instance = controller();
+  instance.enabled = true;
+  instance.el = Object.fromEntries(['studio-legend', 'studio-insights', 'studio-provenance'].map((key) => [key, node('div')]));
+  const layer = instance.selectedLayer();
+  layer.visualization = 'heatmap';
+  layer.source = { name: 'WorldPop test fixture', url: 'https://example.org/grid.tif', referenceYear: '2020', resolution: '30 arc seconds (~1 km)', license: 'CC BY 4.0', method: 'raster-window', publishedDate: '2021-04-01', retrievedAt: '2026-10-07', caveat: 'Historical modeled population, not a current census. Extracted cells are not an administrative total.' };
+  instance.renderLegend();
+  instance.renderInsights();
+  const legend = instance.el['studio-legend'].textContent;
+  assert.match(legend, /Reference year: 2020.*Resolution: 30 arc seconds/);
+  assert.match(legend, /Historical modeled population, not a current census/);
+  assert.match(legend, /source values, not population density/);
+  const provenance = instance.el['studio-provenance'].textContent;
+  for (const detail of ['Reference year 2020', 'Resolution 30 arc seconds', 'Method raster-window', 'License CC BY 4.0', 'Published: 2021-04-01', 'Retrieved: 2026-10-07']) assert(provenance.includes(detail), detail);
+  const restored = studio.validateWorkspace(JSON.parse(JSON.stringify(instance.workspace)));
+  for (const key of ['referenceYear', 'resolution', 'method', 'license', 'publishedDate', 'retrievedAt']) assert.equal(restored.layers[0].source[key], layer.source[key]);
+  layer.source = { name: 'Metadata omitted' };
+  instance.renderInsights();
+  instance.renderLegend();
+  assert.doesNotMatch(instance.el['studio-provenance'].textContent, /Reference year|Resolution|License|raster-window/);
+  assert.doesNotMatch(instance.el['studio-legend'].textContent, /Reference year|Resolution|Historical modeled/);
+  for (const feature of instance.workspace.datasets[layer.datasetId].features) feature.properties.value = 0;
+  instance.cache.clear();
+  instance.renderLegend();
+  assert.match(instance.el['studio-legend'].textContent, /All displayed source values are zero; no heat intensity/);
+  instance.workspace.datasets[layer.datasetId].features[0].properties.value = -1;
+  instance.cache.clear();
+  instance.renderLegend();
+  assert.doesNotMatch(instance.el['studio-legend'].textContent, /All displayed source values are zero/);
+});

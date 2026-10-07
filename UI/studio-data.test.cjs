@@ -389,6 +389,19 @@ test('nonnegative population heatmap weights preserve ratios and zero observatio
   assert.match(signed.legend.note, /Signed heatmap values/);
 });
 
+test('extracted raster provenance and scoped numeric ratios survive layer normalization', () => {
+  const source = { name: 'WorldPop raster fixture', url: 'https://example.org/grid.tif', referenceYear: 2020, resolution: '30 arc seconds', method: 'raster-window', license: 'CC BY 4.0', attribution: 'Source attribution', retrievedAt: '2026-10-07', publishedDate: '2021', caveat: 'Historical modeled population. Extracted cells, not an administrative total.' };
+  const layer = engine.makeLayer(collection(point(77.31, 28.5, { population: 0 }), point(77.32, 28.5, { population: 20 }), point(77.33, 28.5, { population: 40 }), point(78, 29, { population: 1000 })), { visualization: 'heatmap', palette: 'thermal', field: 'population', units: 'people per grid cell', source });
+  const rendered = engine.renderCollection(layer, { region: [77.3, 28.4, 77.4, 28.6] });
+  assert.deepEqual(rendered.data.features.map((feature) => feature.properties.__heatWeight), [0, .5, 1]);
+  assert.deepEqual(rendered.data.features.map((feature) => feature.properties.population), [0, 20, 40]);
+  assert.equal(rendered.legend.unit, 'people per grid cell');
+  assert.equal(rendered.legend.max, 40);
+  assert.match(rendered.caveat, /Historical modeled population/);
+  for (const key of Object.keys(source)) assert.equal(layer.source[key], String(source[key]));
+  assert.equal(layer.data.features[3].properties.population, 1000);
+});
+
 test('missing values are omitted from scalar display and never turned into zero observations', () => {
   const rendered = engine.renderCollection(engine.makeLayer(collection(point(0, 0, { value: 0 }), point(1, 1, { value: null }), point(2, 2, { value: false }), point(3, 3, { value: '' })), { field: 'value' }));
   assertRenderable(rendered);

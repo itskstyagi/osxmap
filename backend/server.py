@@ -38,6 +38,7 @@ try:
     from .config import BACKEND_DIR, Config, is_loopback_host
     from .errors import ServiceError
     from .openai_client import OpenAIChatClient
+    from .raster_sources import load_population_grid, load_raster_grid
     from .realtime import RealtimeHub
     from .web_sources import fetch_web_document, validate_web_url
 except ImportError:  # Supports `python server.py` from the backend directory.
@@ -46,6 +47,7 @@ except ImportError:  # Supports `python server.py` from the backend directory.
     from config import BACKEND_DIR, Config, is_loopback_host
     from errors import ServiceError
     from openai_client import OpenAIChatClient
+    from raster_sources import load_population_grid, load_raster_grid
     from realtime import RealtimeHub
     from web_sources import fetch_web_document, validate_web_url
 
@@ -1926,6 +1928,8 @@ AGENT_TOOLS = AgentTools(AgentDependencies(
     restore_workspace=CACHE.restore_workspace,
     search_web=search_serp_web,
     read_web_source=fetch_web_document,
+    load_population=load_population_grid,
+    read_raster_source=load_raster_grid,
 ))
 AGENT = MapAgentService(OpenAIChatClient(CONFIG), AGENT_TOOLS, REALTIME)
 

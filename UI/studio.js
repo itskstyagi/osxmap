@@ -906,7 +906,7 @@ export class MeridianStudio {
         const range = element('div', '', 'studio-legend-range');
         range.append(...[legend.min, legend.mid, legend.max].map((value) => element('span', number(value))));
         container.append(ramp, range);
-        if (layer.visualization === 'heatmap' && result.metrics.max === 0) container.append(element('small', 'All displayed source values are zero; no heat intensity is drawn.'));
+        if (layer.visualization === 'heatmap' && result.metrics.min === 0 && result.metrics.max === 0) container.append(element('small', 'All displayed source values are zero; no heat intensity is drawn.'));
         if (layer.source?.method === 'raster-window' && layer.source.caveat) container.append(element('small', layer.source.caveat, 'studio-legend-caveat'));
         if (legend.note || result.caveat) {
           const details = element('details');

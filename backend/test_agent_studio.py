@@ -178,7 +178,7 @@ class ContextAndStudioTests(BackendCase):
 
     def test_all_schemas_enforce_the_fixed_parameter_allowlist(self):
         names = {tool["function"]["name"] for tool in AGENT_TOOL_SCHEMAS}
-        self.assertEqual(names, {"find_city", "search_places", "plan_route", "present_map", "clear_map", "ask_user", "studio_operation", "report_limitation", "search_web", "read_web_source", "load_web_dataset", "map_source_table"})
+        self.assertEqual(names, {"find_city", "search_places", "plan_route", "present_map", "clear_map", "ask_user", "studio_operation", "report_limitation", "search_web", "read_web_source", "load_web_dataset", "load_population", "load_raster_dataset", "map_source_table"})
         context = self.tools.new_context(studio_context())
         for name in names | {"run_python", "read_settings"}:
             with self.subTest(name=name), self.assertRaises(server.ServiceError):

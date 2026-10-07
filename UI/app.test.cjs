@@ -1377,13 +1377,187 @@ test('a sourced dataset can open Studio and browser rejection remains visible af
   let focused = false;
   app.studio = { applySourcedDataset: () => layer, focusLayer: () => { focused = true; }, lastAction: () => null };
   app.setProductMode = (mode) => { app.productMode = mode; };
-  app.applyAgentMapUpdate({ dataset: { data: {} } });
+  assert.equal(app.applyAgentMapUpdate({ dataset: { data: {} } }), true);
   assert.equal(app.productMode, 'studio');
   assert.equal(focused, true);
   assert.equal(app.agentResultSummary, 'Population 2011 / sourced heatmap');
   app.studio.applySourcedDataset = () => { throw new Error('No features in scope'); };
-  app.applyAgentMapUpdate({ dataset: { data: {} } });
+  assert.equal(app.applyAgentMapUpdate({ dataset: { data: {} } }), false);
   app.showCommandResult(app.agentResultSummary, 'Dataset queued.');
   const text = (node) => [node.textContent, ...node.children.flatMap(text)].join(' ');
   assert.match(text(app.elements['agent-response']), /not applied.*No features in scope/);
+});
+
+test('plot, make, generate and map requests use the agent instead of city geocoding', async () => {
+  const { app, requests, mapInstruction } = setup();
+  const sent = [];
+  app.startAgentRequest = async (query) => sent.push(query);
+  app.resolveSearch = () => assert.fail('Map instructions must not be sent to the city geocoder');
+  const queries = ['Plot a population heatmap of Noida', 'Make a population heatmap for Noida', 'Generate a population heatmap of Noida', 'Map the population of Noida'];
+  for (const query of queries) {
+    assert.equal(mapInstruction(query), true, query);
+    app.elements['search-input'].value = query;
+    app.queueSuggestions();
+    assert.equal(app.elements['search-submit'].getAttribute('aria-label'), 'Ask Meridian');
+    await app.submitSearch(event());
+  }
+  assert.deepEqual(sent, queries);
+  assert.equal(requests.length, 0);
+  for (const query of ['Noida', 'Maple Avenue', 'Plotinus Street', 'Generator Road']) assert.equal(mapInstruction(query), false, query);
+});
+
+const studyExtent = () => ({ name: 'Noida', bounds: [77.3, 28.45, 77.5, 28.7], source: { name: 'OpenStreetMap geocoder', url: 'https://www.openstreetmap.org/' }, caveat: 'Geocoded study extent, not an administrative boundary' });
+
+function researchSetup() {
+  const setupResult = setup();
+  const { app } = setupResult;
+  const sources = new Map();
+  const layers = new Map([['geo-route', { id: 'geo-route', type: 'line' }]]);
+  const fits = [];
+  let camera = { center: [-3, 50], zoom: 8, bearing: 0, pitch: 0 };
+  app.map = {
+    getStyle: () => ({ layers: [...layers.values()], sources: Object.fromEntries(sources) }),
+    isStyleLoaded: () => true, getLayer: (id) => layers.get(id), getSource: (id) => sources.get(id),
+    addLayer(layer) { assert.equal(layers.has(layer.id), false); layers.set(layer.id, layer); },
+    removeLayer: (id) => layers.delete(id),
+    addSource(id, source) { assert.equal(sources.has(id), false); sources.set(id, { ...source, setData(data) { this.data = data; } }); },
+    removeSource(id) { assert.equal([...layers.values()].some((layer) => layer.source === id), false); sources.delete(id); },
+    getCenter: () => ({ lng: camera.center[0], lat: camera.center[1] }), getZoom: () => camera.zoom, getBearing: () => camera.bearing, getPitch: () => camera.pitch,
+    fitBounds(bounds, options) { fits.push({ bounds, options }); camera.center = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2]; },
+    jumpTo: (next) => { camera = next; },
+  };
+  app.applyTerrain = () => {};
+  app.applyMapMode = () => {};
+  return { ...setupResult, sources, layers, fits };
+}
+
+test('study extent previews are truthful polygons and preserve existing map content', () => {
+  const { app, document, sources, layers, fits } = researchSetup();
+  const pins = [place('Saved place')];
+  app.geo.pins = pins;
+  app.searchResults = [place('Earlier result')];
+  const beforeGeo = JSON.stringify(app.geo);
+  app.chooseLocation = () => assert.fail('A study preview must not reset map context');
+  layers.set('studio-existing-heat', { id: 'studio-existing-heat', type: 'heatmap' });
+  const area = studyExtent();
+  assert.equal(app.applyAgentMapUpdate({ researchArea: area, view: { bounds: area.bounds } }), true);
+  assert.equal(JSON.stringify(app.geo), beforeGeo);
+  assert.equal(app.geo.pins, pins);
+  assert.equal(app.searchResults.length, 1);
+  assert.equal(app.productMode, 'explore');
+  assert.equal(layers.has('studio-existing-heat'), true);
+  const feature = sources.get('local-research-area').data.features[0];
+  assert.equal(feature.geometry.type, 'Polygon');
+  assert.equal(feature.properties.kind, 'study-extent');
+  assert.equal(feature.properties.population, undefined);
+  assert.equal(feature.geometry.coordinates[0].length, 5);
+  assert.deepEqual(JSON.parse(JSON.stringify(fits[0].bounds)), [[77.3, 28.45], [77.5, 28.7]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(layers.get('local-research-area-outline').paint['line-dasharray'])), [4, 3]);
+  assert(layers.get('local-research-area-fill').paint['fill-opacity'] < .06);
+  const label = document.getElementById('research-area-label');
+  assert.equal(label.getAttribute('role'), 'status');
+  assert.equal(label.getAttribute('aria-live'), 'polite');
+  assert.equal(label.hidden, false);
+  assert.match(label.querySelector('strong').textContent, /Study area.*Noida/);
+  assert.match(label.querySelector('small').textContent, /not an administrative boundary/);
+  assert.equal(label.querySelector('a').rel, 'noopener noreferrer');
+  area.bounds[0] = 0;
+  assert.equal(app.researchArea.bounds[0], 77.3, 'The preview owns a copy of its validated bounds');
+});
+
+test('study preview validation rejects malformed extents and splits antimeridian boxes', () => {
+  const { app, sources, fits } = researchSetup();
+  assert.equal(app.applyAgentMapUpdate({ researchArea: studyExtent() }), true);
+  const original = JSON.stringify(app.researchArea);
+  for (const bounds of [[NaN, 0, 1, 1], [0, 0, Infinity, 1], [null, 0, 1, 1], ['0', 0, 1, 1], [-181, 0, 1, 1], [0, -91, 1, 1], [0, 0, 181, 1], [0, 0, 1, 91], [0, 1, 1, 0], [0, 0, 0, 1], [180, 0, -180, 1], [0, 0, 1]]) {
+    assert.equal(app.applyAgentMapUpdate({ researchArea: { ...studyExtent(), bounds } }), false);
+    assert.equal(JSON.stringify(app.researchArea), original);
+  }
+  assert.equal(fits.length, 1);
+  assert.equal(app.applyAgentMapUpdate({ researchArea: { ...studyExtent(), name: '' } }), false);
+  assert.equal(app.applyAgentMapUpdate({ researchArea: { name: 'Dateline study', bounds: [170, -5, -175, 5] } }), true);
+  const geometry = sources.get('local-research-area').data.features[0].geometry;
+  assert.equal(geometry.type, 'MultiPolygon');
+  assert.equal(geometry.coordinates.length, 2);
+  for (const [ring] of geometry.coordinates) assert(Math.max(...ring.map((p) => p[0])) - Math.min(...ring.map((p) => p[0])) <= 10);
+  assert.deepEqual(JSON.parse(JSON.stringify(fits.at(-1).bounds)), [[170, -5], [185, 5]]);
+});
+
+test('study previews replace cleanly, survive style reloads, and clear with map context', () => {
+  const { app, document, sources, layers } = researchSetup();
+  app.applyAgentMapUpdate({ researchArea: studyExtent() });
+  app.applyAgentMapUpdate({ researchArea: { ...studyExtent(), name: '<img src=x>', source: { name: 'Unsafe source', url: 'javascript:alert(1)' } } });
+  assert.equal(document.getElementById('research-area-label').querySelector('a'), null);
+  assert.equal(document.getElementById('research-area-label').querySelector('img'), null);
+  const data = JSON.stringify(sources.get('local-research-area').data);
+  sources.clear(); layers.clear();
+  app.renderResearchArea();
+  assert.equal(JSON.stringify(sources.get('local-research-area').data), data);
+  assert.equal(layers.size, 2);
+  assert.equal(document.querySelectorAll('.research-area-label').length, 1);
+  app.applyAgentMapUpdate({ researchArea: null });
+  assert.equal(sources.has('local-research-area'), false);
+  assert.equal(layers.size, 0);
+  assert.equal(document.getElementById('research-area-label').hidden, true);
+  app.applyAgentMapUpdate({ researchArea: studyExtent() });
+  app.chooseLocation(place('Different context'));
+  assert.equal(app.researchArea, null);
+  assert.equal(sources.has('local-research-area'), false);
+  app.applyAgentMapUpdate({ researchArea: studyExtent() });
+  app.clearWorkspaceLocal();
+  assert.equal(app.researchArea, null);
+  assert.equal(sources.has('local-research-area'), false);
+});
+
+test('partial research keeps the study extent and offers local undo without inventing a dataset', async () => {
+  const { app, sources } = researchSetup();
+  app.agentRunId = 'research-run';
+  app.agentLastMessage = 'Plot a population heatmap of Noida';
+  app.agentSnapshot = app.captureMapAction();
+  app.handleAgentEvent({ type: 'agent.map', runId: app.agentRunId, update: { researchArea: studyExtent() } });
+  assert.equal(app.agentDidMutate, true);
+  assert.match(app.elements['agent-task-label'].textContent, /Study extent shown/);
+  app.handleAgentEvent({ type: 'agent.limitation', runId: app.agentRunId, reason: 'dataset_unavailable', contextOnly: true, message: 'The source could not provide a usable raster window.' });
+  assert.equal(sources.has('local-research-area'), true);
+  assert.equal(app.productMode, 'explore');
+  assert.equal(app.searchResults.length, 0);
+  assert.match(app.elements['agent-result-summary'].textContent, /Study area shown.*data unavailable/);
+  assert.match(app.agentActivity.tool, /Study extent kept.*no data layer/);
+  assert.equal(app.mapActions.length, 1);
+  await app.undoMapAction();
+  assert.equal(app.researchArea, null);
+  assert.equal(sources.has('local-research-area'), false);
+});
+
+test('cancelled, failed and rolled-back runs restore preview state with the original map snapshot', () => {
+  for (const terminal of [{ type: 'agent.cancelled' }, { type: 'agent.failed', error: 'Source failed' }, { type: 'agent.limitation', contextOnly: true, rolledBack: true }]) {
+    const { app, sources } = researchSetup();
+    app.applyAgentMapUpdate({ researchArea: { ...studyExtent(), name: 'Previous study' } });
+    app.agentRunId = 'research-run';
+    app.agentSnapshot = app.captureMapAction();
+    const original = JSON.stringify(app.agentSnapshot.researchArea);
+    app.handleAgentEvent({ type: 'agent.map', runId: app.agentRunId, update: { researchArea: studyExtent() } });
+    app.handleAgentEvent({ ...terminal, runId: app.agentRunId });
+    assert.equal(JSON.stringify(app.researchArea), original, terminal.type);
+    assert.equal(sources.get('local-research-area').data.features[0].properties.name, 'Previous study');
+    assert.equal(app.mapActions?.length || 0, 0);
+  }
+});
+
+test('browser dataset rejection is not announced as an applied map update or successful completion', () => {
+  const { app } = setup();
+  app.studio = { applySourcedDataset() { throw new Error('No source observations in scope'); }, snapshot: () => null, lastAction: () => null, setAgentBusy() {} };
+  app.agentRunId = 'rejected-run';
+  app.agentSnapshot = app.captureMapAction();
+  app.agentDidMutate = false;
+  app.handleAgentEvent({ type: 'agent.map', runId: app.agentRunId, update: { dataset: { data: {} } } });
+  assert.equal(app.productMode, 'explore');
+  assert.equal(app.agentDidMutate, false);
+  assert.match(app.elements['agent-task-label'].textContent, /not applied.*No source observations/);
+  assert.notEqual(app.agentActivity.tool, 'Map changes applied');
+  app.handleAgentEvent({ type: 'agent.completed', runId: app.agentRunId, message: 'The source heatmap was sent for display.' });
+  assert.match(app.elements['agent-result-summary'].textContent, /not applied.*No source observations/);
+  assert.equal(app.elements['agent-result-details'].open, true);
+  assert.equal(app.agentActivity.tool, 'Map not fully applied');
+  assert.equal(app.mapActions?.length || 0, 0);
 });
