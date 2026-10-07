@@ -9,8 +9,8 @@
   --ink: #f3f4ed;
   --muted: #a5afa6;
   --line: rgba(232, 239, 224, .13);
-  --accent: #d3ed9b;
-  --accent-ink: #222b19;
+  --accent: #f0a86b;
+  --accent-ink: #2b1c16;
   --shadow: 0 12px 36px rgba(0, 0, 0, .16);
   --mono: "IBM Plex Mono", Consolas, monospace;
   --gutter: 28px;
@@ -25,7 +25,7 @@
   --ink: #26302a;
   --muted: #68736b;
   --line: rgba(39, 50, 42, .15);
-  --accent: #607b36;
+  --accent: #a8502d;
   --accent-ink: #fff;
   --shadow: 0 12px 36px rgba(47, 53, 41, .12);
 }
@@ -364,14 +364,14 @@ svg { flex-shrink: 0; }
 
 /* A single control rail leaves the map free of dashboard overlays. */
 .manual-sidebar {
-  --surface: rgba(24, 27, 27, .72);
-  --surface-solid: #252a28;
-  --hud: rgba(30, 35, 33, .68);
+  --surface: rgba(28, 25, 27, .76);
+  --surface-solid: #2c272b;
+  --hud: rgba(34, 29, 32, .72);
   --ink: #eeeef0;
   --muted: #a3a3a8;
   --line: rgba(255, 255, 255, .075);
-  --accent: #c4d798;
-  --accent-ink: #252b1e;
+  --accent: #f0a86b;
+  --accent-ink: #2b1c16;
   color: var(--ink);
   top: 26px; bottom: 28px; right: auto; left: 26px;
   width: 300px; max-height: none;
@@ -399,13 +399,13 @@ svg { flex-shrink: 0; }
 .manual-sidebar .agent-question { position: static; width: 100%; max-width: none; transform: none; margin: 0 0 16px; }
 .manual-sidebar .map-modes { background: rgba(255, 255, 255, .025); box-shadow: none; border: 0; padding: 3px; }
 .manual-sidebar .map-modes button { height: 32px; font-size: 9px; gap: 5px; }
-.manual-sidebar .map-modes button[aria-pressed="true"] { background: rgba(197,215,160,.13); color: #d4e3b9; }
+.manual-sidebar .map-modes button[aria-pressed="true"] { background: linear-gradient(135deg, rgba(240,168,107,.26), rgba(197,100,65,.16)); color: #ffc798; box-shadow: inset 0 0 0 1px rgba(240,168,107,.2); }
 .manual-sidebar .map-controls { display: flex; flex-direction: row; background: transparent; width: fit-content; box-shadow: none; }
 .manual-sidebar .map-controls button { width: 38px; height: 32px; border-bottom: 0; border-right: 1px solid var(--line); }
 .manual-sidebar .map-controls button:last-child { border-right: 0; }
 .manual-sidebar .search-panel { margin-bottom: 0; }
 .manual-sidebar .search-form { background: rgba(255,255,255,.025); border-radius: 9px; }
-.manual-sidebar .go-button { background: rgba(197,215,160,.16); color: #d4e3b9; }
+.manual-sidebar .go-button { background: rgba(240,168,107,.2); color: #ffc798; }
 .manual-sidebar .geo-toggle { font-size: 10px; }
 .manual-sidebar .route-summary,
 .manual-sidebar .workspace-metrics,
@@ -417,7 +417,7 @@ svg { flex-shrink: 0; }
 .manual-sidebar .route-metrics .metric-unit { display: inline; font-size: 10px; letter-spacing: 0; }
 .manual-sidebar .route-metrics > div:last-child strong { font: 10px var(--mono); }
 .manual-sidebar .agent-composer { position: static; flex-shrink: 0; width: auto; transform: none; margin: auto 0 0; background: var(--surface); box-shadow: 0 8px 30px rgba(0,0,0,.1); border-radius: 14px; }
-.manual-sidebar .agent-composer button { background: rgba(197,215,160,.16); color: #d4e3b9; }
+.manual-sidebar .agent-composer button { background: linear-gradient(135deg, #f0a86b, #cf784e); color: #2b1c16; }
 .manual-sidebar .agent-composer input { font-size: 11px; }
 .manual-sidebar .agent-composer button { padding: 0 12px; }
 .manual-sidebar .agent-question { max-height: none; }
@@ -443,7 +443,7 @@ svg { flex-shrink: 0; }
   :root[data-map-mode="route"] .manual-sidebar .workspace-metrics { display: block; }
   :root:not([data-workspace-view="workspace"]) .manual-sidebar .workspace-metrics { display: none; }
 }
-.info-drawer { position: absolute; z-index: 12; bottom: 0; left: 350px; right: 26px; color: #eeeef0; --ink: #eeeef0; --muted: #a3a3a8; --line: rgba(255,255,255,.075); --hud: rgba(28,33,31,.72); --accent: #c4d798; }
+.info-drawer { position: absolute; z-index: 12; bottom: 0; left: 350px; right: 26px; color: #eeeef0; --ink: #eeeef0; --muted: #a3a3a8; --line: rgba(255,255,255,.075); --hud: rgba(31,27,30,.76); --accent: #f0a86b; }
 .info-drawer-toggle { display: grid; place-items: center; width: 52px; height: 30px; margin: 0 auto; border: 1px solid var(--line); border-bottom: 0; border-radius: 10px 10px 0 0; background: #232325; }
 .info-drawer-toggle svg { width: 20px; height: 20px; }
 .info-drawer.is-open .info-drawer-toggle svg { transform: rotate(180deg); }
