@@ -148,7 +148,7 @@ function setup({ mobile = false } = {}) {
     renderRegion() {}, setStream() {}, resetMapForLocation() {},
   });
   return {
-    app, document, requests, timers, applyMonochrome: context.applyMonochrome,
+    app, document, window, requests, timers, applyMonochrome: context.applyMonochrome,
     async runTimer() {
       const [id, callback] = timers.entries().next().value;
       timers.delete(id);
@@ -179,6 +179,30 @@ function buildingMap() {
     setFog() {},
   };
 }
+
+test('display controls stay outside the sidebar after UI initialization', () => {
+  const { app, document } = setup({ mobile: true });
+  app.bindUi();
+  for (const id of ['theme-toggle', 'fullscreen-toggle']) {
+    const control = document.getElementById(id);
+    assert.equal(control.closest('.manual-sidebar'), null);
+    assert.equal(control.closest('.app-actions').parent, document.querySelector('.app-shell'));
+    assert.equal(control.listeners.get('click').length, 1);
+  }
+  assert.equal(document.querySelector('.workspace-nav').closest('.manual-sidebar'), document.querySelector('.manual-sidebar'));
+});
+
+test('desktop route fitting accounts for the actual widened sidebar', () => {
+  const { app, document, window } = setup();
+  document.querySelector('.manual-sidebar').getBoundingClientRect = () => ({ right: 426 });
+  app.geo.route = { geometry: { coordinates: [[1, 2], [3, 4]] } };
+  let camera;
+  app.map = { fitBounds: (bounds, options) => { camera = options; } };
+  const bounds = { extend() { return this; } };
+  window.maplibregl = { LngLatBounds: function () { return bounds; } };
+  app.focusRoute();
+  assert.equal(camera.padding.left, 450);
+});
 
 test('building layers and highlights are visible in Streets and Terrain, never Satellite, across themes', () => {
   const { applyMonochrome } = setup();
