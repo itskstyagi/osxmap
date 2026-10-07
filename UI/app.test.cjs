@@ -134,7 +134,7 @@ function setup({ mobile = false } = {}) {
   const source = readFileSync(join(__dirname, 'app.js'), 'utf8')
     .replace(/^import[^\n]*\n/, '')
     .replaceAll('import.meta.url', JSON.stringify('file:///UI/app.js'));
-  vm.runInContext(`${source}\nglobalThis.CityExplorer = CityExplorer;`, context, { filename: 'app.js' });
+  vm.runInContext(`${source}\nglobalThis.CityExplorer = CityExplorer; globalThis.applyMonochrome = applyMonochrome;`, context, { filename: 'app.js' });
   const app = Object.create(context.CityExplorer.prototype);
   app.elements = Object.fromEntries(document.querySelectorAll('[id]').map((element) => [element.id, element]));
   Object.assign(app, {
@@ -148,7 +148,7 @@ function setup({ mobile = false } = {}) {
     renderRegion() {}, setStream() {}, resetMapForLocation() {},
   });
   return {
-    app, document, requests, timers,
+    app, document, requests, timers, applyMonochrome: context.applyMonochrome,
     async runTimer() {
       const [id, callback] = timers.entries().next().value;
       timers.delete(id);
@@ -160,6 +160,56 @@ function setup({ mobile = false } = {}) {
 function event(key) {
   return { key, prevented: false, preventDefault() { this.prevented = true; } };
 }
+
+function buildingMap() {
+  const layers = [
+    { id: 'building', type: 'fill' },
+    { id: 'building-3d', type: 'fill-extrusion' },
+    ...['local-buildings-preview', 'local-buildings', 'local-buildings-inferred'].map((id) => ({ id, type: 'fill-extrusion' })),
+    ...['local-selection', 'local-hover'].map((id) => ({ id, type: 'line' })),
+  ];
+  const visibility = new Map();
+  return {
+    visibility,
+    getStyle: () => ({ layers }),
+    getLayer: (id) => layers.find((layer) => layer.id === id),
+    isStyleLoaded: () => true,
+    setLayoutProperty: (id, property, value) => { if (property === 'visibility') visibility.set(id, value); },
+    setPaintProperty() {},
+    setFog() {},
+  };
+}
+
+test('building layers and highlights are visible in Streets and Terrain, never Satellite, across themes', () => {
+  const { applyMonochrome } = setup();
+  const map = buildingMap();
+  for (const theme of ['dark', 'light']) {
+    for (const mode of ['satellite', 'route', 'terrain', 'satellite']) {
+      applyMonochrome(map, theme, mode);
+      for (const layer of map.getStyle().layers) {
+        assert.equal(map.visibility.get(layer.id), mode === 'satellite' ? 'none' : 'visible', `${theme}/${mode}/${layer.id}`);
+      }
+    }
+  }
+});
+
+test('mode changes preserve preview loading state while restoring loaded building layers', () => {
+  const { app } = setup();
+  app.map = buildingMap();
+  app.theme = 'dark';
+  app.previewVisible = true;
+  for (const mode of ['satellite', 'route', 'terrain']) {
+    app.mapMode = mode;
+    app.applyMapMode();
+    assert.equal(app.map.visibility.get('local-buildings-preview'), mode === 'satellite' ? 'none' : 'visible');
+    assert.equal(app.map.visibility.get('local-buildings'), mode === 'satellite' ? 'none' : 'visible');
+    app.setPreviewVisible(false);
+    app.applyMapMode();
+    assert.equal(app.map.visibility.get('local-buildings-preview'), 'none');
+    app.setPreviewVisible(true);
+    assert.equal(app.map.visibility.get('local-buildings-preview'), mode === 'satellite' ? 'none' : 'visible');
+  }
+});
 function respond(request, body, { ok = true, status = 200 } = {}) {
   request.resolve({ ok, status, json: async () => body });
 }

@@ -252,7 +252,7 @@ function applyMonochrome(map, theme, mode = 'route') {
     const id = layer.id.toLowerCase();
     try {
       map.setLayoutProperty(layer.id, 'visibility', satellite && ['background', 'fill', 'fill-extrusion'].includes(layer.type) ? 'none' : 'visible');
-      if (id.includes('building')) map.setLayoutProperty(layer.id, 'visibility', mode === 'route' ? 'visible' : 'none');
+      if (id.includes('building')) map.setLayoutProperty(layer.id, 'visibility', satellite ? 'none' : 'visible');
       if (layer.type === 'background') map.setPaintProperty(layer.id, 'background-color', colors.background);
       if (layer.type === 'fill') {
         const color = id.includes('water') ? colors.water : /park|wood|grass|landcover/.test(id) ? colors.park : colors.land;
@@ -279,7 +279,7 @@ function applyMonochrome(map, theme, mode = 'route') {
   const buildingColor = satellite ? '#b9bdae' : dark ? '#343638' : '#b4b2a8';
   for (const id of [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred']) {
     if (map.getLayer(id)) map.setPaintProperty(id, 'fill-extrusion-color', buildingColor);
-    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', satellite ? 'none' : 'visible');
   }
   for (const id of ['local-selection', 'local-hover']) {
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', satellite ? 'none' : 'visible');
@@ -1041,7 +1041,7 @@ class CityExplorer {
     document.querySelectorAll('button[data-map-mode]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.mapMode === this.mapMode)));
     if (this.map?.isStyleLoaded() || this.map?.getLayer('geo-route')) {
       applyMonochrome(this.map, this.theme, this.mapMode);
-      if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', 'none');
+      this.setPreviewVisible(this.previewVisible);
     }
     this.updateDashboard();
   }
@@ -1368,7 +1368,7 @@ class CityExplorer {
     this.features.clear(); this.tileFeatures.clear(); this.tileMetadata.clear(); this.loaded.clear(); this.failed.clear();
     this.buildings = 0; this.inferred = 0; this.total = 9; this.previewVisible = true; this.generation += 1;
     this.map.getSource('local-city')?.setData(EMPTY_COLLECTION);
-    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', 'none');
+    this.setPreviewVisible(true);
     if (this.map.getLayer('local-selection')) this.map.setFilter('local-selection', ['==', ['get', 'sourceId'], '__none__']);
     this.map.getSource(FOCUS_SOURCE)?.setData(this.focusFeature(location));
     this.terrainEnabled = this.mapMode === 'satellite';
@@ -1428,7 +1428,7 @@ class CityExplorer {
 
   setPreviewVisible(visible) {
     this.previewVisible = visible;
-    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', 'none');
+    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', visible && this.mapMode !== 'satellite' ? 'visible' : 'none');
   }
 
   setStream(stream) {
