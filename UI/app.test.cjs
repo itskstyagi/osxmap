@@ -1363,12 +1363,12 @@ test('web source citations render safe external links and reject executable or c
     { title: 'Unsafe', url: 'javascript:alert(1)' }, { title: 'Private credential', url: 'https://name:password@example.org/data' },
   ]);
   assert.equal(app.elements['agent-sources'].hidden, false);
-  const links = descendants(app.elements['agent-sources']).filter((node) => node.tagName === 'A');
+  const links = app.elements['agent-sources'].querySelectorAll('a');
   assert.equal(links.length, 1);
   assert.equal(links[0].href, 'https://example.org/census');
   assert.equal(links[0].textContent, '<img src=x onerror=alert(1)>');
   assert.equal(links[0].rel, 'noopener noreferrer');
-  assert.equal(descendants(app.elements['agent-sources']).some((node) => node.tagName === 'IMG'), false);
+  assert.equal(app.elements['agent-sources'].querySelectorAll('img').length, 0);
 });
 
 test('a sourced dataset can open Studio and browser rejection remains visible after completion', () => {
@@ -1384,5 +1384,5 @@ test('a sourced dataset can open Studio and browser rejection remains visible af
   app.studio.applySourcedDataset = () => { throw new Error('No features in scope'); };
   app.applyAgentMapUpdate({ dataset: { data: {} } });
   app.showCommandResult(app.agentResultSummary, 'Dataset queued.');
-  assert.match(allText(app.elements['agent-response']), /not applied.*No features in scope/);
+  assert.match(app.elements['agent-response'].querySelector('p').textContent, /not applied.*No features in scope/);
 });

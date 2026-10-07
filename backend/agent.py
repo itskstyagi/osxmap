@@ -380,7 +380,7 @@ class MapAgentService:
                 if error.status == 409:
                     raise
                 return {"error": str(error)[:700], "status": error.status, "retryAfter": error.retry_after, "message": "This tool did not produce a valid map update. Try another already-discovered source within the run budget, or honestly report the unsupported source/data capability."}
-        if name in {"present_map", "clear_map", "studio_operation", "load_web_dataset", "map_source_table"}:
+        if name in {"present_map", "clear_map", "studio_operation"}:
             def mutation() -> dict[str, Any]:
                 self._check_cancelled(run)
                 return self.tools.execute(context, name, arguments)
