@@ -132,9 +132,15 @@ svg {
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  width: 44px;
+  width: auto;
   height: 44px;
+  gap: 8px;
   color: var(--ink);
+}
+.brand-name {
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -.6px;
 }
 .brand-mark {
   width: 30px;
@@ -2369,8 +2375,12 @@ svg {
     gap: 4px;
   }
   .manual-sidebar .brand {
-    width: 36px;
+    width: auto;
     height: 44px;
+    gap: 6px;
+  }
+  .brand-name {
+    font-size: 13px;
   }
   .manual-sidebar .workspace-nav button {
     padding: 0 6px;
