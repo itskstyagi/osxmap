@@ -876,6 +876,67 @@ def fetch_serp_json(url: str) -> dict[str, Any]:
     return payload
 
 
+def rank_serp_web_sources(query: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rank discovery evidence, not verified coverage or measurements."""
+    def terms(value: str) -> set[str]:
+        value = unicodedata.normalize("NFKD", urllib.parse.unquote(value)).casefold()
+        value = "".join(character for character in value if not unicodedata.combining(character))
+        return set(re.findall(r"[^\W_]+", value))
+
+    stopwords = set("a an and are as at be by for from in is it of on or the to with".split())
+    discovery_words = set("data dataset datasets download downloads source sources official open file files format csv tsv json geojson geotiff tif tiff gpkg kml kmz shp zip".split())
+    query_terms = terms(query) - stopwords
+    substantive = query_terms - discovery_words
+    population_query = bool(query_terms & {"population", "populations", "census", "demographic", "demographics", "worldpop"})
+    data_query = population_query or bool(query_terms & {"data", "dataset", "datasets", "geodata", "raster", "csv", "geojson", "geotiff"})
+    population_hosts = {"worldpop.org", "censusindia.gov.in", "census.gov", "sedac.ciesin.columbia.edu", "ghsl.jrc.ec.europa.eu"}
+    challenge = re.compile(
+        r"\b(?:javascript is (?:disabled|required)|(?:enable|requires?) javascript|"
+        r"verify (?:that )?you(?: are|'re|\u2019re) (?:not a robot|(?:a )?human)|"
+        r"checking (?:your browser|if the site connection is secure)|"
+        r"(?:complete|solve) (?:the |this |a )?(?:captcha|security check)|"
+        r"unusual traffic from your (?:computer|network)|security verification|"
+        r"just a moment|please wait|cloudflare ray id)\b", re.IGNORECASE,
+    )
+    placeholders = {"untitled", "just a moment", "please wait", "access denied", "attention required", "captcha", "security check", "human verification", "robot check"}
+    sources = []
+    for item in candidates:
+        # Keep real citations even when a page also includes challenge boilerplate.
+        snippet = " ".join(part for part in re.split(r"(?<=[.!?])\s+|\n+", item["snippet"]) if not challenge.search(part))
+        useful_title = normalize_query(item["title"]).strip(" .!?:") not in placeholders and not challenge.match(item["title"])
+        if not useful_title and not terms(snippet):
+            continue
+        item = {**item, "snippet": snippet}
+        sources.append((item, terms(" ".join((item["title"], snippet, item["url"])))))
+
+    # Rare query terms often carry the locality/topic; no gazetteer or country exclusion is needed.
+    weights = {term: 1 + math.log((len(sources) + 1) / (1 + sum(term in words for _, words in sources))) for term in substantive}
+    ranked = []
+    for item, words in sources:
+        matched = substantive & words
+        score = sum(weights[term] for term in sorted(matched))
+        score += min(0.5, 0.1 * len(query_terms & discovery_words & words))
+        url = urllib.parse.urlsplit(item["url"])
+        host = url.hostname or ""
+        population_source = population_query and any(host == domain or host.endswith("." + domain) for domain in population_hosts)
+        if population_source:
+            score += 1.5  # Global/country grids can cover a city without naming it.
+        if data_query and (matched or population_source) and (
+            re.search(r"\.(?:csv|tsv|geojson|tif|tiff|gpkg|fgb|shp|kml|kmz|zip)$", url.path, re.IGNORECASE)
+            or words & {"geotiff", "geojson", "geopackage", "gridded", "raster"}
+        ):
+            score += 0.25  # File hints never outweigh a substantive query match.
+        ranked.append((score, item))
+
+    results = []
+    seen = set()
+    for _, item in sorted(ranked, key=lambda entry: entry[0], reverse=True):
+        if item["url"] not in seen:
+            results.append(item)
+            seen.add(item["url"])
+    return results
+
+
 def search_serp_web(query: str, engine: str, country_code: str) -> dict[str, Any]:
     """Expose cited web research separately from geographic place discovery."""
     if engine not in {"google", "google_news", "google_scholar"} or not isinstance(query, str) or not 2 <= len(query.strip()) <= 500:
@@ -891,7 +952,6 @@ def search_serp_web(query: str, engine: str, country_code: str) -> dict[str, Any
     validate_serp_payload(payload)
     received = CACHE.provider_received_at("serpapi", request_key)
     results: list[dict[str, Any]] = []
-    seen: set[str] = set()
 
     def text(value: Any, maximum: int) -> str:
         value = value if isinstance(value, str) else ""
@@ -900,7 +960,7 @@ def search_serp_web(query: str, engine: str, country_code: str) -> dict[str, Any
         return re.sub(r"(?i)(?:api[_-]?key|access[_-]?token|authorization|token)\s*[:=]\s*[^\s&,;]+", "[redacted]", value)[:maximum]
 
     def add(item: Any, kind: str) -> None:
-        if not isinstance(item, dict) or len(results) >= 8:
+        if not isinstance(item, dict):
             return
         url = item.get("link")
         title = text(item.get("title"), 200)
@@ -910,9 +970,6 @@ def search_serp_web(query: str, engine: str, country_code: str) -> dict[str, Any
             url = validate_web_url(url)
         except ServiceError:
             return
-        if url in seen:
-            return
-        seen.add(url)
         source = item.get("source")
         publisher = source.get("name", "") if isinstance(source, dict) else source
         publication = item.get("publication_info")
@@ -939,7 +996,7 @@ def search_serp_web(query: str, engine: str, country_code: str) -> dict[str, Any
         if isinstance(answer, dict):
             add(answer, "answer-source")
     return {
-        "results": results, "provider": "serpapi", "engine": engine, "query": params["q"], "stored": stored,
+        "results": rank_serp_web_sources(query, results)[:8], "provider": "serpapi", "engine": engine, "query": params["q"], "stored": stored,
         "retrievedAt": datetime.fromtimestamp(received, timezone.utc).isoformat() if received else None,
         "caveat": "Search snippets are discovery evidence, not verified numeric observations or a population dataset. Cached searches may be historical; publication date, dataset year, and retrieval time are distinct.",
     }
