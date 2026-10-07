@@ -10,10 +10,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20261007-9">
+    <link rel="stylesheet" href="./styles.css?v=20261007-10">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
     <script defer src="https://unpkg.com/maplibre-contour@0.0.5/dist/index.min.js"></script>
-    <script type="module" src="./app.js?v=20261007-9"></script>
+    <script type="module" src="./app.js?v=20261007-10"></script>
   </head>
   <body>
     <main class="app-shell">
@@ -119,7 +119,7 @@
         <section class="info-drawer" aria-label="Map information">
           <button id="toggle-info-drawer" class="info-drawer-toggle" type="button" aria-label="Expand map information" aria-expanded="false" aria-controls="info-drawer-content"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 14 6-6 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <div id="info-drawer-content" class="info-drawer-content" hidden>
-            <section class="cache-info"><span class="section-subhead">Local map cache</span><strong id="cache-status">Starting cache...</strong><p>Viewed street and elevation tiles are stored locally. Satellite imagery uses the provider's browser cache.</p><button id="clear-map-cache" type="button">Clear map cache</button></section>
+            <section class="map-context" aria-label="Current map context"><span class="section-subhead">Current view</span><strong id="context-place">Explore a place</strong><span id="context-mode">Satellite imagery</span><dl><div><dt>Map center</dt><dd id="context-coordinates">--</dd></div><div><dt>Zoom</dt><dd id="context-zoom">--</dd></div></dl><p id="context-guidance">Search a place, save a pin, or plan a journey to build your workspace.</p><details class="cache-info"><summary>Storage &amp; performance</summary><strong id="cache-status">Starting cache...</strong><p>Viewed street and elevation tiles are stored locally. Satellite imagery uses the provider's browser cache.</p><button id="clear-map-cache" type="button">Clear map cache</button></details></section>
           </div>
         </section>
         <footer class="attribution-note"><span>Overture / OpenStreetMap / Nominatim / Optional SerpAPI</span><span id="map-coordinates">--, --</span></footer>

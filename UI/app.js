@@ -1083,6 +1083,11 @@ class CityExplorer {
     const summary = this.geo.route?.summary;
     document.documentElement.dataset.workspaceView = this.workspaceView;
     document.documentElement.dataset.hasRoute = String(Boolean(this.geo.route));
+    document.documentElement.dataset.hasWorkspace = String(Boolean(this.geo.pins.length || this.geo.areas.length));
+    set('context-place', this.selected?.shortName || this.selected?.name || 'Explore a place');
+    set('context-mode', this.mapMode === 'satellite' ? 'Satellite imagery' : this.mapMode === 'route' ? 'Street map' : 'Topographic / Elevation contours');
+    set('context-zoom', this.map ? `${this.map.getZoom().toFixed(1)} / ${this.terrainEnabled ? '3D terrain' : 'Plan view'}` : '--');
+    set('context-guidance', this.geo.route ? 'Journey estimates and route source are shown alongside this view.' : this.geo.pins.length ? 'Your saved pins are ready to use as journey stops or area boundaries.' : 'Save a pin or plan a journey. Route and workspace details will appear here.');
     set('metric-pins', this.geo.pins.length);
     set('metric-areas', this.geo.areas.filter((area) => !area.summary?.invalid).length);
     set('metric-buildings', this.buildings.toLocaleString());
@@ -1113,6 +1118,7 @@ class CityExplorer {
     set('view-mode-label', this.mapMode === 'satellite' ? 'Satellite imagery' : this.mapMode === 'route' ? 'Monochrome / Streets' : 'Topographic / Contours in meters');
     const center = this.map?.getCenter();
     if (center) set('map-coordinates', `${Math.abs(center.lat).toFixed(4)} ${center.lat < 0 ? 'S' : 'N'} / ${Math.abs(center.lng).toFixed(4)} ${center.lng < 0 ? 'W' : 'E'}`);
+    if (center) set('context-coordinates', `${center.lat.toFixed(4)}, ${center.lng.toFixed(4)}`);
     const focus = document.getElementById('focus-route');
     if (focus) focus.disabled = !this.geo.route?.geometry;
     this.updateClock();

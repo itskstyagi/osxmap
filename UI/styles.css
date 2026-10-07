@@ -455,10 +455,24 @@ svg { flex-shrink: 0; }
   :root:not([data-workspace-view="workspace"]) .manual-sidebar .workspace-metrics { display: none; }
 }
 .info-drawer { position: absolute; z-index: 12; bottom: env(safe-area-inset-bottom); left: calc(var(--sidebar-width) + 50px); right: max(26px, env(safe-area-inset-right)); color: var(--ink); }
-.info-drawer-toggle { display: grid; place-items: center; width: 52px; height: 44px; margin: 0 auto; border: 1px solid var(--line); border-bottom: 0; border-radius: 10px 10px 0 0; background: var(--surface-solid); }
-.info-drawer-toggle svg { width: 20px; height: 20px; }
+.info-drawer-toggle { position: relative; display: grid; place-items: center; width: 44px; height: 44px; margin: 0 auto; border: 0; background: transparent; }
+.info-drawer-toggle::before { position: absolute; content: ""; width: 28px; height: 22px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-solid); }
+.info-drawer-toggle svg { position: relative; width: 12px; height: 12px; }
 .info-drawer.is-open .info-drawer-toggle svg { transform: rotate(180deg); }
 .info-drawer-content { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; padding: 0 0 18px; max-height: 40dvh; overflow-y: auto; border: 0; background: transparent; }
+.info-drawer .map-context { padding: 18px; background: var(--hud); border: 1px solid var(--line); border-radius: 14px; backdrop-filter: blur(28px); }
+.map-context > strong { display: block; margin: 10px 0 5px; font-size: 18px; font-weight: 500; }
+.map-context > span:not(.section-subhead), .map-context p { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.map-context dl { margin: 14px 0; display: grid; gap: 8px; }
+.map-context dl > div { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; }
+.map-context dt { color: var(--muted); }
+.map-context dd { margin: 0; font-family: var(--mono); }
+:root[data-has-workspace="false"] .info-drawer .workspace-metrics { display: none; }
+.info-drawer .agent-hud .agent-hud-stage { display: grid; }
+.info-drawer .cache-info { display: block; margin-top: 14px; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; backdrop-filter: none; }
+.cache-info summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+.cache-info[open] strong { display: block; margin-top: 12px; }
+.info-drawer .cache-info p { font-size: 11px; }
 .info-drawer .route-summary,
 .info-drawer .workspace-metrics,
 .info-drawer .agent-hud { position: static; width: auto; max-width: none; transform: none; margin: 0; padding: 18px; background: var(--hud); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.12); backdrop-filter: blur(28px); }
