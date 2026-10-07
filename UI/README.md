@@ -1,4 +1,4 @@
-# Monument Browser UI
+# Meridian Browser UI
 
 This folder is a static HTML, CSS, and browser-JavaScript application. It has
 no build step and no Node dependency.
@@ -8,7 +8,7 @@ no build step and no Node dependency.
 Serve this folder from any static web host. For local development:
 
 ```powershell
-python -m http.server 8080 --directory UI
+python -m http.server 8080 --bind 127.0.0.1 --directory UI
 ```
 
 Open `http://127.0.0.1:8080`.
@@ -16,12 +16,26 @@ Open `http://127.0.0.1:8080`.
 Run the dependency-free interaction regression suite with Node:
 
 ```powershell
-node --test UI/app.test.cjs
+node --test UI/app.test.cjs UI/studio-data.test.cjs UI/studio.test.cjs
 ```
 
-These tests use DOM doubles, not a rendering engine. Browser layout, screen
-reader behavior, satellite contrast, and mobile keyboard behavior require
-separate live checks.
+These dependency-free tests cover Explore interactions, geographic validation,
+analytics, project persistence, and undo. `UI/studio.browser.test.cjs` additionally
+uses a real Edge/MapLibre renderer, fixture-backed HTTP/WebSocket responses, and
+axe accessibility checks. It requires the optional `playwright-core`,
+`maplibre-gl@5.24.0`, `maplibre-contour@0.0.5`, and `axe-core` packages plus an
+installed Edge browser. Install these in a separate tooling directory and set
+`NODE_PATH` to that directory's `node_modules` if they are not already available.
+With the static server running:
+
+```powershell
+$env:MERIDIAN_UI_URL = 'http://127.0.0.1:8080'
+node --test UI/studio.browser.test.cjs
+```
+
+The browser suite skips when Playwright is absent. Screen-reader behavior,
+mobile virtual keyboards, and live provider reliability still need manual
+validation. The application itself has no Node runtime dependency or build step.
 
 The interface defaults to dark mode. The toolbar theme toggle switches the
 controls between light and dark and stores the preference locally. Satellite
@@ -29,7 +43,7 @@ and street cartography keep their dark appearance; terrain follows the theme.
 
 ## Local API Host
 
-The default API is `http://127.0.0.1:8787`. Monument accepts only loopback API
+The default API is `http://127.0.0.1:8787`. Meridian accepts only loopback API
 origins. A local hosting page can set an alternate local port before `app.js`:
 
 ```text
@@ -56,27 +70,84 @@ https://ui.example.com/?city=Noida&country=India
 `country` is optional and is included in the city lookup when present. The
 misspelled `counrty` parameter is accepted for links created with that spelling.
 
+## Explore And Studio
+
+Explore preserves city search, driving routes, terrain, measured areas, saved
+places, and Map Details. Studio adds a persistent operator workspace over the
+same MapLibre engine. Its left rail contains Layers, Data, Visualize, and Filters;
+the right rail contains feature inspection, computed metrics, provenance, and
+history. Mobile uses one collapsible sheet at a time. Map camera and terrain
+controls are moved into Studio, not duplicated or replaced.
+
+Studio supports up to eight named local workspaces and 30 layers per workspace.
+Import GeoJSON, capture loaded map data, or explicitly load an illustrative
+example. Raw GeoJSON files stay in the browser; asking Meridian sends the prompt
+and bounded map/layer metadata to the configured AI service. Metadata can include
+the map extent, saved place coordinates, layer names, field names, and sources.
+Do not include private data unless that service is approved for it.
+
+Layers can be shown, hidden, renamed, reordered, locked, copied, filtered, and
+removed. Point, density, heatmap, choropleth, contour, extrusion, flow, scalar
+surface, and tactical displays use the supplied data. Choose a numeric field and
+units where needed. Missing values are not zeros; unsupported geometry and
+insufficient samples are reported instead of manufacturing a result.
+
+- Density cells encode feature counts, not population per unit area.
+- Contours/surfaces interpolate supplied points within their convex hull and
+  are explicitly approximate, not DEM measurements or surveyed terrain.
+- Extrusion uses physical heights only for a polygon field explicitly in `m`;
+  other heights are a normalized visual index.
+- Flow arrowheads follow supplied coordinate order, not inferred travel direction.
+- High-value analysis selects an observed 90th-percentile subset; it is not a
+  spatial-significance test or an operational suitability recommendation.
+- Examples are synthetic and clearly labeled. No live population, fleet, flood,
+  or risk dataset is bundled.
+
+Date/year fields enable a timeline for the selected layer. Comparison captures
+a read-only reference map and synchronizes its camera with the current scene;
+change layers or scrub time to compare. Annotations are persistent geographic
+points. A two-corner rectangle sets a geographic selection/filter.
+
+Workspaces save to this origin's localStorage, including data, source notes,
+camera, layers, analyses, and 20 recent reversible Studio changes. Storage is
+device/origin-specific and subject to browser quotas. If saving fails, the UI
+explicitly reports memory-only state: export before closing the tab. GeoJSON
+imports are bounded to 8 MB, 10,000 features, and 100,000 positions; aggregate
+workspace backups are bounded to 32 MB and can be imported with the same limit.
+Export/import uses portable `.meridian.json` files. Workspace deletion requires
+confirmation and does not delete Explore pins, routes, or provider caches.
+
 ## Map Agent And Manual Controls
 
-The map assistant sits at the bottom of the control rail. It can find places,
-construct routes, and ask a concise follow-up question. Progress, completion,
-errors, and clarification choices stay beside the prompt even when manual
-controls are collapsed. Detailed tool activity remains in the information
-drawer. Results use backend tool responses, not invented map geometry.
+The unified search field accepts places, coordinates, and map instructions.
+The Ask Meridian toggle explicitly selects agent intent. Supported local
+instructions such as `show heatmap`, `summarize`, and `show 3d` do not require a
+model request. Other instructions use the backend's validated tools. Studio
+exposes viewport, selected-region, active-layer, and workspace scopes. The agent
+receives a bounded inventory rather than raw imported feature collections.
 
-City search, route planning, pins, areas, and location controls remain available
-inside `Map controls`. Explore focuses search; Routes opens the planner and
-street map; Workspace opens saved-pin and area tools without closing the rail
-on mobile. Search suggestions support arrows, Enter, and Escape, with inline
-no-result and failure feedback.
+Progress and Stop remain available while changing product modes. Detailed
+results and tool activity are expandable rather than a permanent chat panel.
+Agent-produced Studio operations are validated against the actual local dataset.
+Cancelled/failed backend mutations roll back only if no intervening edit would
+be overwritten. Completed map operations expose session-local undo; backend
+undo tokens expire on disconnect/restart and refuse conflicting later edits.
+Studio redo branches are invalidated when a new map operation is committed.
+
+Route planner and Saved places are contextual tools, not top-level product
+modes. Search suggestions support arrows, Enter, and Escape, with inline
+no-result and failure feedback. Ctrl/Cmd+Z undoes a map action outside editable
+fields; Shift+Ctrl/Cmd+Z redoes a Studio change.
 
 ## Location And Geography Tools
 
-At startup, the application requests the browser's public IP from
+When neither a shared location nor a saved view is available, startup requests
+the browser's public IP from
 `api.ipify.org` and resolves its approximate location through
 `ip-api.services.brahmai.in`. The resulting Geo-IP location becomes the map
 anchor and starts the normal nearby building-data stream; it does not create a
-route stop or persist the coordinate. A shared city URL takes precedence. If
+route stop. The view center and route-stop draft are saved on this device.
+A shared city URL takes precedence over a saved view. If
 the Geo-IP lookup fails, the map remains available with a locale-derived
 country bias until a location is selected. `ADD MY LOCATION` still asks for
 browser permission and assigns that coordinate to the active route stop.
@@ -85,8 +156,10 @@ active route stop. Both Geo-IP providers receive the request information needed
 to perform that lookup.
 
 The UI loads MapLibre GL, the OpenFreeMap base style, and public Terrarium
-elevation tiles. Selecting a city opens its 3D terrain view; the `3D` control
-switches terrain and camera pitch together. Self-host these resources for
+elevation tiles. The `3D` control switches terrain and camera pitch together;
+Satellite starts flat unless depth is explicitly enabled. The compass resets
+bearing without changing center or zoom. Terrain inspection marks the sampled
+point, and Map Details can copy its coordinates. Self-host these resources for
 production or offline deployments.
 
 The route planner keeps the main task focused: type a start, stop, or
@@ -106,7 +179,7 @@ Pins, areas, the selected city, and the active route are restored from the
 local workspace on reload. Search-result markers remain transient. `Clear
 workspace` asks for confirmation before removing local additions. An
 unambiguous agent request to clear the map also removes the
-persisted workspace state and reset the visible map; reusable provider caches
+persisted workspace state and resets the visible map; reusable provider caches
 and stored route records remain available locally.
 
 The backend fetches a bounded, cached OSM drivable-road graph and runs

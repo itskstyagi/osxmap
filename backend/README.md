@@ -1,4 +1,4 @@
-# Monument Python Backend
+# Meridian Python Backend
 
 This is a Python 3.11+ local API server. Its map/cache HTTP layer uses the
 standard library, while the agent WebSocket bridge uses one pinned dependency.
@@ -12,6 +12,7 @@ behavior:
 - Map-ready GeoJSON tile streaming with building geometry plus categorized public-place markers.
 - OSM-first place lookup, durable local pins/areas/routes, and animated local Dijkstra driving routes over OSM road data.
 - An OpenAI-compatible map agent that turns natural-language requests into validated city, place, and route map updates.
+- Scoped Studio operations over already-loaded datasets and revision-guarded workspace rollback/undo.
 
 ## Run
 
@@ -58,6 +59,38 @@ persisted. Agent-created pins, areas, selected-city context, and active routes
 use the same local workspace store as manual controls. `clear map` is an
 explicit workspace mutation that clears these items and the visible map state.
 
+Studio adds `studio_operation` for validated visualization, filtering, summary,
+high-value selection, scenario duplication, and comparison. Requests identify
+an existing loaded layer and an explicit viewport, selection, layer, or workspace
+scope. The service passes a bounded context inventory as data to the model and
+queues a validated operation for browser-side computation; it does not claim to
+have measured statistics or supply missing datasets. Categorical filters retain
+JSON scalar types, including booleans.
+
+Each run checkpoints pins, areas, and active state. Cancellation/failure restores
+that checkpoint only when SQLite revision and fingerprint guards confirm there
+were no intervening writes. Provider calls occur outside the short write
+transactions. Reusable provider caches and stored route records are retained.
+Terminal events include `rolledBack` and conflict details, or `reversible` on
+successful completion/clarification. `POST /api/agent/undo` takes `sessionId` and
+`runId` and returns `{workspace, undone: true}`. Tokens are single-use, bounded to
+20 process-wide, expire on socket disconnect/restart, and cannot overwrite later
+manual edits. Purely browser-side operations use the frontend's undo mechanism.
+
+## Safe Tests
+
+From the repository root:
+
+```powershell
+python -B -m backend.test_isolated
+```
+
+This runner bypasses `.env` loading, uses temporary databases, and blocks outbound
+HTTP. It covers existing geographic services plus scoped tools, additive revision
+migration, CORS metadata, cancellation, concurrent writes, and owned undo. Avoid
+importing `backend.server` directly merely to run tests against a real configured
+workspace: module initialization opens its configured SQLite cache.
+
 ## UI Deployment
 
 The static UI is in `../UI` and should be served locally alongside the local
@@ -76,6 +109,7 @@ or user accounts.
 | --- | --- |
 | `GET /api/health` | Service configuration status. |
 | `POST /api/agent/runs` | Start an AI map run for an active browser socket session. |
+| `POST /api/agent/undo` | Undo an owned completed run when no later workspace edits conflict. |
 | `GET /api/suggest?q=&countryCode=` | Debounced city suggestions. |
 | `GET /api/geocode?q=&countryCode=` | Exact city lookup. |
 | `GET /api/country?lat=&lon=` | Browser coordinate or IP-country lookup. |
@@ -84,8 +118,10 @@ or user accounts.
 | `GET /api/places/suggest?q=` | Local-only suggestions from previously stored places; never calls an external provider. |
 | `GET /api/places/stored?west=&south=&east=&north=` | Canonical locally stored places in the visible map bounds. |
 | `GET /api/workspace` | Current single-machine pins, areas, and route selection state. |
+| `POST /api/workspace/state` | Persist active route and selected-city context. |
 | `POST /api/pins` | Add a durable local workspace pin. |
 | `POST /api/areas` | Store a validated local GeoJSON polygon. |
+| `POST /api/areas/{areaId}` | Rebuild an existing measured area. |
 | `POST /api/routes` | Calculate or retrieve a local OSM-road shortest driving route. |
 | `GET /api/routes/{routeId}` | Retrieve a stored OSM-road route for workspace restoration. |
 | `DELETE /api/pins/{pinId}` / `DELETE /api/areas/{areaId}` | Remove a workspace addition. |
@@ -95,7 +131,8 @@ or user accounts.
 Tile data is GeoJSON rather than FlatGeobuf because the static browser UI no
 longer requires a JavaScript binary decoder. It retains the z14-only contract,
 `204` empty tiles, cache/source/height response headers, raw-source caching,
-and transient (never persisted) inferred heights.
+and transient (never persisted) inferred heights. Tile metadata and `Retry-After`
+headers are explicitly exposed to the local cross-origin browser UI.
 
 ## Data Sources
 
