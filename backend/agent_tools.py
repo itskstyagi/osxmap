@@ -82,6 +82,8 @@ class AgentDependencies:
     restore_workspace: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
     search_web: Callable[[str, str, str], dict[str, Any]] | None = None
     read_web_source: Callable[[str], dict[str, Any]] | None = None
+    load_population: Callable[[str, list[float], int | None], dict[str, Any]] | None = None
+    read_raster_source: Callable[[str, list[float], int], dict[str, Any]] | None = None
 
 
 @dataclass
@@ -97,6 +99,13 @@ class AgentRunContext:
     web_searches: int = 0
     source_reads: int = 0
     loaded_datasets: int = 0
+    research_intent: bool = False
+    population_requested: bool = False
+    research_city_ref: str = ""
+    research_area: dict[str, Any] | None = None
+    population_attempts: int = 0
+    raster_reads: int = 0
+    research_errors: list[str] = field(default_factory=list)
 
 
 AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -193,7 +202,7 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "report_limitation",
-            "description": "Finish honestly if research found no usable geographic dataset or a required reader/analysis is unsupported. Try the available web research tools before reporting data unavailable. Search snippets and map places are not statistical observations. This leaves the preceding valid map unchanged.",
+            "description": "Finish honestly after trying relevant data readers and sources. For population, try load_population before concluding no dataset is available. Retains an explicitly labeled study-area preview, not a fabricated statistical layer; other failed mutations are rolled back.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -214,6 +223,7 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "query": {"type": "string", "maxLength": 500},
                     "engine": {"type": "string", "enum": ["google", "google_news", "google_scholar"]},
+                    "nearRef": {"type": "string", "description": "A resolved target city/place ref. Localizes research to its country rather than the previous map location."},
                     "countryCode": {"type": "string", "description": "Optional two-letter search localization; not a geographic coverage guarantee."},
                 },
                 "required": ["query"], "additionalProperties": False,
@@ -242,6 +252,42 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "visualization": {"type": "string", "enum": ["heatmap", "points", "choropleth"]},
                     "timeField": {"type": "string", "description": "Exact source temporal field from the reader. Required with timeValue for datasets containing multiple observations/years."},
                     "timeValue": {"type": "string", "description": "Exact normalized observation/year returned by source timeValues; never combine census years into one population layer."},
+                },
+                "required": ["sourceRef"], "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_population",
+            "description": "Obtain and map a real WorldPop population grid for a verified city or frozen geographic scope. Automatically discovers the official country/year resource, reads its GeoTIFF, and extracts actual cell-center population values. Use FIRST for population heatmaps, including from Explore; no manual import or SerpApi search is required. The available archive is historical modeled population (2000-2020), not current census or ward data. Never silently replace an explicitly requested year.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cityRef": {"type": "string", "description": "City ref returned by find_city, including its verified country and extent."},
+                    "year": {"type": "integer", "description": "Requested reference year. Omit to use the latest available year in the cited archive, explicitly labeled in the result."},
+                    "name": {"type": "string", "maxLength": 120},
+                    "visualization": {"type": "string", "enum": ["heatmap", "points"]},
+                },
+                "required": ["cityRef"], "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_raster_dataset",
+            "description": "Extract and map real numeric pixels from a discovered public GeoTIFF. Use a sourceRef from search or a page link, not read_web_source on the binary file. A cityRef or frozen viewport/selection supplies the crop. The reader validates georeferencing and bounds, masks NoData, and preserves original values; no invented samples or redistribution. Inspect source evidence for band meaning, units, and reference year first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sourceRef": {"type": "string"},
+                    "cityRef": {"type": "string"},
+                    "band": {"type": "integer", "minimum": 1, "maximum": 32},
+                    "name": {"type": "string", "maxLength": 120},
+                    "units": {"type": "string", "maxLength": 60, "description": "Only units explicitly stated in the source; embedded raster units are preferred."},
+                    "visualization": {"type": "string", "enum": ["heatmap", "points"]},
                 },
                 "required": ["sourceRef"], "additionalProperties": False,
             },
@@ -319,6 +365,8 @@ class AgentTools:
             "search_web": self._search_web,
             "read_web_source": self._read_web_source,
             "load_web_dataset": self._load_web_dataset,
+            "load_population": self._load_population,
+            "load_raster_dataset": self._load_raster_dataset,
             "map_source_table": self._map_source_table,
             "clear_map": self._clear_map,
             "ask_user": self._ask_user,
@@ -343,6 +391,8 @@ class AgentTools:
             "search_web": "Researching cited web sources with SerpApi",
             "read_web_source": "Reading and validating a public source",
             "load_web_dataset": "Loading real sourced geographic observations",
+            "load_population": "Extracting the study area's WorldPop population grid",
+            "load_raster_dataset": "Clipping and validating real GeoTIFF observations",
             "map_source_table": "Joining source-table values to verified places",
             "clear_map": "Clearing the map",
             "ask_user": "Preparing a question",
@@ -358,7 +408,19 @@ class AgentTools:
         if not locations:
             return {"locations": [], "message": "No matching city was found inside the requested scope." if bounds else "No matching city was found."}
         context.requires_presentation = True
-        return {"locations": locations}
+        result: dict[str, Any] = {"locations": locations}
+        if len(locations) == 1:
+            city = locations[0]
+            context.research_city_ref = city["ref"]
+            if context.research_intent:
+                extent = bounds or city["bbox"]
+                if extent[0] != extent[2] and extent[1] < extent[3]:
+                    area = {"name": city["shortName"], "bounds": copy.deepcopy(extent),
+                            "source": {"name": city.get("provider") or "Geocoded place"},
+                            "caveat": "Geocoded study extent, not an administrative boundary or a statistical observation."}
+                    context.research_area = area
+                    result["mapUpdate"] = {"researchArea": copy.deepcopy(area), "view": {"bounds": copy.deepcopy(extent)}}
+        return result
 
     @staticmethod
     def _register_source(context: AgentRunContext, item: dict[str, Any], parent: str = "") -> dict[str, Any] | None:
@@ -391,7 +453,12 @@ class AgentTools:
         engine = arguments.get("engine", "google")
         if engine not in {"google", "google_news", "google_scholar"}:
             raise ServiceError("This web-search engine is not available.", 400)
-        country = arguments.get("countryCode", context.map_context.get("countryCode", ""))
+        nearby = self._entity(context, arguments.get("nearRef"), required=False)
+        target = nearby or context.entities.get(context.research_city_ref)
+        country = arguments.get("countryCode")
+        if country is None:
+            # Ambient map/Geo-IP country is not evidence for a newly requested place.
+            country = (target or {}).get("countryCode", "")
         if not isinstance(country, str) or country and not re.fullmatch(r"[A-Za-z]{2}", country):
             raise ServiceError("Web-search country must be a two-letter country code.", 400)
         context.web_searches += 1

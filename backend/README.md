@@ -86,6 +86,12 @@ inside geographic scope, or using an actual source administrative-region column.
 Schools/businesses/unknown POIs cannot represent a census settlement. Values
 cannot be supplied or overridden by model arguments. Source tables produce
 partial settlement-point heatmaps, not a continuous census population grid.
+Quantitative heatmaps require original Point observations; regional polygon or
+shared MultiPoint totals are not redistributed. Datasets containing several
+census years/dates require an actual source `timeField`/`timeValue` selection;
+table joins can use `timeColumn`/`timeValue`. Source row/header/context provenance
+and the selected observation are retained rather than combining populations
+across years. No valid numeric observations in scope is an explicit rejection.
 Data is capped to 4 MB per agent transfer and validated again in the browser.
 Model context contains field/count metadata, not the transferred feature data.
 

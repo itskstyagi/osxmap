@@ -999,7 +999,7 @@ def location_result(item: dict[str, Any]) -> dict[str, Any] | None:
         "id": f"{item.get('osm_type') or 'place'}:{item.get('osm_id') or f'{lat},{lon}'}",
         "name": name,
         "shortName": short_name,
-        "placeType": str(item.get("type") or item.get("addresstype") or "")[:80],
+        "placeType": str(item.get("addresstype") or item.get("type") or "")[:80],
         "country": address.get("country") or "",
         "countryCode": (address.get("country_code") or "").upper(),
         "lat": lat,
@@ -1172,7 +1172,7 @@ def public_place(place: dict[str, Any]) -> dict[str, Any]:
         if isinstance(tags, dict) and tags.get("place"):
             result["placeType"] = str(tags["place"])[:80]
         elif place.get("provider") == "openstreetmap":
-            result["placeType"] = str(payload.get("type") or payload.get("addresstype") or "")[:80]
+            result["placeType"] = str(payload.get("addresstype") or payload.get("type") or "")[:80]
         else:
             types = payload.get("types")
             if isinstance(types, list) and "locality" in types:

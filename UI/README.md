@@ -128,6 +128,12 @@ Search snippets never become measurements. For a settlement table, exact place
 names, provider settlement types, and scoped geography or source administrative
 columns must agree; unknown POIs and ambiguous name matches are refused. Table
 values are copied from the read source, not supplied by the language model.
+Point heatmaps retain actual source locations, not polygon/MultiPoint regional
+totals converted into proxy points. Multi-year datasets must select one actual
+source observation; different census years are never combined into a population
+layer. Original table headers, selected cells, source context, and observation
+year are retained as provenance. Missing numeric values in the selected scope
+are rejected rather than displayed as invented or zero observations.
 
 Automatic reading supports GeoJSON and CSV with real latitude/longitude columns;
 the backend does not yet decode GeoTIFF, PDF, authenticated portals, or massive

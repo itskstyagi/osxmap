@@ -58,6 +58,11 @@ with mock.patch.object(pathlib.Path, "exists", lambda path: False if path.name =
 
 
 class SerpWebProviderTests(BackendCase):
+    def test_nominatim_administrative_polygons_retain_actual_settlement_classification(self):
+        place = server.public_place({"provider": "openstreetmap", "providerPayload": {"type": "administrative", "addresstype": "village"}})
+        self.assertEqual(place["placeType"], "village")
+        self.assertNotIn("providerPayload", place)
+
     def test_search_engine_contracts_return_citations_not_place_geometry(self):
         item = {"title": "Official population data", "link": "https://example.org/population.csv", "snippet": "Village observations", "source": {"name": "Data office"}, "iso_date": "2025-01-01T00:00:00Z"}
         for engine, root in (("google", "organic_results"), ("google_news", "news_results"), ("google_scholar", "organic_results")):
