@@ -208,6 +208,27 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
       assert.equal(await page.locator('.studio-layer').count(), before);
       await page.locator('#agent-dismiss-result').click();
     });
+    await t.test('Cited source observations become a real heatmap layer and are reversible', async () => {
+      const before = await page.locator('.studio-layer').count();
+      await page.locator('#search-input').fill('Research official population data and load its heatmap');
+      await page.locator('#search-submit').click();
+      await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { dataset: {
+        data: fixture, name: 'Sourced population fixture', field: 'value', units: 'people per source cell', visualization: 'heatmap', scope: { type: 'workspace' },
+        source: { name: 'Offline source fixture, not real population', url: 'https://example.org/population.geojson', attribution: 'Regression source', caveat: 'Test-only observations. Not actual population.', retrievedAt: '2026-01-01' },
+      } } }));
+      await page.waitForFunction((count) => document.querySelectorAll('.studio-layer').length === count + 1, before);
+      assert.equal(await page.locator('#studio-shell').isVisible(), true);
+      assert.match(await page.locator('#studio-provenance').innerText(), /Offline source fixture/);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.completed', runId: agentRunId, reversible: false, message: 'The sourced layer was queued for browser display.', sources: [{ title: 'Original population source', url: 'https://example.org/population.geojson', readAt: '2026-01-01' }, { title: 'Unsafe URL', url: 'javascript:alert(1)' }] }));
+      await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
+      assert.equal(await page.locator('#agent-sources a').count(), 1);
+      assert.equal(await page.locator('#agent-sources a').getAttribute('href'), 'https://example.org/population.geojson');
+      await page.locator('#action-history-undo').click();
+      await page.waitForFunction((count) => document.querySelectorAll('.studio-layer').length === count, before);
+      await page.locator('#agent-dismiss-result').click();
+      await page.locator('button[data-product-mode="explore"]').click();
+    });
     await t.test('Animated 3D commands can undo their own camera motion', async () => {
       await page.locator('button[data-product-mode="studio"]').click();
       await page.emulateMedia({ reducedMotion: 'no-preference' });
