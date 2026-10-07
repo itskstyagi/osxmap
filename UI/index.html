@@ -3,21 +3,22 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#181c1b">
+    <meta name="theme-color" content="#181b1a">
     <meta name="description" content="Explore places, trace routes, and discover the landscape with an open-data map workspace.">
     <title>Monument / City Explorer</title>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20261007-10">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css?v=20261007-11">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
     <script defer src="https://unpkg.com/maplibre-contour@0.0.5/dist/index.min.js"></script>
-    <script type="module" src="./app.js?v=20261007-10"></script>
+    <script type="module" src="./app.js?v=20261007-11"></script>
   </head>
   <body>
     <main class="app-shell">
       <div class="floating-toolbar">
+        <span class="brand" role="img" aria-label="Monument" title="Monument"><svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="m5 18 13-13M5 25 20 10M12 25 27 10M19 25l8-8" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></span>
         <nav class="workspace-nav" aria-label="Workspace navigation">
           <button type="button" data-workspace-view="explore" aria-pressed="true">Explore</button>
           <button type="button" data-workspace-view="routes" aria-pressed="false">Routes</button>
@@ -70,6 +71,11 @@
 
       <section class="map-region">
         <div id="map" class="map-canvas" aria-label="Interactive 3D city map"></div>
+        <header class="view-heading">
+          <div class="view-eyebrow"><span>MONUMENT</span><span class="eyebrow-divider" aria-hidden="true"></span><span>THE OPEN MAP</span></div>
+          <h1 id="view-title">City Explorer</h1>
+          <p id="view-location">Find a place. Make it yours.</p>
+        </header>
         <section class="map-mode-panel" aria-label="Map appearance">
           <div class="section-subhead"><span>Perspective</span><span id="view-mode-label">Satellite relief</span></div>
           <div class="map-modes">
@@ -92,6 +98,7 @@
           <div class="agent-hud-footnote">Your map. An open conversation.</div>
         </details>
         <section class="agent-panel" aria-label="Map assistant">
+          <div class="assistant-heading"><span>Map assistant</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m10 2 2.2 5.8L18 10l-5.8 2.2L10 18l-2.2-5.8L2 10l5.8-2.2L10 2Z" stroke="currentColor" stroke-width="1.2"/></svg></div>
           <p id="agent-feedback" class="agent-feedback" role="status">Connecting to the map assistant...</p>
           <section id="agent-question" class="agent-question is-hidden" aria-label="Map agent clarification" tabindex="-1">
             <p>A little more detail</p>
@@ -117,7 +124,7 @@
           <button id="replay-route" type="button" hidden>Replay calculation</button>
         </section>
         <section class="info-drawer" aria-label="Map information">
-          <button id="toggle-info-drawer" class="info-drawer-toggle" type="button" aria-label="Expand map information" aria-expanded="false" aria-controls="info-drawer-content"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 14 6-6 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button id="toggle-info-drawer" class="info-drawer-toggle" type="button" aria-label="Expand map information" aria-expanded="false" aria-controls="info-drawer-content"><span>Map details</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 14 6-6 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <div id="info-drawer-content" class="info-drawer-content" hidden>
             <section class="map-context" aria-label="Current map context"><span class="section-subhead">Current view</span><strong id="context-place">Explore a place</strong><span id="context-mode">Satellite imagery</span><dl><div><dt>Map center</dt><dd id="context-coordinates">--</dd></div><div><dt>Zoom</dt><dd id="context-zoom">--</dd></div></dl><p id="context-guidance">Search a place, save a pin, or plan a journey to build your workspace.</p><details class="cache-info"><summary>Storage &amp; performance</summary><strong id="cache-status">Starting cache...</strong><p>Viewed street and elevation tiles are stored locally. Satellite imagery uses the provider's browser cache.</p><button id="clear-map-cache" type="button">Clear map cache</button></details></section>
           </div>
