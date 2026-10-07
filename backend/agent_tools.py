@@ -11,9 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, cast
 
 try:
+    from . import map_actions
     from .errors import ServiceError
     from .web_sources import validate_web_url
 except ImportError:  # Supports `python server.py` from the backend directory.
+    import map_actions
     from errors import ServiceError
     from web_sources import validate_web_url
 
@@ -61,7 +63,7 @@ def _number(value: Any) -> float | None:
         return None
 
 
-STUDIO_ACTIONS = ("visualize", "filter", "summarize", "hotspots", "compare", "duplicate")
+STUDIO_ACTIONS = ("visualize", "filter", "summarize", "hotspots", "compare", "duplicate", "style", "visibility", "remove", "move")
 STUDIO_VISUALIZATIONS = ("points", "density", "heatmap", "choropleth", "contours", "extrusion", "flow", "surface", "tactical")
 STUDIO_PALETTES = ("monochrome", "olive", "thermal", "ocean", "violet")
 MAX_CONTEXT_BYTES = 24_000
@@ -84,6 +86,8 @@ class AgentDependencies:
     read_web_source: Callable[[str], dict[str, Any]] | None = None
     load_population: Callable[[str, list[float], int | None], dict[str, Any]] | None = None
     read_raster_source: Callable[[str, list[float], int], dict[str, Any]] | None = None
+    load_city_geometry: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    load_road_geometry: Callable[[str, list[float], list[str] | None], dict[str, Any]] | None = None
 
 
 @dataclass
@@ -108,6 +112,24 @@ class AgentRunContext:
     population_attempts: int = 0
     raster_reads: int = 0
     research_errors: list[str] = field(default_factory=list)
+    overlays: dict[str, dict[str, Any]] = field(default_factory=dict)
+    next_overlay: int = 1
+    geometry_reads: int = 0
+    visual_action_requested: bool = False
+    visual_actions: int = 0
+    requested_color: str = ""
+    explicit_geometry_requested: bool = False
+    explicit_coordinates_requested: bool = False
+    user_coordinates: list[list[float]] = field(default_factory=list)
+    user_bounds: list[list[float]] = field(default_factory=list)
+    highlight_target: str = ""
+    highlight_actions: int = 0
+    styled_studio_layers: set[str] = field(default_factory=set)
+    visual_targets: list[str] = field(default_factory=list)
+    requested_colors: dict[str, str] = field(default_factory=dict)
+    requested_paints: dict[str, str] = field(default_factory=dict)
+    visual_requirements: list[dict[str, str]] = field(default_factory=list)
+    overlay_properties: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -190,6 +212,12 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "visualization": {"type": "string", "enum": list(STUDIO_VISUALIZATIONS)},
                     "field": {"type": "string", "description": "An exact numericFields name from the loaded layer, not an invented population/risk/elevation field."},
                     "palette": {"type": "string", "enum": list(STUDIO_PALETTES)},
+                    "color": {"type": "string", "description": "Literal hex or basic CSS color; an empty string resets a Studio layer to its palette."},
+                    "opacity": {"type": "number", "minimum": 0, "maximum": 1},
+                    "lineWidth": {"type": "number", "minimum": 1, "maximum": 24},
+                    "pointRadius": {"type": "number", "minimum": 1, "maximum": 40},
+                    "visible": {"type": "boolean"},
+                    "beforeLayerId": {"type": ["string", "null"]},
                     "min": {"type": "number"},
                     "max": {"type": "number"},
                     "categoryField": {"type": "string", "description": "An exact categoricalFields name from the loaded layer."},
@@ -319,6 +347,80 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "highlight_city",
+            "description": "Actually highlight a verified city's OpenStreetMap boundary in the requested color, with fill and outline. Resolve cityRef with find_city, then call this; camera-only present_map does NOT highlight a city. Acquires the real Polygon/MultiPolygon, never substitutes its bbox. Automatically displays and fits the overlay; returns layerId for later styles/hide/remove.",
+            "parameters": {"type": "object", "properties": {
+                "cityRef": {"type": "string"}, "name": {"type": "string", "maxLength": 120},
+                "style": map_actions.STYLE_SCHEMA, "fit": {"type": "boolean"},
+            }, "required": ["cityRef"], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "highlight_roads",
+            "description": "Acquire and highlight actual OpenStreetMap road lines by literal road name or supported classes within a verified city extent or frozen viewport/selection. Use nearRef for a requested city; does not synthesize routes or straight connections. General query 'roads' returns bounded network coverage, not a claim of every city road. Returns layerId, coverage and source; honors requested line color/width.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "maxLength": 160}, "nearRef": {"type": "string"},
+                "classes": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+                "name": {"type": "string", "maxLength": 120}, "style": map_actions.STYLE_SCHEMA, "fit": {"type": "boolean"},
+            }, "required": ["query"], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "plot_points",
+            "description": "Plot a labeled, styled point layer using returned place/city refs or coordinates explicitly supplied by the user. Use actual searched locations for named places; never fabricate observations or statistically distribute random points. Coordinates are [longitude,latitude]. No city-boundary or population claims. Automatically presents the layer and returns layerId.",
+            "parameters": {"type": "object", "properties": {
+                "placeRefs": {"type": "array", "maxItems": 100, "items": {"type": "string"}},
+                "points": {"type": "array", "maxItems": 100, "items": {"type": "object", "properties": {
+                    "coordinates": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+                    "label": {"type": "string", "maxLength": 160},
+                }, "required": ["coordinates"], "additionalProperties": False}},
+                "name": {"type": "string", "maxLength": 120}, "style": map_actions.STYLE_SCHEMA, "fit": {"type": "boolean"},
+            }, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "draw_geometry",
+            "description": "Draw explicitly requested annotation geometry: line/polygon from user coordinates or known pointRefs, a circle with center/radiusMeters, rectangle with bounds, or label at a known point. Also display actual parsed source geometry via sourceRef. Drawings are user annotations, NOT sourced city/road boundaries or statistical data. Use highlight_city/highlight_roads for actual geography. Validated coordinates only, no executable code or URLs.",
+            "parameters": {"type": "object", "properties": {
+                "kind": {"type": "string", "enum": ["line", "polygon", "circle", "rectangle", "label", "source"]},
+                "coordinates": {"type": "array", "maxItems": 1000, "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}}},
+                "pointRefs": {"type": "array", "maxItems": 100, "items": {"type": "string"}},
+                "center": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+                "centerRef": {"type": "string"}, "radiusMeters": {"type": "number", "minimum": 1, "maximum": 500000},
+                "bounds": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number"}},
+                "sourceRef": {"type": "string"}, "label": {"type": "string", "maxLength": 160},
+                "name": {"type": "string", "maxLength": 120}, "style": map_actions.STYLE_SCHEMA, "fit": {"type": "boolean"},
+            }, "required": ["kind"], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "map_action",
+            "description": "Execute a typed CLIENT map action for an existing overlay layer or camera/basemap/display. Use exact layerId from mapContext.mapActions.layers or a returned highlight/drawing; not raw MapLibre IDs. Supported actions style_layer,set_visibility,remove_layer,clear_overlays,move_layer,filter_layer,fit_layer,set_view,set_basemap,set_terrain,set_display. Camera changes never satisfy a highlight request. No code, style expressions, invented geometry, or source URLs.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": list(map_actions.ACTION_KEYS)}, "layerId": {"type": "string"},
+                "style": map_actions.STYLE_SCHEMA, "visible": {"type": "boolean"}, "beforeLayerId": {"type": ["string", "null"]},
+                "field": {"type": ["string", "null"]}, "operator": {"type": "string", "enum": ["eq", "neq", "gt", "gte", "lt", "lte"]},
+                "value": {"type": ["string", "number", "boolean", "null"]},
+                "center": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+                "bounds": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number"}},
+                "zoom": {"type": "number", "minimum": 0, "maximum": 22}, "pitch": {"type": "number", "minimum": 0, "maximum": 78}, "bearing": {"type": "number", "minimum": -360, "maximum": 360},
+                "mode": {"type": "string", "enum": ["streets", "satellite", "terrain"]},
+                "enabled": {"type": "boolean"}, "exaggeration": {"type": "number", "minimum": 0, "maximum": 5},
+                "preference": {"type": "string", "enum": ["labels", "buildings", "roads", "places", "boundaries", "contours", "hillshade"]},
+            }, "required": ["action"], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "clear_map",
             "description": "Clear the persisted workspace and all visible agent map state. Use only for an unambiguous clear request.",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -354,6 +456,15 @@ class AgentTools:
         selected = context.map_context.get("selectedCity")
         if isinstance(selected, dict) and self._location(selected):
             context.map_context["selectedCity"] = self._output_entity(self._register_entity(context, selected, "city"))
+        context.overlays = {layer["id"]: copy.deepcopy(layer) for layer in context.map_context.get("mapActions", {}).get("layers", [])}
+        for layer in context.overlays.values():
+            if "Polygon" in layer.get("geometryTypes", []) or "MultiPolygon" in layer.get("geometryTypes", []):
+                source = layer.get("source", {})
+                url = source.get("url", "")
+                caveat = source.get("caveat", "").lower()
+                source_identity = re.fullmatch(r"https://www\.openstreetmap\.org/(?:relation|way)/\d+", url) or re.match(r"https://nominatim\.openstreetmap\.org/(?:lookup|search)\?", url)
+                if source_identity and ("administrative" in caveat or "city boundary" in caveat or "settlement polygon" in caveat):
+                    layer["kind"] = "city-boundary"
         return context
 
     def execute(self, context: AgentRunContext, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -363,6 +474,11 @@ class AgentTools:
             "plan_route": self._plan_route,
             "present_map": self._present_map,
             "studio_operation": self._studio_operation,
+            "highlight_city": self._highlight_city,
+            "highlight_roads": self._highlight_roads,
+            "plot_points": self._plot_points,
+            "draw_geometry": self._draw_geometry,
+            "map_action": self._map_action,
             "report_limitation": self._report_limitation,
             "search_web": self._search_web,
             "read_web_source": self._read_web_source,
@@ -389,6 +505,11 @@ class AgentTools:
             "plan_route": "Planning a road route",
             "present_map": "Drawing the map",
             "studio_operation": "Queuing a scoped Studio operation",
+            "highlight_city": "Loading and coloring the city's actual boundary",
+            "highlight_roads": "Loading and highlighting actual road geometry",
+            "plot_points": "Plotting labeled geographic points",
+            "draw_geometry": "Drawing the requested map annotation",
+            "map_action": "Applying explicit map styles and layer controls",
             "report_limitation": "Explaining the available data and tools",
             "search_web": "Researching cited web sources with SerpApi",
             "read_web_source": "Reading and validating a public source",
@@ -932,7 +1053,7 @@ class AgentTools:
         if (reason in {"dataset_unavailable", "web_search_unavailable"} and context.population_requested
                 and context.research_city_ref and self.dependencies.load_population and not context.population_attempts):
             raise ServiceError("A direct WorldPop population reader is available. Resolve the requested city and call load_population before concluding that population data cannot be obtained.", 400)
-        if reason in {"dataset_unavailable", "web_search_unavailable"} and self.dependencies.search_web and not context.web_searches:
+        if reason in {"dataset_unavailable", "web_search_unavailable"} and self.dependencies.search_web and not context.web_searches and not context.geometry_reads:
             raise ServiceError("Web research is available. Use search_web to find sources before concluding that the requested dataset cannot be obtained.", 400)
         message = messages[reason]
         if context.research_area:
@@ -956,7 +1077,34 @@ class AgentTools:
             raise ServiceError("The requested layer is outside the selected scope.", 400)
         if arguments.get("action") not in STUDIO_ACTIONS:
             raise ServiceError("Unsupported Studio action.", 400)
+        action = arguments["action"]
+        if action in {"style", "visibility", "remove", "move"}:
+            allowed = {"action", "layerId"} | {"style": {"color", "opacity", "lineWidth", "pointRadius"}, "visibility": {"visible"}, "move": {"beforeLayerId"}, "remove": set()}[action]
+            if set(arguments) - allowed:
+                raise ServiceError("Unsupported parameters for this Studio styling/lifecycle action.", 400)
         operation = {"action": arguments["action"], "layerId": layer_id, "scope": copy.deepcopy(scope), "workspaceId": studio["workspaceId"]}
+        if "color" in arguments:
+            operation["color"] = map_actions.color(arguments["color"], reset=True)
+            if context.requested_color and operation["color"] != context.requested_color:
+                raise ServiceError("Use the exact color requested for the loaded layer.", 400)
+        elif action == "style" and context.requested_color:
+            operation["color"] = context.requested_color
+        for key, limits in (("opacity", (0, 1)), ("lineWidth", (1, 24)), ("pointRadius", (1, 40))):
+            if key in arguments:
+                operation[key] = map_actions.finite(arguments[key], key, *limits)
+        if action == "style" and not any(key in operation for key in ("color", "opacity", "lineWidth", "pointRadius")):
+            raise ServiceError("A Studio style action requires an explicit supported setting.", 400)
+        if "visible" in arguments:
+            if type(arguments["visible"]) is not bool:
+                raise ServiceError("Studio visibility must be a boolean.", 400)
+            operation["visible"] = arguments["visible"]
+        elif action == "visibility":
+            raise ServiceError("Studio visibility requires visible:true or false.", 400)
+        if action == "move":
+            before = arguments.get("beforeLayerId")
+            if "beforeLayerId" not in arguments or before is not None and (before == layer_id or not any(item["id"] == before for item in studio["layers"])):
+                raise ServiceError("Move before another exact Studio layerId, or explicit null.", 400)
+            operation["beforeLayerId"] = before
         for key, allowed in (("visualization", STUDIO_VISUALIZATIONS), ("palette", STUDIO_PALETTES)):
             if key in arguments:
                 if arguments[key] not in allowed:
@@ -988,8 +1136,24 @@ class AgentTools:
         if operation.get("visualization") in {"contours", "surface"} and "field" not in operation:
             raise ServiceError("Contours and surfaces require an explicit known numeric field; elevation data is not assumed to be loaded.", 400)
         context.presented = True
-        context.studio_presented = True
+        if action in {"visualize", "filter", "summarize", "hotspots", "compare", "duplicate"}:
+            context.studio_presented = True
         context.requires_presentation = False
+        for key in ("color", "opacity", "lineWidth", "pointRadius", "visible", "visualization", "field"):
+            if key in operation:
+                layer[key] = operation[key]
+        if action == "remove":
+            studio["layers"] = [item for item in studio["layers"] if item["id"] != layer_id]
+            context.styled_studio_layers.discard(layer_id)
+        if context.population_requested and action in {"visibility", "remove", "style"}:
+            context.studio_presented = (action == "style" and layer.get("visualization") == "heatmap"
+                and layer.get("field") in layer.get("numericFields", []) and layer.get("visible", True)
+                and layer.get("opacity", .85) > 0)
+        if action in {"style", "visibility", "remove", "move"} or "color" in operation:
+            context.visual_actions += 1
+            if action == "style" or "color" in operation:
+                context.highlight_actions += 1
+                context.styled_studio_layers.add(layer_id)
         return {
             "queued": True,
             "message": "Queued a browser operation on an existing loaded layer. The browser must validate geometry and compute scoped results from actual data; the backend has not computed any measurements.",
@@ -1004,6 +1168,8 @@ class AgentTools:
         self.dependencies.clear_workspace()
         context.entities.clear()
         context.routes.clear()
+        context.overlays.clear()
+        context.overlay_properties.clear()
         context.research_area = None
         context.research_city_ref = ""
         context.presented = True
@@ -1117,6 +1283,380 @@ class AgentTools:
         location = city or (places[0] if places else None)
         return {"center": [location["lon"], location["lat"]], "zoom": 13} if location else None
 
+    def _overlay_style(self, context: AgentRunContext, arguments: dict[str, Any], target: str = "") -> dict[str, Any]:
+        value = arguments.get("style", {})
+        if not isinstance(value, dict):
+            raise ServiceError("Overlay style must be a supported JSON object.", 400)
+        requested = context.requested_colors.get(target, context.requested_color)
+        if target == "city" and context.requested_paints:
+            for key, expected in context.requested_paints.items():
+                if key in value and map_actions.color(value[key]) != expected:
+                    raise ServiceError("Apply the user's exact requested fill and outline colors.", 400)
+                value = {**value, key: expected}
+        if requested and "color" not in value:
+            value = {**value, "color": requested}
+        result = map_actions.style(value) if value else {"color": "#d0dac5", "fillColor": "#d0dac5"}
+        if requested and (result.get("color") != requested or result.get("fillColor", requested) != requested):
+            raise ServiceError("Apply the color explicitly requested by the user, not an unrelated default color.", 400)
+        return result
+
+    def _add_overlay(self, context: AgentRunContext, document: dict[str, Any], arguments: dict[str, Any], kind: str) -> dict[str, Any]:
+        bounds = self._geographic_bounds(context)
+        data = map_actions.collection(document.get("dataset"))
+        map_actions.validate_scope(data, bounds)
+        if len(context.overlays) >= 32:
+            raise ServiceError("The client map supports at most 32 overlay layers. Remove an unused overlay first.", 400)
+        target = {"city-boundary": "city", "roads": "roads", "points": "points"}.get(kind, "layer")
+        layer_style = self._overlay_style(context, arguments, target)
+        name = _string(arguments.get("name") or document.get("name") or "Map annotation", "Overlay name", 1, 120)
+        fit = arguments.get("fit", True)
+        if type(fit) is not bool:
+            raise ServiceError("Overlay fit must be a boolean.", 400)
+        source = document.get("source")
+        if not isinstance(source, dict):
+            raise ServiceError("A map geometry source or explicit annotation provenance is required.", 422)
+        source = {key: _text(source.get(key), maximum) for key, maximum in (("name", 160), ("url", 2048), ("attribution", 500), ("license", 300), ("caveat", 1000)) if isinstance(source.get(key), str)}
+        if source.get("url"):
+            source["url"] = validate_web_url(source["url"])
+        while f"overlay-{context.next_overlay}" in context.overlays:
+            context.next_overlay += 1
+        layer_id = f"overlay-{context.next_overlay}"
+        layer = {"id": layer_id, "name": name, "data": data, "style": layer_style, "source": source, "visible": True}
+        extent = map_actions.data_bounds(data)
+        keys = [feature["properties"] for feature in data["features"]]
+        inventory = {key: copy.deepcopy(layer[key]) for key in ("id", "name", "style", "source", "visible")}
+        inventory.update({"kind": kind, "featureCount": len(data["features"]), "bounds": extent,
+            "touchedByRun": True, "matchingFeatureCount": len(data["features"]),
+            "targetName": _text(document.get("targetName"), 160),
+            "geometryTypes": sorted({feature["geometry"]["type"] for feature in data["features"]}),
+            "numericFields": sorted({key for properties in keys for key, value in properties.items() if _number(value) is not None})[:32],
+            "categoricalFields": sorted({key for properties in keys for key, value in properties.items() if isinstance(value, (str, bool))})[:32]})
+        context.overlays[layer_id] = inventory
+        context.overlay_properties[layer_id] = keys
+        context.next_overlay += 1
+        context.presented = True
+        context.requires_presentation = False
+        context.visual_actions += 1
+        if (not context.highlight_target or context.highlight_target == "city" and kind == "city-boundary"
+                or context.highlight_target == "roads" and kind == "roads" or context.highlight_target in {"points", "layer"}):
+            context.highlight_actions += 1
+        actions = [{"action": "add_layer", "layer": layer}]
+        if fit:
+            actions.append({"action": "fit_layer", "layerId": layer_id})
+        if source.get("url"):
+            citation = self._register_source(context, {"url": source["url"], "title": source.get("name") or name, "publisher": source.get("attribution")})
+            if citation:
+                entry = context.sources[citation["sourceRef"]]
+                entry["usedForMap"] = True
+                entry["readAt"] = datetime.now(timezone.utc).isoformat()
+        return {"queued": True, "layerId": layer_id, "name": name, "kind": kind,
+                "featureCount": len(data["features"]), "bounds": extent, "style": layer_style,
+                "source": source, "coverage": copy.deepcopy(document.get("coverage", {})),
+                "message": "Actual geometry and explicit style queued for client rendering; a camera move alone is not a highlight.",
+                "mapUpdate": {"actions": actions}}
+
+    def _highlight_city(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        bounds = self._geographic_bounds(context)
+        city = self._entity(context, arguments["cityRef"])
+        if city.get("kind") != "city" or not self._inside(city, bounds):
+            raise ServiceError("Highlight a verified city inside the requested geographic scope.", 400)
+        self._overlay_style(context, arguments, "city")
+        if not self.dependencies.load_city_geometry:
+            raise ServiceError("The source-backed city boundary reader is not available.", 503)
+        if context.geometry_reads >= 4:
+            raise ServiceError("This run has reached its four geographic-geometry acquisition limit.", 400)
+        context.geometry_reads += 1
+        document = self.dependencies.load_city_geometry(self._output_entity(city))
+        data = document.get("dataset", {}) if isinstance(document, dict) else {}
+        if not data.get("features") or any(feature.get("geometry", {}).get("type") not in {"Polygon", "MultiPolygon"} for feature in data["features"]):
+            raise ServiceError("No actual city polygon was obtained; its center/bbox cannot be substituted for a boundary highlight.", 422)
+        return self._add_overlay(context, {**document, "targetName": city["shortName"]}, arguments, "city-boundary")
+
+    def _highlight_roads(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        bounds = self._geographic_bounds(context)
+        nearby = self._entity(context, arguments.get("nearRef"), required=False)
+        if nearby and not self._inside(nearby, bounds):
+            raise ServiceError("The target road location is outside the requested geographic scope.", 400)
+        target = nearby or context.entities.get(context.research_city_ref)
+        extent = bounds or (target or {}).get("bbox") or context.map_context.get("bounds")
+        extent = _bounds(extent)
+        if not extent or extent[0] == extent[2] or extent[1] >= extent[3]:
+            raise ServiceError("Resolve the target city or select a bounded viewport before loading roads.", 400)
+        query = _string(arguments.get("query"), "Road query", 1, 160)
+        classes = arguments.get("classes")
+        if classes is not None and (not isinstance(classes, list) or not 1 <= len(classes) <= 20 or any(not isinstance(item, str) for item in classes)):
+            raise ServiceError("Road classes must be a bounded list of supported road types.", 400)
+        self._overlay_style(context, arguments, "roads")
+        if not self.dependencies.load_road_geometry:
+            raise ServiceError("The source-backed road geometry reader is not available.", 503)
+        if context.geometry_reads >= 4:
+            raise ServiceError("This run has reached its four geographic-geometry acquisition limit.", 400)
+        context.geometry_reads += 1
+        document = self.dependencies.load_road_geometry(query, extent, classes)
+        data = document.get("dataset", {}) if isinstance(document, dict) else {}
+        if not data.get("features") or any(feature.get("geometry", {}).get("type") not in {"LineString", "MultiLineString"} for feature in data["features"]):
+            raise ServiceError("No actual road lines were obtained; place points/routes are not a road highlight.", 422)
+        map_actions.validate_scope(map_actions.collection(data), extent)
+        return self._add_overlay(context, document, arguments, "roads")
+
+    def _plot_points(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        bounds = self._geographic_bounds(context)
+        places = self._entities(context, arguments.get("placeRefs"), 100)
+        raw_points = arguments.get("points", [])
+        if not isinstance(raw_points, list) or len(raw_points) > 100 or not places and not raw_points:
+            raise ServiceError("Plot known placeRefs or a bounded list of explicit coordinate points.", 400)
+        if raw_points and not context.explicit_coordinates_requested:
+            raise ServiceError("Search named places and use their returned references; do not invent coordinate points for a geographic request.", 400)
+        features = []
+        for place in places:
+            if not self._inside(place, bounds):
+                raise ServiceError("A selected plotted place is outside the frozen geographic scope.", 400)
+            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [place["lon"], place["lat"]]}, "properties": {"name": place["shortName"], "label": place["shortName"], "sourceId": place["id"]}})
+        for item in raw_points:
+            if not isinstance(item, dict) or set(item) - {"coordinates", "label"} or "coordinates" not in item:
+                raise ServiceError("Explicit points accept coordinates and an optional text label only.", 400)
+            coordinate = list(_coordinates(item["coordinates"], "Plotted point"))
+            self._user_coordinate(context, coordinate)
+            label = item.get("label", "")
+            if not isinstance(label, str) or len(label) > 160:
+                raise ServiceError("Point labels must be bounded plain text.", 400)
+            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": coordinate}, "properties": {"label": label}})
+        source = {"name": "Verified place references" if not raw_points else "Explicit user coordinate annotations", "caveat": "Point markers are geographic context or explicit user annotations, not statistical observations."}
+        return self._add_overlay(context, {"dataset": {"type": "FeatureCollection", "features": features}, "name": "Plotted points", "source": source}, arguments, "points")
+
+    @staticmethod
+    def _user_coordinate(context: AgentRunContext, point: list[float]) -> None:
+        if not any(all(abs(left - right) <= 1e-9 for left, right in zip(point, supplied)) for supplied in context.user_coordinates):
+            raise ServiceError("These coordinates were not supplied by the user. Use the exact literal coordinates or verified place references, not invented positions.", 400)
+
+    def _draw_geometry(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._geographic_bounds(context)
+        kind = arguments.get("kind")
+        shape_keys = {"line": {"coordinates", "pointRefs"}, "polygon": {"coordinates", "pointRefs"},
+                      "circle": {"center", "centerRef", "radiusMeters"}, "rectangle": {"bounds"},
+                      "label": {"center", "centerRef", "label"}, "source": {"sourceRef"}}
+        if kind not in shape_keys or set(arguments) - ({"kind", "name", "style", "fit", "label"} | shape_keys[kind]):
+            raise ServiceError("Draw the requested geometry kind with its supported shape parameters.", 400)
+        if kind == "source":
+            source = self._source(context, arguments.get("sourceRef"))
+            document = context.documents.get(source["sourceRef"], {})
+            if not document.get("dataset"):
+                raise ServiceError("Read the source first and obtain its actual GeoJSON geometry before displaying it.", 400)
+            return self._add_overlay(context, {"dataset": document["dataset"], "name": source["title"], "source": {"name": source["title"], "url": source["url"], "caveat": "Actual parsed source geometry; accuracy is not independently verified."}}, arguments, "source-geometry")
+        if not context.explicit_geometry_requested and kind not in {"label"}:
+            raise ServiceError("Explicit drawing requires a user annotation/drawing request. Use actual city/road geometry readers for highlighting geography.", 400)
+        if any(key in arguments for key in ("coordinates", "center", "bounds")) and not context.explicit_coordinates_requested:
+            raise ServiceError("Use actual pointRefs/centerRef from search; the user did not supply literal drawing coordinates or bounds.", 400)
+        label = arguments.get("label", arguments.get("name", "Map annotation"))
+        if not isinstance(label, str) or not 1 <= len(label) <= 160:
+            raise ServiceError("Annotation label must be 1-160 characters of plain text.", 400)
+        if kind in {"line", "polygon"}:
+            if "coordinates" in arguments and "pointRefs" in arguments:
+                raise ServiceError("Use explicit coordinates or verified pointRefs, not both.", 400)
+            if "pointRefs" in arguments:
+                points = [[item["lon"], item["lat"]] for item in self._entities(context, arguments["pointRefs"], 100)]
+            else:
+                raw = arguments.get("coordinates")
+                if not isinstance(raw, list) or not 2 <= len(raw) <= 1000:
+                    raise ServiceError("Line/polygon drawing requires bounded explicit coordinates or pointRefs.", 400)
+                points = [list(_coordinates(item, "Drawing coordinate")) for item in raw]
+                for point in points:
+                    self._user_coordinate(context, point)
+            if kind == "polygon":
+                if len(points) < 3:
+                    raise ServiceError("A drawn polygon needs at least three distinct positions.", 400)
+                geometry = {"type": "Polygon", "coordinates": [points if points[0] == points[-1] else points + [points[0]]]}
+            else:
+                geometry = {"type": "LineString", "coordinates": points}
+        elif kind == "rectangle":
+            extent = _bounds(arguments.get("bounds"))
+            if not extent or extent[0] >= extent[2] or extent[1] >= extent[3]:
+                raise ServiceError("A rectangle needs a nonempty, non-wrapped geographic extent.", 400)
+            west, south, east, north = extent
+            if not any(all(abs(left - right) <= 1e-9 for left, right in zip(extent, supplied)) for supplied in context.user_bounds):
+                raise ServiceError("The rectangle bounds were not supplied by the user; use the exact requested literal bounds.", 400)
+            geometry = {"type": "Polygon", "coordinates": [[[west, south], [east, south], [east, north], [west, north], [west, south]]]}
+        else:
+            if "center" in arguments and "centerRef" in arguments:
+                raise ServiceError("Use an explicit center or a verified centerRef, not both.", 400)
+            if arguments.get("centerRef"):
+                entity = self._entity(context, arguments["centerRef"])
+                center = [entity["lon"], entity["lat"]]
+            else:
+                if not context.explicit_geometry_requested:
+                    raise ServiceError("Use a verified centerRef for a named location label; never invent its coordinates.", 400)
+                center = list(_coordinates(arguments.get("center"), "Annotation center"))
+                self._user_coordinate(context, center)
+            geometry = map_actions.circle(center, arguments.get("radiusMeters")) if kind == "circle" else {"type": "Point", "coordinates": center}
+        return self._add_overlay(context, {"dataset": {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": geometry, "properties": {"label": label}}]}, "name": label,
+            "source": {"name": "Explicit map annotation", "caveat": "User-requested annotation, not a sourced administrative boundary, road geometry, or statistical observation."}}, arguments, "annotation")
+
+    def _map_action(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        action = arguments.get("action")
+        if action not in map_actions.ACTION_KEYS or set(arguments) - ({"action"} | map_actions.ACTION_KEYS[action]):
+            raise ServiceError("Unsupported parameters for this explicit map action.", 400)
+        result = copy.deepcopy(arguments)
+        layer = None
+        scope = self._geographic_bounds(context)
+        if "layerId" in map_actions.ACTION_KEYS[action]:
+            layer_id = map_actions.identifier(arguments.get("layerId"))
+            layer = context.overlays.get(layer_id)
+            if not layer:
+                raise ServiceError("Use an overlay layerId returned by a map tool or the client mapActions inventory, not a raw basemap layer ID.", 400)
+            if scope:
+                extent = layer.get("bounds")
+                if not extent or not map_actions.extent_contained(extent, scope):
+                    raise ServiceError("Restyling this whole overlay would escape the frozen geographic scope. Select a containing scope.", 400)
+        mutation = False
+        if action == "style_layer":
+            if not arguments.get("style") and not context.requested_color:
+                raise ServiceError("A style_layer operation requires an explicit supported style setting.", 400)
+            target = {"city-boundary": "city", "roads": "roads", "points": "points"}.get(layer.get("kind"), "layer")
+            result["style"] = self._overlay_style(context, arguments, target)
+            mutation = any(layer.get("style", {}).get(key) != value for key, value in result["style"].items())
+            if not mutation:
+                raise ServiceError("The overlay already has the requested style; no style change was queued.", 400)
+            layer["style"] = {**layer.get("style", {}), **result["style"]}
+            layer["touchedByRun"] = True
+            geometry_types = set(layer.get("geometryTypes", []))
+            if (context.highlight_target in {"", "layer", "points"}
+                    or context.highlight_target == "city" and geometry_types & {"Polygon", "MultiPolygon"}
+                    or context.highlight_target == "roads" and geometry_types & {"LineString", "MultiLineString"}):
+                context.highlight_actions += 1
+        elif action == "set_visibility":
+            if type(arguments.get("visible")) is not bool:
+                raise ServiceError("Map visibility must be a boolean.", 400)
+            if layer.get("visible", True) == arguments["visible"]:
+                raise ServiceError("This overlay already has the requested visibility.", 400)
+            layer["visible"] = arguments["visible"]
+            mutation = True
+        elif action == "remove_layer":
+            del context.overlays[layer["id"]]
+            context.overlay_properties.pop(layer["id"], None)
+            mutation = True
+        elif action == "move_layer":
+            before = arguments.get("beforeLayerId")
+            if before is not None and (before not in context.overlays or before == layer["id"]):
+                raise ServiceError("Move before another exact overlay layerId, or null to append.", 400)
+            if "beforeLayerId" not in arguments:
+                raise ServiceError("Layer ordering requires beforeLayerId (or explicit null).", 400)
+            keys = [key for key in context.overlays if key != layer["id"]]
+            keys.insert(keys.index(before) if before else len(keys), layer["id"])
+            context.overlays = {key: context.overlays[key] for key in keys}
+            mutation = True
+        elif action == "filter_layer":
+            if arguments.get("field") is None and "field" in arguments:
+                if set(arguments) - {"action", "layerId", "field"}:
+                    raise ServiceError("Clearing a filter accepts field:null only.", 400)
+                layer.pop("filter", None)
+            else:
+                field, operator, value = arguments.get("field"), arguments.get("operator"), arguments.get("value")
+                if not isinstance(field, str) or field not in layer.get("numericFields", []) + layer.get("categoricalFields", []):
+                    raise ServiceError("Filter an exact field from the overlay inventory, not an invented field.", 400)
+                if operator not in {"eq", "neq", "gt", "gte", "lt", "lte"} or "value" not in arguments or not (value is None or type(value) in (str, bool) or _number(value) is not None):
+                    raise ServiceError("A supported typed scalar filter is required.", 400)
+                if isinstance(value, str) and len(value) > 160 or operator not in {"eq", "neq"} and (field not in layer.get("numericFields", []) or _number(value) is None):
+                    raise ServiceError("Ordered filters need an actual numeric field and value.", 400)
+                layer["filter"] = {"field": field, "operator": operator, "value": value}
+                properties = context.overlay_properties.get(layer["id"])
+                if properties is None:
+                    layer["matchingFeatureCount"] = 0  # Never infer observations from browser metadata.
+                else:
+                    def matches(item):
+                        if field not in item:
+                            return False
+                        actual = item[field]
+                        if operator in {"eq", "neq"}:
+                            same = type(actual) is type(value) and actual == value or _number(actual) is not None and _number(value) is not None and actual == value
+                            return same if operator == "eq" else not same
+                        if _number(actual) is None:
+                            return False
+                        return {"gt": actual > value, "gte": actual >= value, "lt": actual < value, "lte": actual <= value}[operator]
+                    layer["matchingFeatureCount"] = sum(matches(item) for item in properties)
+            if arguments.get("field") is None:
+                layer["matchingFeatureCount"] = layer.get("featureCount", 0)
+            mutation = True
+        elif action == "clear_overlays":
+            if scope or not context.overlays:
+                raise ServiceError("Clear overlays requires workspace scope and at least one overlay; use remove_layer for a target.", 400)
+            context.overlays.clear()
+            context.overlay_properties.clear()
+            mutation = True
+        elif action == "set_view":
+            if not set(arguments) - {"action"} or "center" in arguments and "bounds" in arguments:
+                raise ServiceError("Set a camera center or bounds plus supported camera settings, not both.", 400)
+            if "center" in arguments:
+                result["center"] = list(_coordinates(arguments["center"], "Camera center"))
+                if not -85.05113 <= result["center"][1] <= 85.05113 or not map_actions.contained(result["center"], scope):
+                    raise ServiceError("Camera center is outside supported/frozen map bounds.", 400)
+            if "bounds" in arguments:
+                extent = _bounds(arguments["bounds"])
+                if not extent or extent[0] == extent[2] or extent[1] >= extent[3] or not map_actions.extent_contained(extent, scope):
+                    raise ServiceError("Camera bounds must be nonempty and within the frozen scope.", 400)
+                result["bounds"] = extent
+            for key, limits in (("zoom", (0, 22)), ("pitch", (0, 78)), ("bearing", (-360, 360))):
+                if key in arguments:
+                    result[key] = map_actions.finite(arguments[key], key, *limits)
+        elif action == "set_basemap":
+            if arguments.get("mode") not in {"streets", "satellite", "terrain"}:
+                raise ServiceError("Use a supported basemap: streets, satellite, or terrain.", 400)
+        elif action in {"set_terrain", "set_display"}:
+            if type(arguments.get("enabled")) is not bool:
+                raise ServiceError("Map display/terrain enabled must be a boolean.", 400)
+            if action == "set_display" and arguments.get("preference") not in {"labels", "buildings", "roads", "places", "boundaries", "contours", "hillshade"}:
+                raise ServiceError("This display group is not supported.", 400)
+            if "exaggeration" in arguments:
+                result["exaggeration"] = map_actions.finite(arguments["exaggeration"], "Terrain exaggeration", 0, 5)
+        context.presented = True
+        if mutation:
+            context.visual_actions += 1
+            context.requires_presentation = False
+        return {"queued": True, "action": action, "layerId": arguments.get("layerId"),
+                "message": "Explicit client operation queued. Camera/display changes alone do not count as highlighting geography.",
+                "mapUpdate": {"actions": [result]}}
+
+    @staticmethod
+    def highlight_fulfilled(context: AgentRunContext, target: str | None = None, requested: str | None = None, target_name: str = "") -> bool:
+        """Only retained, nontransparent target paint fulfills a visible highlight."""
+        if target is None:
+            if context.visual_requirements:
+                return all(AgentTools.highlight_fulfilled(context, item["target"], item["color"], item.get("name", "")) for item in context.visual_requirements)
+            return all(AgentTools.highlight_fulfilled(context, item) for item in context.visual_targets or [context.highlight_target])
+        for layer in context.overlays.values():
+            if not layer.get("touchedByRun") or not layer.get("visible", True) or not layer.get("matchingFeatureCount", layer.get("featureCount", 0)):
+                continue
+            types = set(layer.get("geometryTypes", []))
+            if target_name and " ".join(layer.get("targetName", "").casefold().split()) != " ".join(target_name.casefold().split()):
+                continue
+            if target == "city" and layer.get("kind") != "city-boundary":
+                continue
+            if target == "roads" and not types & {"LineString", "MultiLineString"}:
+                continue
+            if target == "points" and not types & {"Point", "MultiPoint"}:
+                continue
+            paint = layer.get("style", {})
+            expected = requested if requested is not None else context.requested_colors.get(target, context.requested_color)
+            line_visible = paint.get("opacity", .85) > 0 and paint.get("lineWidth", 3) > 0
+            point_visible = paint.get("opacity", .85) > 0 and paint.get("pointRadius", 7) > 0
+            fill_visible = paint.get("fillOpacity", .18) > 0
+            if types & {"Polygon", "MultiPolygon"}:
+                if target == "city" and any(paint.get(key, paint.get("color") if key == "fillColor" else None) != value for key, value in context.requested_paints.items()):
+                    continue
+                if (fill_visible and (not expected or paint.get("fillColor", paint.get("color")) == expected)
+                        or line_visible and (not expected or paint.get("color") == expected)):
+                    return True
+            elif types & {"LineString", "MultiLineString"} and line_visible and (not expected or paint.get("color") == expected):
+                return True
+            elif types & {"Point", "MultiPoint"} and point_visible and (not expected or paint.get("color") == expected):
+                return True
+        if target in {"layer", "points"}:
+            for layer in context.map_context.get("studio", {}).get("layers", []):
+                expected = requested if requested is not None else context.requested_colors.get(target, context.requested_color)
+                if (layer["id"] in context.styled_studio_layers and layer.get("visible", True)
+                        and layer.get("opacity", .85) > 0 and (not expected or layer.get("color") == expected)):
+                    return True
+        return False
+
     @staticmethod
     def _geographic_bounds(context: AgentRunContext) -> list[float] | None:
         scope = context.map_context.get("scope", {})
@@ -1193,6 +1733,18 @@ class AgentTools:
                     layer[key] = list(dict.fromkeys(item for item in fields[:32] if isinstance(item, str) and 1 <= len(item) <= 128)) if isinstance(fields, list) else []
                 if raw.get("visualization") in STUDIO_VISUALIZATIONS:
                     layer["visualization"] = raw["visualization"]
+                if isinstance(raw.get("visible"), bool):
+                    layer["visible"] = raw["visible"]
+                opacity = _number(raw.get("opacity"))
+                if opacity is not None and 0 <= opacity <= 1:
+                    layer["opacity"] = opacity
+                if isinstance(raw.get("locked"), bool):
+                    layer["locked"] = raw["locked"]
+                if isinstance(raw.get("color"), str):
+                    try:
+                        layer["color"] = map_actions.color(raw["color"], reset=True)
+                    except ServiceError:
+                        pass
                 if isinstance(raw.get("field"), str) and raw["field"] in layer["numericFields"] + layer["categoricalFields"] + layer["timeFields"]:
                     layer["field"] = raw["field"]
                 count = _number(raw.get("featureCount"))
@@ -1211,6 +1763,46 @@ class AgentTools:
             if isinstance(raw_studio.get("selectedLayerId"), str) and raw_studio["selectedLayerId"] in seen:
                 studio["selectedLayerId"] = raw_studio["selectedLayerId"]
             result["studio"] = studio
+        raw_actions = value.get("mapActions")
+        if isinstance(raw_actions, dict) and raw_actions.get("version") == 1:
+            inventory = {"version": 1, "layers": [], "capabilities": ["add_layer", *map_actions.ACTION_KEYS]}
+            seen = set()
+            for raw in raw_actions.get("layers", [])[:32] if isinstance(raw_actions.get("layers"), list) else []:
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    layer_id = map_actions.identifier(raw.get("id"))
+                except ServiceError:
+                    continue
+                if layer_id in seen:
+                    continue
+                seen.add(layer_id)
+                layer = {"id": layer_id, "name": _text(raw.get("name"), 120), "visible": raw.get("visible") is not False}
+                for key in ("geometryTypes", "numericFields", "categoricalFields"):
+                    fields = raw.get(key)
+                    layer[key] = list(dict.fromkeys(field for field in fields[:32] if isinstance(field, str) and 1 <= len(field) <= 128)) if isinstance(fields, list) else []
+                if _bounds(raw.get("bounds")):
+                    layer["bounds"] = _bounds(raw["bounds"])
+                count = _number(raw.get("featureCount"))
+                if count is not None and 0 <= count <= 10000 and count.is_integer():
+                    layer["featureCount"] = int(count)
+                matching = _number(raw.get("matchingFeatureCount"))
+                if matching is not None and 0 <= matching <= layer.get("featureCount", 10000) and matching.is_integer():
+                    layer["matchingFeatureCount"] = int(matching)
+                try:
+                    layer["style"] = map_actions.style(raw.get("style", {}))
+                except ServiceError:
+                    layer["style"] = {}
+                source = raw.get("source")
+                if isinstance(source, dict):
+                    layer["source"] = {key: _text(source[key], 240) for key in ("name", "attribution", "license", "caveat") if isinstance(source.get(key), str)}
+                    try:
+                        if source.get("url"):
+                            layer["source"]["url"] = validate_web_url(source["url"])
+                    except ServiceError:
+                        pass
+                inventory["layers"].append(layer)
+            result["mapActions"] = inventory
         if "scope" in value:
             raw_scope = value["scope"]
             if not isinstance(raw_scope, dict) or raw_scope.get("type") not in ("viewport", "selection", "layer", "workspace"):

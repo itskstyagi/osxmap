@@ -14,6 +14,8 @@ behavior:
 - OSM-first place lookup, durable local pins/areas/routes, and animated local Dijkstra driving routes over OSM road data.
 - An OpenAI-compatible map agent that turns natural-language requests into validated city, place, and route map updates.
 - Scoped Studio operations over already-loaded datasets and revision-guarded workspace rollback/undo.
+- Source-backed city/road highlights and a declarative client map API for geometry,
+  styling, visibility, labels, camera, basemap, and terrain controls.
 
 ## Run
 
@@ -53,15 +55,41 @@ The HTTP API listens on `PORT` and the agent event socket listens on `PORT + 1`
 map updates, errors, and cancellation events on the loopback WebSocket. Socket
 origin checks allow only local browser origins even when `ALLOWED_ORIGINS=*`.
 
-Agent requests use a fixed tool allowlist over existing city, place, route, and
+Agent requests use a fixed tool allowlist over existing city, place, route, geometry, and
 workspace services. They cannot make arbitrary HTTP requests, read files, run
 SQL, or receive provider credentials. Model prompts and responses are not
 persisted. Agent-created pins, areas, selected-city context, and active routes
 use the same local workspace store as manual controls. `clear map` is an
 explicit workspace mutation that clears these items and the visible map state.
 
+`highlight_city(cityRef, style?)` retrieves the verified OSM city polygon and queues
+an explicit filled/outlined geographic overlay. `highlight_roads(query, nearRef?,
+classes?, style?)` retrieves actual bounded highway line geometry. City lookup
+revalidates OSM identity, country, name, and settlement classification; road queries
+are generated from escaped literal names and reviewed classes. Neither reader
+substitutes a bbox, route, or randomly generated point distribution.
+
+The read-only endpoints are `GET /api/map/city-boundary?query=Noida&countryCode=IN`
+and `GET /api/map/roads?query=roads&west=...&south=...&east=...&north=...&classes=primary,residential`.
+They share existing public-service queues, cache and cooldown policy. Road results
+state their extent and partial coverage; OSM administrative geometry is not a
+legally certified municipal boundary. Crops exceeding provider limits are reported
+explicitly, not silently sampled or transformed into a rectangular replacement.
+
+`plot_points` and `draw_geometry` use verified place references or explicit user
+annotation coordinates. `map_action` controls existing geographic layer styles,
+visibility, filtering, ordering, removal, view, basemap, terrain and display groups.
+Updates contain typed `actions` with inline GeoJSON, never executable code or model
+URLs. The browser validates a batch atomically and retains source metadata. Its
+bounded `mapContext.mapActions` inventory is available in Explore and Studio, so
+later requests can restyle an existing highlight. Colors are bounded literal
+hex/basic CSS names and numeric styles are finite. A camera-only update cannot
+complete a highlight request, and geographic overlays never count as population
+observations. Cancellation/undo use the existing guarded workspace transaction.
+
 Studio adds `studio_operation` for validated visualization, filtering, summary,
-high-value selection, scenario duplication, and comparison. Requests identify
+high-value selection, scenario duplication, comparison, exact-color styling,
+visibility, removal, and reordering. Requests identify
 an existing loaded layer and an explicit viewport, selection, layer, or workspace
 scope. The service passes a bounded context inventory as data to the model and
 queues a validated operation for browser-side computation; it does not claim to

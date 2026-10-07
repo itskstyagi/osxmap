@@ -40,7 +40,7 @@ with mock.patch.object(pathlib.Path, "exists", lambda path: False if path.name =
 
 
 def main() -> int:
-    names = sys.argv[1:] or ["backend.test_server", "backend.test_agent_studio", "backend.test_agent_web", "backend.test_agent_population", "backend.test_web_sources", "backend.test_raster_sources"]
+    names = sys.argv[1:] or ["backend.test_server", "backend.test_agent_studio", "backend.test_agent_web", "backend.test_agent_population", "backend.test_agent_map_actions", "backend.test_map_geometry", "backend.test_web_sources", "backend.test_raster_sources"]
     with tempfile.TemporaryDirectory(prefix="meridian-backend-tests-") as directory:
         environment = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP") if key in os.environ}
         environment.update({

@@ -19,6 +19,14 @@ export const VISUALIZATIONS = {
   tactical: { label: 'Tactical', description: 'Point symbols for supplied features; no inferred operational status.' },
 };
 
+const NAMED_COLORS = {
+  black: '#000000', silver: '#c0c0c0', gray: '#808080', grey: '#808080', white: '#ffffff',
+  maroon: '#800000', red: '#ff0000', purple: '#800080', fuchsia: '#ff00ff', magenta: '#ff00ff',
+  green: '#008000', lime: '#00ff00', olive: '#808000', yellow: '#ffff00', navy: '#000080',
+  blue: '#0000ff', teal: '#008080', aqua: '#00ffff', cyan: '#00ffff', orange: '#ffa500',
+  pink: '#ffc0cb', brown: '#a52a2a', gold: '#ffd700', violet: '#ee82ee', indigo: '#4b0082',
+};
+
 const MAX_FEATURES = 10000;
 const MAX_POSITIONS = 100000;
 const EPSILON = 1e-10;
@@ -37,6 +45,29 @@ function record(value, path) {
     if (descriptor.get || descriptor.set) throw new Error(`${path}.${key} must not be an accessor.`);
   }
   return value;
+}
+
+export function normalizeColor(value) {
+  if (value === '') return '';
+  if (typeof value !== 'string') throw new Error('Color must be a hex color or basic CSS color name; use an empty string to restore the palette.');
+  const color = value.trim().toLowerCase();
+  if (Object.hasOwn(NAMED_COLORS, color)) return NAMED_COLORS[color];
+  if (/^#[0-9a-f]{6}$/.test(color)) return color;
+  if (/^#[0-9a-f]{3}$/.test(color)) return `#${[...color.slice(1)].map((digit) => digit.repeat(2)).join('')}`;
+  throw new Error('Color must be a hex color or basic CSS color name; use an empty string to restore the palette.');
+}
+
+export function normalizeLayerStyle(value) {
+  record(value, 'Layer style');
+  if (Object.getOwnPropertySymbols(value).length) throw new Error('Layer style must contain JSON properties.');
+  const style = {};
+  if (Object.hasOwn(value, 'color')) style.color = normalizeColor(value.color);
+  for (const [key, label, minimum, maximum] of [['opacity', 'Opacity', 0, 1], ['lineWidth', 'Line width', 1, 24], ['pointRadius', 'Point radius', 1, 40]]) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (typeof value[key] !== 'number' || !Number.isFinite(value[key]) || value[key] < minimum || value[key] > maximum) throw new Error(`${label} must be a number from ${minimum} to ${maximum}.`);
+    style[key] = value[key];
+  }
+  return style;
 }
 
 function array(value, path, minimum = 0) {
@@ -350,8 +381,7 @@ export function makeLayer(collection, options = {}) {
   if (!Object.hasOwn(VISUALIZATIONS, visualization)) throw new Error(`Unsupported visualization "${visualization}".`);
   const palette = options.palette ?? 'olive';
   if (!Object.hasOwn(PALETTES, palette)) throw new Error(`Unknown palette "${palette}".`);
-  const opacity = options.opacity ?? 0.75;
-  if (typeof opacity !== 'number' || !Number.isFinite(opacity) || opacity < 0 || opacity > 1) throw new Error('Opacity must be a number from 0 to 1.');
+  const style = { color: '', opacity: 0.75, ...normalizeLayerStyle(options) };
   const asSource = (source) => typeof source === 'string' ? { name: source } : source && typeof source === 'object' ? source : {};
   const inherited = asSource(data.source ?? data.metadata?.source);
   const provided = asSource(options.source);
@@ -369,7 +399,7 @@ export function makeLayer(collection, options = {}) {
   return {
     id: options.id || globalThis.crypto?.randomUUID?.() || `layer-${Date.now().toString(36)}-${++nextId}`,
     name: String(options.name || data.name || source.name), data, source, visualization,
-    field: options.field ?? '', units: options.units ?? '', palette, opacity,
+    field: options.field ?? '', units: options.units ?? '', palette, ...style,
     visible: options.visible ?? true, locked: options.locked ?? false,
     filters: { categoryField: '', category: '', min: null, max: null, viewport: false, ...options.filters },
     timeField: options.timeField ?? '',
@@ -712,6 +742,7 @@ function interpolatedFeatures(points, field, visualization, notes) {
 }
 
 export function renderCollection(layer, context = {}) {
+  const { color = '' } = normalizeLayerStyle(layer);
   const visualization = layer.visualization || 'points';
   if (!Object.hasOwn(VISUALIZATIONS, visualization)) throw new Error(`Unsupported visualization "${visualization}".`);
   if (!Object.hasOwn(PALETTES, layer.palette || 'olive')) throw new Error(`Unknown palette "${layer.palette}".`);
@@ -778,11 +809,14 @@ export function renderCollection(layer, context = {}) {
     : 'Signed heatmap values use relative min-max weights, not absolute mass or area-normalized density. The legend reports source values, not smoothed intensity.');
   if (visualization === 'flow') notes.add('Only supplied line geometry is shown; no routes, movement, or direction are inferred.');
   if (!features.length) notes.add('No display geometry remains after filtering or interpolation; no observations were invented.');
-  if (metrics.validCount && metrics.min === metrics.max) notes.add('Constant displayed values use the palette midpoint.');
+  if (color) notes.add(visualization === 'heatmap'
+    ? `Single-color heatmap (${color}); increasing opacity represents relative intensity, not a multicolor value ramp. Source values and weights are unchanged.`
+    : `Uniform color (${color}); color does not encode value differences. Source values are unchanged.`);
+  else if (metrics.validCount && metrics.min === metrics.max) notes.add('Constant displayed values use the palette midpoint.');
   const caveat = [...notes].join(' ');
   return {
     data, metrics, sourceMetrics: metricsFor(filtered, field), inputCount: filtered.features.length, geometryType, caveat,
-    legend: { title, unit, min: metrics.min, mid: metrics.min === null ? null : between(metrics.min, metrics.max, 0.5), max: metrics.max, colors: [...palette.colors], note: caveat },
+    legend: { title, unit, min: metrics.min, mid: metrics.min === null ? null : between(metrics.min, metrics.max, 0.5), max: metrics.max, colors: color ? [color] : [...palette.colors], ...(color ? { uniformColor: color } : {}), note: caveat },
   };
 }
 

@@ -1,5 +1,7 @@
 import { AGENT_SOCKET_URL, API_BASE_URL, apiPath } from './config.js';
 import { MeridianStudio } from './studio.js';
+import * as MeridianStudioData from './studio-data.js';
+import { MeridianMapActions, MAP_ACTION_NAMES } from './map-actions.js';
 
 const TILE_ZOOM = 14;
 const ACCENT = '#d0dac5';
@@ -46,7 +48,7 @@ function coordinateQuery(query) {
 }
 
 function mapInstruction(query) {
-  return /^(?:find|show|hide|what|where|which|how|tell|take|plan|create|make|generate|plot|map|draw|go|zoom|clear|save|pin|add|remove|turn|enable|disable|switch|search|route|navigate|locate|analy[sz]e|summari[sz]e|compare|filter|visuali[sz]e|undo|redo|duplicate|open|research|browse|investigate|fetch|download|load)\b/i.test(query) ||
+  return /^(?:find|show|hide|highlight|colou?r|recolou?r|style|restyle|outline|mark|what|where|which|how|tell|take|plan|create|make|generate|plot|map|draw|go|zoom|clear|save|pin|add|remove|turn|enable|disable|switch|search|route|navigate|locate|analy[sz]e|summari[sz]e|compare|filter|visuali[sz]e|undo|redo|duplicate|open|research|browse|investigate|fetch|download|load)\b/i.test(query) ||
     /\S\s+to\s+\S|\b(?:near|nearby|around|above|below)\b|\?$|\b(?:on|off)\s*$/i.test(query);
 }
 
@@ -382,7 +384,7 @@ function applyMonochrome(map, theme, mode = 'route') {
   if (!originalFillOpacity.has(map)) originalFillOpacity.set(map, new Map());
   const fillOpacity = originalFillOpacity.get(map);
   for (const layer of map.getStyle().layers || []) {
-    if (/^(?:local-|geo-|studio-)/.test(layer.id)) continue;
+    if (/^(?:local-|geo-|studio-|agent-overlay-)/.test(layer.id)) continue;
     const id = layer.id.toLowerCase();
     try {
       map.setLayoutProperty(layer.id, 'visibility', satellite && layer.type === 'fill-extrusion' ? 'none' : 'visible');
@@ -548,6 +550,7 @@ class CityExplorer {
     this.generation = 0;
     this.previewVisible = true;
     this.terrainEnabled = false;
+    this.terrainExaggeration = 1.25;
     this.layerPreferences = { labels: true, buildings: true, roads: true, places: true, boundaries: true, contours: true, hillshade: true };
     this.contourStrength = 0.55;
     this.regionalImageryEnabled = preference('regionalImagery') !== 'off';
@@ -592,6 +595,11 @@ class CityExplorer {
     this.setTheme(this.theme);
     this.bindUi();
     this.createMap();
+    this.overlayActions = new MeridianMapActions(this);
+    window.MeridianMap = this.overlayActions.publicAPI();
+    window.MeridianStudioData = MeridianStudioData;
+    if (this.map.isStyleLoaded()) this.overlayActions.render();
+    this.renderMapActionLegend();
     this.studio = new MeridianStudio(this);
     this.bootstrap();
     this.connectAgentSocket();
@@ -674,6 +682,7 @@ class CityExplorer {
     document.querySelectorAll('[data-open-routes]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView('routes')));
     document.querySelectorAll('[data-layer-toggle]').forEach((button) => button.addEventListener('click', () => this.toggleMapLayer(button.dataset.layerToggle)));
     el['contour-strength'].addEventListener('input', () => {
+      if (this.markManualChange()) return;
       this.contourStrength = Number(el['contour-strength'].value) / 100;
       if (this.contourFrame) return;
       this.contourFrame = window.requestAnimationFrame(() => {
@@ -731,6 +740,7 @@ class CityExplorer {
       this.imageryMetadataController?.abort();
       this.terrainPointController?.abort();
       this.studio?.destroy();
+      this.overlayActions?.save();
       this.saveExploreState();
       window.cancelAnimationFrame(this.contourFrame);
       clearTimeout(this.mapMetadataTimer);
@@ -790,13 +800,16 @@ class CityExplorer {
 
   captureMapAction() {
     const center = this.map?.getCenter?.();
-    return JSON.parse(JSON.stringify({
+    const snapshot = JSON.parse(JSON.stringify({
       camera: center ? { center: [center.lng, center.lat], zoom: this.map.getZoom?.(), bearing: this.map.getBearing?.(), pitch: this.map.getPitch?.() } : null,
       selected: this.selected, mapMode: this.mapMode, theme: this.theme, terrainEnabled: this.terrainEnabled,
-      layerPreferences: this.layerPreferences, contourStrength: this.contourStrength,
+      layerPreferences: this.layerPreferences, contourStrength: this.contourStrength, terrainExaggeration: this.terrainExaggeration,
       geo: { ...this.geo, routeAnimation: null, routeStops: this.routePlan().map((stop) => ({ ...stop, suggestions: [] })) },
       searchResults: this.searchResults, researchArea: this.researchArea, studio: this.studio?.snapshot(), comparing: Boolean(this.studio?.compareMap),
     }));
+    // Frozen overlay datasets are shared across history instead of repeatedly cloning geometry.
+    if (this.overlayActions) snapshot.overlays = this.overlayActions.captureSnapshot();
+    return snapshot;
   }
 
   recordMapAction(label, before, options = {}) {
@@ -814,7 +827,8 @@ class CityExplorer {
     return JSON.stringify({
       selected: this.selected, pins: this.geo.pins, areas: this.geo.areas, route: this.geo.route,
       stops: this.routePlan().map((stop) => ({ query: stop.query, place: stop.place })), searchResults: this.searchResults, researchArea: this.researchArea,
-      mapMode: this.mapMode, terrainEnabled: this.terrainEnabled, preferences: this.layerPreferences, studio,
+      mapMode: this.mapMode, theme: this.theme, contourStrength: this.contourStrength, terrainEnabled: this.terrainEnabled, terrainExaggeration: this.terrainExaggeration,
+      preferences: this.layerPreferences, studio, overlays: this.overlayActions?.guard(),
     });
   }
 
@@ -873,6 +887,8 @@ class CityExplorer {
       this.contourStrength = snapshot.contourStrength ?? .55;
       this.mapMode = snapshot.mapMode;
       this.terrainEnabled = snapshot.terrainEnabled;
+      this.terrainExaggeration = snapshot.terrainExaggeration ?? 1.25;
+      if (snapshot.theme && snapshot.theme !== this.theme) this.setTheme(snapshot.theme);
       if (this.map) {
         if (this.selected && this.features) this.resetMapForLocation({ immediate: true });
         else if (this.features) this.clearCityData();
@@ -882,6 +898,10 @@ class CityExplorer {
       }
       if (snapshot.studio) this.studio?.restoreSnapshot(snapshot.studio, { restoreCamera: false });
       if (!snapshot.comparing) this.studio?.stopCompare();
+      if (this.overlayActions) {
+        const result = this.overlayActions.restoreSnapshot(snapshot.overlays || { version: 1, layers: [] });
+        if (!result.applied) throw new Error(result.reason);
+      }
       this.researchArea = snapshot.researchArea ? JSON.parse(JSON.stringify(snapshot.researchArea)) : null;
       this.renderResearchArea();
       this.renderWorkspace();
@@ -899,11 +919,6 @@ class CityExplorer {
     this.agentSnapshot = null;
     if (!before || !this.agentDidMutate) return;
     if (this.agentLocalConflict) {
-      if (event.rolledBack === true && event.workspace) {
-        this.applyWorkspaceSnapshot(event.workspace);
-        this.renderWorkspace();
-        this.renderGeography();
-      }
       this.setGeoStatus('Manual changes occurred during the operation. They were not overwritten; automatic map undo is unavailable for this run.', true);
       this.agentDidMutate = false;
       return;
@@ -925,17 +940,19 @@ class CityExplorer {
       this.setGeoStatus('Wait for the pending undo before changing map data.', true);
       return true;
     }
-    if ((this.agentSubmitting || this.agentRunId) && !this.applyingAgentMap) this.agentLocalConflict = true;
+    if ((this.agentSubmitting || this.agentRunId) && !this.applyingAgentMap && !this.applyingMapActions && !this.restoringAction) this.agentLocalConflict = true;
     return false;
   }
 
   saveExploreState() {
+    if (this.applyingMapActions || this.applyingAgentMap || this.agentSubmitting || this.agentRunId || this.restoringAction) return;
+    if (this.map) savePreference('mapMode', this.mapMode);
     if (!this.workspaceReady || this.productMode === 'studio' || !this.map?.getCenter) return;
     const center = this.map.getCenter();
     const saved = savePreference('meridian.explore.v1', JSON.stringify({
       camera: { center: [center.lng, center.lat], zoom: this.map.getZoom(), pitch: this.map.getPitch(), bearing: this.map.getBearing() },
       selected: this.selected, mapMode: this.mapMode, terrainEnabled: this.terrainEnabled,
-      layerPreferences: this.layerPreferences, contourStrength: this.contourStrength,
+      layerPreferences: this.layerPreferences, contourStrength: this.contourStrength, terrainExaggeration: this.terrainExaggeration,
       routeStops: this.routePlan().map((stop) => ({ query: stop.query, place: stop.place, suggestions: [] })),
     }));
     if (!saved && !this.exploreStorageUnavailable) {
@@ -957,6 +974,72 @@ class CityExplorer {
         this.setGeoStatus('Map service could not save the active route. Your current map remains usable; Studio exports are available locally.', true);
       }
     });
+  }
+
+  mapActionPadding() {
+    const height = window.innerHeight || 900;
+    const stack = document.querySelector('.map-feedback-stack')?.getBoundingClientRect();
+    const legendSpace = this.overlayActions?.layers.length && this.elements['map-overlay-legend']?.hidden ? 56 : 0;
+    const bottom = Math.max(110, stack ? height - stack.top + 24 + legendSpace : 150);
+    if (window.innerWidth <= 900) return { top: Math.min(200, height * .28), left: 24, right: 24, bottom: Math.min(height * .48, bottom) };
+    return { top: 110, left: this.productMode === 'studio' ? 420 : this.manualControlsOpen ? 420 : 48, right: this.productMode === 'studio' ? 360 : 48, bottom: Math.min(height * .4, bottom) };
+  }
+
+  renderMapActionLegend() {
+    const legend = this.elements['map-overlay-legend'];
+    if (!legend) return;
+    const layers = this.overlayActions?.getLayers() || [];
+    legend.hidden = !layers.length;
+    const summary = this.elements['map-overlay-summary'];
+    const top = [...layers].reverse().find((layer) => layer.visible) || layers.at(-1);
+    summary.textContent = top ? `${top.name} / ${layers.length} overlay${layers.length === 1 ? '' : 's'}` : 'Map overlays';
+    this.elements['map-overlay-swatch'].style.backgroundColor = top?.style.color || '#d0dac5';
+    const content = this.elements['map-overlay-list'];
+    content.replaceChildren();
+    const append = (parent, tag, value, className = '') => {
+      const node = document.createElement(tag);
+      node.textContent = value;
+      if (className) node.className = className;
+      parent.append(node);
+      return node;
+    };
+    const act = (action) => {
+      const result = this.overlayActions.execute(action);
+      if (!result.applied) this.setGeoStatus(result.reason, true);
+    };
+    for (const layer of [...layers].reverse()) {
+      const row = append(content, 'section', '', 'map-overlay-row');
+      const header = append(row, 'div', '', 'map-overlay-heading');
+      const swatch = append(header, 'i', '', 'map-overlay-swatch');
+      swatch.style.backgroundColor = layer.style.color;
+      swatch.setAttribute('aria-hidden', 'true');
+      append(header, 'strong', layer.name);
+      append(row, 'small', `${layer.matchingFeatureCount.toLocaleString()}${layer.filter ? ` / ${layer.featureCount.toLocaleString()}` : ''} features / ${layer.geometryTypes.join(', ')}${layer.visible ? '' : ' / Hidden'}`);
+      const tools = append(row, 'div', '', 'map-overlay-tools');
+      const picker = append(tools, 'input', '');
+      picker.type = 'color'; picker.value = layer.style.color;
+      picker.setAttribute('aria-label', `Color ${layer.name}`);
+      picker.addEventListener('change', () => act({ action: 'style_layer', layerId: layer.id, style: { color: picker.value } }));
+      for (const [label, action] of [
+        [`Fit ${layer.name}`, { action: 'fit_layer', layerId: layer.id }],
+        [`${layer.visible ? 'Hide' : 'Show'} ${layer.name}`, { action: 'set_visibility', layerId: layer.id, visible: !layer.visible }],
+        [`Remove ${layer.name}`, { action: 'remove_layer', layerId: layer.id }],
+      ]) {
+        const button = append(tools, 'button', label.split(' ')[0]);
+        button.type = 'button'; button.setAttribute('aria-label', label);
+        button.addEventListener('click', () => act(action));
+      }
+      const source = append(row, 'details', '', 'map-overlay-source');
+      append(source, 'summary', layer.source.name || 'User-provided GeoJSON');
+      if (layer.source.url) {
+        const link = append(source, 'a', 'Source');
+        link.href = layer.source.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      }
+      append(source, 'small', [layer.source.attribution, layer.source.license, layer.source.caveat].filter(Boolean).join(' / '));
+      if (layer.filter) append(source, 'small', `Filter: ${layer.filter.field} ${layer.filter.operator} ${JSON.stringify(layer.filter.value)}`);
+    }
+    const status = this.elements['map-overlay-storage'];
+    status.textContent = this.overlayActions?.persistenceMessage || 'Layers stay on this device. Agent context contains metadata only.';
   }
 
   async copyCoordinates() {
@@ -1126,7 +1209,7 @@ class CityExplorer {
 
   layerMatchesPreference(layer, name) {
     const id = layer.id.toLowerCase();
-    if (/^(?:geo-|studio-|local-search-result|local-city-focus)/.test(id)) return false;
+    if (/^(?:geo-|studio-|agent-overlay-|local-search-result|local-city-focus)/.test(id)) return false;
     return name === 'labels' ? layer.type === 'symbol'
       : name === 'buildings' ? /building|local-selection|local-hover/.test(id)
       : name === 'roads' ? /road|highway|bridge|tunnel|transportation/.test(id)
@@ -1211,6 +1294,7 @@ class CityExplorer {
       this.agentSocket = null;
       if (this.agentRunId || this.agentSubmitting) {
         this.agentPostSerial = 0;
+        this.settleAgentAction({ type: 'agent.completed', runId: this.agentRunId, reversible: false });
         this.finishAgentRun();
         this.setAgentActivity({ connection: 'RETRYING', request: 'Connection interrupted. Map changes already applied are kept; retry your instruction after reconnecting.', tool: 'Request failed' });
       }
@@ -1327,6 +1411,9 @@ class CityExplorer {
     this.agentCancelRequested = false;
     this.agentRunId = '';
     this.agentPostSerial = 0;
+    this.overlayActions?.save();
+    this.renderMapActionLegend();
+    this.saveExploreState();
     this.renderAgentActivity();
     this.updateActionChip();
   }
@@ -1462,6 +1549,7 @@ class CityExplorer {
       pins: this.geo.pins.slice(0, 20).map((pin) => point(pin)).filter(Boolean),
       areas: this.geo.areas.slice(0, 8).map((area) => ({ id: String(area.id || '').slice(0, 80), label: String(area.label || '').slice(0, 160), areaSquareMeters: numeric(area.summary?.areaSquareMeters), bounds: areaBounds(area) })).filter((area) => area.bounds),
       ...(this.productMode === 'studio' ? this.studio?.agentContext() : {}),
+      mapActions: this.overlayActions?.context() || { version: 1, layers: [], capabilities: [...MAP_ACTION_NAMES] },
     };
   }
 
@@ -1558,6 +1646,10 @@ class CityExplorer {
   }
 
   clearWorkspaceLocal(clearCity = false) {
+    if (this.overlayActions) {
+      const result = this.overlayActions.execute({ action: 'clear_overlays' }, { fromAgent: Boolean(this.applyingAgentMap), recordHistory: false });
+      if (!result.applied) throw new Error(result.reason);
+    }
     this.researchArea = null;
     this.renderResearchArea();
     this.geo.pins = [];
@@ -1597,6 +1689,42 @@ class CityExplorer {
 
   applyAgentMapUpdate(update) {
     if (!update || typeof update !== 'object' || Array.isArray(update)) return false;
+    const reject = (reason) => {
+      this.agentApplicationError = `Map update was not applied: ${reason}`;
+      this.agentResultSummary = this.agentApplicationError;
+      this.setGeoStatus(this.agentApplicationError, true);
+      return false;
+    };
+    const allowed = ['actions', 'dataset', 'studio', 'clear', 'researchArea', 'selectedCity', 'places', 'routeStops', 'route', 'workspace', 'view'];
+    if (!Object.keys(update).length) return reject('No map changes were declared.');
+    if (this.applyingAgentMap && this.agentLocalConflict) return reject('Manual map changes occurred during this request. Later agent updates were not applied.');
+    for (const key of Object.keys(update)) if (!allowed.includes(key)) return reject(`Unknown map update key "${key}".`);
+    if (!Object.hasOwn(update, 'actions')) {
+      try { return this.applyLegacyAgentMapUpdate(update); } catch (error) { return reject(error.message); }
+    }
+    if (!this.overlayActions) return reject('The map action dispatcher is unavailable.');
+    if (!Array.isArray(update.actions) || !update.actions.length) return reject('mapUpdate.actions must be a non-empty array of declared map actions.');
+    const { actions, ...legacy } = update;
+    const mixed = Object.keys(legacy).length > 0;
+    if (mixed) { try { this.overlayActions.prepare(actions); } catch (error) { return reject(error.message); } }
+    const before = mixed ? this.captureMapAction() : null;
+    const mode = this.productMode, workspace = this.workspaceView;
+    try {
+      if (mixed && !this.applyLegacyAgentMapUpdate(legacy)) throw new Error(this.agentApplicationError || 'The accompanying dataset or map update was rejected.');
+      const result = this.overlayActions.execute(actions, { fromAgent: true });
+      if (!result.applied) throw new Error(result.reason);
+      this.agentResultSummary = mixed ? this.agentResultSummary : `${result.actionCount} map action${result.actionCount === 1 ? '' : 's'} applied${result.layerIds.length ? ` / ${result.layerIds.length} overlay${result.layerIds.length === 1 ? '' : 's'}` : ''}`;
+      return true;
+    } catch (error) {
+      if (before) {
+        try { this.restoreMapAction(before); if (this.productMode !== mode) this.setProductMode(mode); if (this.workspaceView !== workspace) this.setWorkspaceView(workspace); }
+        catch (restoreError) { return reject(`${error.message} Restoration is pending: ${restoreError.message}`); }
+      }
+      return reject(error.message);
+    }
+  }
+
+  applyLegacyAgentMapUpdate(update) {
     if (update.dataset) {
       try {
         const layer = this.studio?.applySourcedDataset(update.dataset);
@@ -1673,8 +1801,10 @@ class CityExplorer {
     this.renderSearchResults();
     if (this.productMode === 'studio') this.studio?.captureAgentArtifacts(update);
     this.updateIntroCard();
-    this.applyAgentView(update.view);
     const route = this.geo.route;
+    const fitted = this.applyAgentView(update.view);
+    const changed = Boolean(selected || Array.isArray(update.places) || Array.isArray(update.routeStops) || Object.hasOwn(update, 'route') || update.workspace || fitted);
+    if (!changed) throw new Error('No valid map changes were declared.');
     this.agentResultSummary = route
       ? `${formatDistance(route.summary.distanceMeters) || 'Distance unavailable'} / ${formatDuration(route.summary.durationSeconds) || 'Time unavailable'} / driving`
       : this.searchResults.length
@@ -1694,8 +1824,8 @@ class CityExplorer {
     this.map.on('style.load', () => {
       this.addTerrainSource();
       this.applyTerrain();
-      this.addCartographyLayers();
-      addLocalLayers(this.map, this.theme);
+      if (!this.map.getSource('local-imagery')) this.addCartographyLayers();
+      if (!this.map.getSource('local-city')) addLocalLayers(this.map, this.theme);
       this.applyMapMode();
       this.map.getSource('local-city')?.setData({ type: 'FeatureCollection', features: [...this.features.values()] });
       this.map.getSource(FOCUS_SOURCE)?.setData(this.selected ? this.focusFeature(this.selected) : EMPTY_COLLECTION);
@@ -1703,6 +1833,8 @@ class CityExplorer {
       this.renderSearchResults();
       this.renderResearchArea();
       this.studio?.renderMap();
+      try { this.overlayActions?.render({ force: true }); } catch (error) { this.showMapNotice(`Map overlays could not render: ${error.message}`); }
+      this.renderMapActionLegend();
       this.refreshMapMetadata();
       if (this.map.getLayer(PREVIEW_LAYER) && !this.previewBuildingEventsBound) {
         this.map.on('click', PREVIEW_LAYER, (event) => this.showBuilding(event));
@@ -1871,7 +2003,7 @@ class CityExplorer {
       this.map?.getSource('local-regional-imagery')?.setTiles([REGIONAL_IMAGERY.tiles]);
     }
     this.mapMode = mode;
-    savePreference('mapMode', mode);
+    if (!this.applyingMapActions && !this.applyingAgentMap) savePreference('mapMode', mode);
     document.getElementById('map-notice')?.classList.add('is-hidden');
     this.applyMapMode();
     if (mode === 'terrain' && !this.contourDem) this.showMapNotice('Contour library unavailable. Showing shaded terrain only.');
@@ -1888,6 +2020,8 @@ class CityExplorer {
     document.querySelectorAll('button[data-product-mode]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.productMode === mode)));
     this.setWorkspaceView('explore');
     this.studio?.activate(mode === 'studio');
+    this.overlayActions?.render();
+    this.renderMapActionLegend();
     this.updateActionChip();
   }
 
@@ -2011,12 +2145,13 @@ class CityExplorer {
     }
   }
 
-  applyTerrain() {
-    if (!this.map?.getSource(TERRAIN_SOURCE)) return;
+  applyTerrain(strict = false) {
+    if (!this.map?.getSource(TERRAIN_SOURCE)) { if (strict) throw new Error('The terrain source is not available.'); return; }
     const active = this.terrainEnabled && Boolean(this.map?.getSource(TERRAIN_SOURCE));
     try {
-      this.map?.setTerrain(active ? { source: TERRAIN_SOURCE, exaggeration: 1.25 } : null);
-    } catch {
+      this.map?.setTerrain(active ? { source: TERRAIN_SOURCE, exaggeration: this.terrainExaggeration ?? 1.25 } : null);
+    } catch (error) {
+      if (strict) throw error;
       // Keep map navigation available when elevation tiles cannot be initialized.
       this.terrainEnabled = false;
     }
@@ -2025,16 +2160,19 @@ class CityExplorer {
     button?.setAttribute('aria-label', this.terrainEnabled ? 'Disable 3D terrain view' : 'Enable 3D terrain view');
   }
 
-  setTerrainView(enabled, duration = 420) {
-    if (this.markManualChange()) return;
+  setTerrainView(enabled, duration = 420, exaggeration = this.terrainExaggeration ?? 1.25, strict = false) {
+    if (this.markManualChange()) return false;
     this.terrainEnabled = enabled;
-    this.applyTerrain();
+    this.terrainExaggeration = exaggeration;
+    this.applyTerrain(strict);
     this.studio?.onMapAppearanceChange();
     this.map.easeTo({ pitch: this.terrainEnabled ? 60 : 0, duration: motionDuration(duration) });
     this.saveExploreState();
+    return true;
   }
 
   setTheme(theme) {
+    if (this.map && this.markManualChange()) return;
     this.theme = theme === 'light' ? 'light' : 'dark';
     document.documentElement.dataset.theme = this.theme;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', this.theme === 'dark' ? '#181b1a' : '#ecece8');
@@ -2067,6 +2205,7 @@ class CityExplorer {
       this.contourStrength = Number.isFinite(saved.contourStrength) ? Math.max(.1, Math.min(1, saved.contourStrength)) : .55;
       this.elements['contour-strength'].value = String(Math.round(this.contourStrength * 100));
       this.terrainEnabled = saved.terrainEnabled === true;
+      this.terrainExaggeration = Number.isFinite(saved.terrainExaggeration) && saved.terrainExaggeration >= 0 && saved.terrainExaggeration <= 5 ? saved.terrainExaggeration : 1.25;
       if (Array.isArray(saved.routeStops)) this.geo.routeStops = saved.routeStops.slice(0, MAX_ROUTE_STOPS).map((stop) => ({ query: String(stop.query || '').slice(0, 160), place: this.agentLocation(stop.place), suggestions: [] }));
       this.map.jumpTo({ center: camera.center, zoom: camera.zoom, bearing: Number.isFinite(camera.bearing) ? camera.bearing : 0, pitch: Number.isFinite(camera.pitch) ? Math.max(0, Math.min(78, camera.pitch)) : 0 });
       this.applyTerrain();
@@ -3601,7 +3740,7 @@ class CityExplorer {
     try {
       await deleteRequest('/api/workspace');
       this.clearWorkspaceLocal(false);
-      this.setGeoStatus('Pins, areas, the route plan, and current search markers were cleared.');
+      this.setGeoStatus('Pins, areas, overlays, the route plan, and current search markers were cleared.');
     } catch (error) {
       this.setGeoStatus(error.message, true);
     }

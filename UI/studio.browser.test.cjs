@@ -35,6 +35,14 @@ const fixture = {
 };
 
 const studyArea = { name: 'Noida', bounds: [77.3, 28.45, 77.5, 28.7], source: { name: 'Offline geocoder fixture', url: 'https://example.org/study-extent' }, caveat: 'Geocoded study extent, not an administrative boundary' };
+const overlayFixture = {
+  type: 'FeatureCollection', features: [
+    { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[77.32, 28.51], [77.38, 28.50], [77.44, 28.55], [77.41, 28.62], [77.35, 28.60], [77.32, 28.51]]] }, properties: { name: 'Offline Noida-shaped polygon', category: 'city', value: 10 } },
+    { type: 'Feature', geometry: { type: 'LineString', coordinates: [[77.33, 28.535], [77.38, 28.555], [77.43, 28.59]] }, properties: { name: 'Offline road geometry', category: 'road', value: 20 } },
+    { type: 'Feature', geometry: { type: 'Point', coordinates: [77.385, 28.565] }, properties: { label: '<script>literal station</script>', category: 'point', value: 30 } },
+  ],
+};
+const overlayAction = (id = 'browser-city', data = overlayFixture) => ({ action: 'add_layer', layer: { id, name: 'Noida / test geometry', data, style: { color: '#ff0000', fillColor: '#ff0000', fillOpacity: .35, opacity: .85, lineWidth: 5, pointRadius: 10, labels: true, labelColor: '#ffffff' }, source: { name: 'Offline browser fixture', url: 'https://example.org/boundary', attribution: 'Test contributors', license: 'Test fixture', caveat: 'Geometry is an offline browser fixture, not the actual Noida boundary or road network.' }, visible: true } });
 
 test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromium, timeout: 180000 }, async (t) => {
   const browser = await chromium.launch({ channel: process.env.MERIDIAN_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--enable-unsafe-swiftshader'] });
@@ -46,7 +54,8 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
   const sockets = [];
   let agentRunSequence = 0;
   let agentRunId = '';
-  page.on('pageerror', (error) => errors.push(error.message));
+  let lastMapContext;
+  page.on('pageerror', (error) => errors.push(error.stack || error.message));
   page.on('console', (message) => { if (message.type() === 'error' && /layers\.|paint\.|expression|TypeError|ReferenceError/.test(message.text())) styleErrors.push(message.text()); });
   await page.addInitScript(() => {
     let library;
@@ -70,6 +79,7 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
   await page.route('http://127.0.0.1:8787/**', (route) => {
     if (route.request().url().includes('/api/tiles/')) return route.fulfill({ status: 204 });
     if (route.request().url().includes('/api/agent/runs')) {
+      lastMapContext = route.request().postDataJSON()?.mapContext;
       agentRunId = `browser-test-run-${++agentRunSequence}`;
       return route.fulfill({ status: 202, json: { accepted: true, runId: agentRunId } });
     }
@@ -209,6 +219,149 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
       assert.match(await page.locator('#agent-response').innerText(), /Import a sourced GeoJSON dataset/);
       assert.equal(await page.locator('.studio-layer').count(), before);
       await page.locator('#agent-dismiss-result').click();
+    });
+    await t.test('Highlight requests render red polygon fill, real roads and points in Explore, not a camera-only focus', async () => {
+      assert.equal(await page.evaluate(() => typeof window.MeridianMap.execute), 'function');
+      assert.equal(await page.evaluate(() => typeof window.MeridianStudioData.normalizeCollection), 'function');
+      await page.locator('#search-input').fill('highlight map of Noida in Red');
+      await page.locator('#search-submit').click();
+      await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      assert.equal(lastMapContext.mapActions.version, 1);
+      assert(lastMapContext.mapActions.capabilities.includes('add_layer'));
+      assert.equal(JSON.stringify(lastMapContext.mapActions).includes('coordinates'), false);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { actions: [overlayAction(), { action: 'fit_layer', layerId: 'browser-city' }] } }));
+      await page.waitForFunction(() => window.__testMaps[0].getLayer('agent-overlay-browser-city-fill'));
+      await page.waitForFunction(() => window.__testMaps[0].isStyleLoaded() && window.__testMaps[0].queryRenderedFeatures({ layers: ['agent-overlay-browser-city-fill', 'agent-overlay-browser-city-line', 'agent-overlay-browser-city-point'] }).length > 0);
+      assert.equal(await page.locator('#studio-shell').isVisible(), false);
+      const rendered = await page.evaluate(() => {
+        const map = window.__testMaps[0], ids = ['fill', 'outline', 'line', 'point', 'label'].map((suffix) => `agent-overlay-browser-city-${suffix}`);
+        return { source: map.getStyle().sources['agent-overlay-browser-city-source'].data, layers: ids.map((id) => map.getStyle().layers.find((layer) => layer.id === id)), drawn: map.queryRenderedFeatures({ layers: ids }).map((feature) => feature.layer.id) };
+      });
+      assert.equal(rendered.source.features[0].geometry.coordinates[0].length, 6, 'The polygon is not a fabricated four-corner bbox');
+      assert.deepEqual(rendered.source.features[1].geometry.coordinates, overlayFixture.features[1].geometry.coordinates);
+      assert.equal(rendered.layers[0].paint['fill-color'], '#ff0000');
+      assert.equal(rendered.layers[1].paint['line-color'], '#ff0000');
+      assert.equal(rendered.layers[2].paint['line-color'], '#ff0000');
+      assert.equal(rendered.layers[3].paint['circle-color'], '#ff0000');
+      assert(rendered.drawn.includes('agent-overlay-browser-city-fill'));
+      assert(rendered.drawn.includes('agent-overlay-browser-city-line'));
+      assert(rendered.drawn.includes('agent-overlay-browser-city-point'));
+      assert.equal(rendered.source.features[2].properties.__meridianLabel, '<script>literal station</script>');
+      assert.equal(await page.locator('#map-overlay-legend').isVisible(), true);
+      await page.locator('#map-overlay-legend > summary').click();
+      await page.locator('#map-overlay-list .map-overlay-source > summary').click();
+      assert.match(await page.locator('#map-overlay-list').innerText(), /Test fixture.*offline browser fixture/);
+      assert.equal(await page.locator('#map-overlay-list a').getAttribute('rel'), 'noopener noreferrer');
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.completed', runId: agentRunId, reversible: false, message: 'Displayed supplied geographic geometry in red.' }));
+      await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
+      await page.locator('#agent-dismiss-result').click();
+      if (process.env.MERIDIAN_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.MERIDIAN_SCREENSHOT_DIR, 'meridian-overlay-red.png') });
+      await page.locator('#map-overlay-legend > summary').click();
+    });
+    await t.test('Client styles, filters, ordering and removal persist across map modes and style reload', async () => {
+      assert.equal(await page.evaluate(() => window.MeridianMap.styleLayer('browser-city', { color: 'blue' }).applied), true);
+      const blue = () => page.evaluate(() => window.__testMaps[0].getPaintProperty('agent-overlay-browser-city-fill', 'fill-color'));
+      assert.equal(await blue(), '#0000ff');
+      for (const mode of ['streets', 'terrain', 'satellite']) {
+        assert.equal(await page.evaluate((mode) => window.MeridianMap.setBasemap(mode).applied, mode), true);
+        assert.equal(await blue(), '#0000ff');
+        assert.equal(await page.evaluate(() => window.__testMaps[0].getLayoutProperty('agent-overlay-browser-city-fill', 'visibility')), 'visible');
+      }
+      await page.locator('button[data-product-mode="studio"]').click();
+      assert.equal(await blue(), '#0000ff');
+      await page.locator('button[data-product-mode="explore"]').click();
+      assert.equal(await blue(), '#0000ff');
+      assert.equal(await page.evaluate(() => window.MeridianMap.filterLayer('browser-city', 'value', 'gte', 20).applied), true);
+      await page.waitForFunction(() => window.__testMaps[0].getStyle().sources['agent-overlay-browser-city-source'].data.features.length === 2);
+      assert.equal(await page.evaluate(() => window.MeridianMap.getLayers()[0].featureCount), 3);
+      assert.equal(await page.evaluate(() => window.MeridianMap.filterLayer('browser-city', null).applied), true);
+      assert.equal(await page.evaluate(() => window.MeridianMap.setLayerVisibility('browser-city', false).applied), true);
+      await page.waitForFunction(() => window.__testMaps[0].getLayoutProperty('agent-overlay-browser-city-fill', 'visibility') === 'none');
+      assert.equal(await page.evaluate(() => window.MeridianMap.setLayerVisibility('browser-city', true).applied), true);
+      assert.equal(await page.evaluate((layer) => window.MeridianMap.addLayer(layer).applied, overlayAction('second-overlay').layer), true);
+      assert.equal(await page.evaluate(() => window.MeridianMap.moveLayer('browser-city', null).applied), true);
+      assert.deepEqual(await page.evaluate(() => window.MeridianMap.getLayers().map((layer) => layer.id)), ['second-overlay', 'browser-city']);
+      const invalid = await page.evaluate(() => window.MeridianMap.execute([{ action: 'style_layer', layerId: 'browser-city', style: { color: 'red' } }, { action: 'set_visibility', layerId: 'second-overlay', visible: 'false' }]));
+      assert.equal(invalid.applied, false);
+      assert.equal(await blue(), '#0000ff');
+      assert.equal(await page.evaluate(() => window.MeridianMap.getLayers().find((layer) => layer.id === 'second-overlay').visible), true);
+      await page.evaluate(() => window.__testMaps[0].setStyle({ version: 8, glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf', sources: {}, layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#1d2320' } }] }, { diff: false }));
+      await page.waitForFunction(() => window.__testMaps[0].getLayer('agent-overlay-browser-city-fill') && window.__testMaps[0].isStyleLoaded());
+      assert.equal(await blue(), '#0000ff');
+      const sourceCount = await page.evaluate(() => Object.keys(window.__testMaps[0].getStyle().sources).filter((id) => id.startsWith('agent-overlay-')).length);
+      assert.equal(sourceCount, 2);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await ready();
+      await page.waitForFunction(() => window.__testMaps[0].getLayer('agent-overlay-browser-city-fill'));
+      assert.equal(await blue(), '#0000ff');
+      assert.deepEqual(await page.evaluate(() => window.MeridianMap.getLayers().map((layer) => layer.id)), ['second-overlay', 'browser-city']);
+      assert.equal(await page.evaluate(() => window.MeridianMap.removeLayer('second-overlay').applied), true);
+      assert.equal(await page.evaluate(() => Boolean(window.__testMaps[0].getSource('agent-overlay-second-overlay-source'))), false);
+    });
+    await t.test('Stop and generic outer undo restore overlay snapshots without losing earlier client edits', async () => {
+      await page.locator('#search-input').fill('Style existing overlay red');
+      await page.locator('#search-submit').click();
+      await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      assert.equal(lastMapContext.mapActions.layers[0].style.color, '#0000ff');
+      assert(Array.isArray(lastMapContext.mapActions.layers[0].bounds));
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { actions: [{ action: 'style_layer', layerId: 'browser-city', style: { color: 'red' } }] } }));
+      await page.waitForFunction(() => window.__testMaps[0].getPaintProperty('agent-overlay-browser-city-fill', 'fill-color') === '#ff0000');
+      await page.locator('#agent-task-stop').click();
+      await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
+      assert.equal(await page.evaluate(() => window.MeridianMap.getLayers()[0].style.color), '#0000ff');
+      await page.locator('#agent-dismiss-result').click();
+      await page.locator('#search-input').fill('Hide the existing overlay');
+      await page.locator('#search-submit').click();
+      await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { actions: [{ action: 'set_visibility', layerId: 'browser-city', visible: false }] } }));
+      await page.waitForFunction(() => window.MeridianMap.getLayers()[0].visible === false);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.completed', runId: agentRunId, reversible: false, message: 'Overlay hidden.' }));
+      await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
+      await page.locator('#agent-dismiss-result').click();
+      await page.locator('#action-history-undo').click();
+      await page.waitForFunction(() => window.MeridianMap.getLayers()[0].visible === true);
+      assert.equal(await page.evaluate(() => window.MeridianMap.getLayers()[0].style.color), '#0000ff');
+    });
+    await t.test('Atomic action rejection stays visibly rejected after nominal agent completion', async () => {
+      await page.locator('#search-input').fill('Recolor the map from supplied geometry');
+      await page.locator('#search-submit').click();
+      await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { actions: [{ action: 'remove_layer', layerId: 'browser-city' }, { action: 'style_layer', layerId: 'geo-route', style: { color: 'red' } }] } }));
+      await page.waitForFunction(() => document.getElementById('agent-task-label').textContent.includes('not applied'));
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.completed', runId: agentRunId, message: 'Map styled successfully.' }));
+      await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
+      assert.match(await page.locator('#agent-result-summary').innerText(), /not applied.*does not exist/);
+      assert.equal(await page.evaluate(() => window.MeridianMap.getLayers().length), 1);
+      assert.equal(await page.evaluate(() => window.MeridianMap.getLayers()[0].style.color), '#0000ff');
+      await page.locator('#agent-dismiss-result').click();
+    });
+    await t.test('Compact overlay color, visibility and source controls are accessible at 320 and 390 pixels', async () => {
+      await page.addScriptTag({ path: require.resolve('axe-core/axe.min.js') });
+      for (const width of [390, 320]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.locator('#map-overlay-legend > summary').click();
+        const box = await page.locator('#map-overlay-legend').boundingBox();
+        assert(box && box.x >= 0 && box.x + box.width <= width + 1 && box.y >= 0 && box.y + box.height <= 901, `${width}px overlay legend ${JSON.stringify(box)}`);
+        for (const selector of ['#map-overlay-list input[type="color"]', '#map-overlay-list button']) for (const control of await page.locator(selector).all()) {
+          const rect = await control.boundingBox();
+          assert(rect && rect.width >= 44 && rect.height >= 44 && rect.x >= 0 && rect.x + rect.width <= width + 1);
+        }
+        const results = await page.evaluate(() => axe.run(document.getElementById('map-overlay-legend'), { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa'] } }));
+        assert.deepEqual(results.violations.map((item) => item.id), []);
+        await page.getByRole('button', { name: 'Hide Noida / test geometry', exact: true }).click();
+        assert.equal(await page.evaluate(() => window.MeridianMap.getLayers()[0].visible), false);
+        await page.getByRole('button', { name: 'Show Noida / test geometry', exact: true }).click();
+        await page.locator('#map-overlay-list input[type="color"]').evaluate((input) => { input.value = '#ff0000'; input.dispatchEvent(new Event('change', { bubbles: true })); });
+        assert.equal(await page.evaluate(() => window.MeridianMap.getLayers()[0].style.color), '#ff0000');
+        assert.equal(await page.evaluate(() => window.MeridianMap.setBasemap('streets').applied), true);
+        assert.equal(await page.evaluate(() => window.MeridianMap.fitLayer('browser-city').applied), true);
+        await page.waitForFunction(() => window.__testMaps[0].queryRenderedFeatures({ layers: ['agent-overlay-browser-city-fill', 'agent-overlay-browser-city-point'] }).length > 0);
+        if (process.env.MERIDIAN_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.MERIDIAN_SCREENSHOT_DIR, `meridian-overlay-${width}.png`) });
+        await page.locator('#map-overlay-legend > summary').click();
+      }
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      assert.equal(await page.evaluate(() => window.MeridianMap.clearLayers().applied), true);
+      assert.equal(await page.locator('#map-overlay-legend').isVisible(), false);
     });
     await t.test('Study extent renders before data, survives style reload and partial limitation, then undoes cleanly', async () => {
       const before = await page.locator('.studio-layer').count();

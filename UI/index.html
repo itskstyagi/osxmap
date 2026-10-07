@@ -10,10 +10,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20261007-studio-1">
+    <link rel="stylesheet" href="./styles.css?v=20261007-map-actions-1">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
     <script defer src="https://unpkg.com/maplibre-contour@0.0.5/dist/index.min.js"></script>
-    <script type="module" src="./app.js?v=20261007-studio-1"></script>
+    <script type="module" src="./app.js?v=20261007-map-actions-1"></script>
   </head>
   <body>
     <main class="app-shell">
@@ -138,6 +138,7 @@
         <div class="map-feedback-stack">
           <div id="agent-task-chip" class="map-task-chip" hidden><span id="agent-task-label" role="status">Working</span><button id="agent-task-stop" type="button" aria-label="Stop current task">Stop</button></div>
           <div id="action-history-chip" class="map-task-chip" hidden><span id="action-history-label" role="status">Last map action</span><button id="action-history-undo" type="button" aria-label="Undo last map action">Undo</button></div>
+          <details id="map-overlay-legend" class="map-overlay-legend" aria-label="Map overlays and sources" hidden><summary><i id="map-overlay-swatch" class="map-overlay-swatch" aria-hidden="true"></i><span id="map-overlay-summary">Map overlays</span><span class="map-overlay-expand" aria-hidden="true">Layers</span></summary><div id="map-overlay-list" class="map-overlay-list"></div><p id="map-overlay-storage" class="map-overlay-storage" role="status"></p></details>
         </div>
         <div id="map-notice" class="map-notice is-hidden" role="status" aria-live="polite"></div>
         <p id="geo-status" class="map-status is-hidden" role="status" aria-live="polite"></p>
@@ -156,6 +157,7 @@
               <p id="context-guidance">Imagery is a composite, not a live or single-date capture. Elevations are sampled, not survey measurements.</p>
               <div class="search-meta"><span id="status-dot" class="status-dot"></span><span id="region-label">Search region: worldwide</span></div>
               <details class="cache-info"><summary>Storage &amp; performance</summary><strong id="cache-status">Starting cache...</strong><p>Viewed map resources are cached locally when supported. Imagery is periodically refreshed to avoid mixing stale tiles.</p><button id="clear-map-cache" type="button">Clear map cache</button></details>
+              <details class="cache-info map-api-info"><summary>Map capabilities</summary><p>Highlight supplied boundaries, roads and points with visible colors. Restyle, filter, reorder, hide, fit, remove or export overlays in Explore and Studio.</p><p>The client API <code>window.MeridianMap</code> uses declarative validated actions. Source links are citations, not remote data loaders. No custom code or expressions run.</p></details>
               <details id="agent-hud" class="agent-hud" aria-label="Map instruction activity"><summary class="agent-hud-heading"><span>Instruction activity</span><b id="agent-connection">Connecting</b></summary><div class="agent-hud-stage"><span>Request</span><strong id="agent-request">Waiting for connection</strong></div><div class="agent-hud-stage"><span>Tool</span><strong id="agent-tool">No active tool</strong></div></details>
             </section>
           </div>
@@ -275,7 +277,7 @@
         </div>
       </section>
     </main>
-    <dialog id="clear-workspace-dialog" aria-labelledby="clear-workspace-title" aria-describedby="clear-workspace-description"><form method="dialog"><h2 id="clear-workspace-title">Clear this workspace?</h2><p id="clear-workspace-description">This removes saved pins, measured areas, the current route plan, and search markers. Map caches and reusable route records are kept. This cannot be undone.</p><div class="dialog-actions"><button value="cancel" autofocus>Keep workspace</button><button value="clear" class="danger-button">Clear workspace</button></div></form></dialog>
+    <dialog id="clear-workspace-dialog" aria-labelledby="clear-workspace-title" aria-describedby="clear-workspace-description"><form method="dialog"><h2 id="clear-workspace-title">Clear this workspace?</h2><p id="clear-workspace-description">This removes saved pins, measured areas, map overlays, the current route plan, and search markers. Map caches and reusable route records are kept. This cannot be undone.</p><div class="dialog-actions"><button value="cancel" autofocus>Keep workspace</button><button value="clear" class="danger-button">Clear workspace</button></div></form></dialog>
     <dialog id="studio-annotation-dialog" aria-labelledby="studio-annotation-title" aria-describedby="studio-annotation-description"><form method="dialog"><h2 id="studio-annotation-title">Add annotation</h2><p id="studio-annotation-description">Add a note at the selected map point. It stays with this workspace.</p><div class="studio-fields"><label for="studio-annotation-name">Title</label><input id="studio-annotation-name" type="text" maxlength="120" required autofocus><label for="studio-annotation-note">Note (optional)</label><textarea id="studio-annotation-note" maxlength="1000" rows="4"></textarea></div><div class="dialog-actions"><button type="submit" value="cancel" formnovalidate>Cancel</button><button type="submit" value="save" class="studio-primary-button">Save annotation</button></div></form></dialog>
     <dialog id="studio-delete-dialog" aria-labelledby="studio-delete-title"><form method="dialog"><h2 id="studio-delete-title">Delete this Studio workspace?</h2><p><strong id="studio-delete-name"></strong></p><p>This permanently removes its local layers, analyses, and history. Export a backup first. Explore pins and routes are not changed. This deletion cannot be undone.</p><div class="dialog-actions"><button value="cancel" autofocus>Keep workspace</button><button value="delete" class="danger-button">Delete workspace</button></div></form></dialog>
   </body>

@@ -202,6 +202,7 @@ test('layer defaults preserve provenance, clone input, and select sensible geome
   assert.equal(first.visualization, 'points');
   assert.equal(first.field, ''); assert.equal(first.units, ''); assert.equal(first.palette, 'olive');
   assert.equal(first.opacity, 0.75); assert.equal(first.visible, true); assert.equal(first.locked, false);
+  assert.equal(first.color, ''); assert.equal(first.lineWidth, undefined); assert.equal(first.pointRadius, undefined);
   assert.deepEqual(first.filters, { categoryField: '', category: '', min: null, max: null, viewport: false });
   assert.equal(first.timeField, ''); assert.notEqual(first.data, input);
   assert.equal(engine.makeLayer(polygon([box(0, 0, 1, 1)])).visualization, 'choropleth');
@@ -215,6 +216,94 @@ test('layer defaults preserve provenance, clone input, and select sensible geome
   assert.throws(() => engine.makeLayer(input, { visualization: 'imaginary' }), /Unsupported visualization/);
   assert.throws(() => engine.makeLayer(input, { palette: 'imaginary' }), /palette/);
   assert.throws(() => engine.makeLayer(input, { opacity: -1 }), /Opacity/);
+});
+
+test('layer colors normalize strict hex and basic CSS names with an explicit palette reset', () => {
+  for (const [input, expected] of [['', ''], ['#f00', '#ff0000'], ['#Ff00Ab', '#ff00ab'], [' ReD ', '#ff0000'], ['blue', '#0000ff'], ['grey', '#808080'], ['orange', '#ffa500']]) {
+    assert.equal(engine.normalizeColor(input), expected);
+    assert.equal(engine.makeLayer(fixture(), { color: input }).color, expected);
+  }
+  for (const color of [true, false, 0, NaN, null, undefined, [], {}, ' ', 'transparent', 'currentColor', 'var(--color)', 'rgb(255,0,0)', '#ff000080', '#f008', '#12345', 'red; background:url(x)', 'url(javascript:alert(1))', '__proto__', 'constructor']) {
+    assert.throws(() => engine.normalizeColor(color), /Color/);
+    assert.throws(() => engine.makeLayer(fixture(), { color }), /Color/);
+  }
+});
+
+test('shared style validation accepts only finite numeric ranges without coercion', () => {
+  assert.deepEqual(engine.normalizeLayerStyle({ color: 'RED', opacity: 0, lineWidth: 1, pointRadius: 40, name: 'Not a style property' }), { color: '#ff0000', opacity: 0, lineWidth: 1, pointRadius: 40 });
+  assert.deepEqual(engine.normalizeLayerStyle({ opacity: 1, lineWidth: 24, pointRadius: 1 }), { opacity: 1, lineWidth: 24, pointRadius: 1 });
+  const layer = engine.makeLayer(fixture());
+  for (const [key, outside] of [['opacity', [-.01, 1.01]], ['lineWidth', [0, 24.01]], ['pointRadius', [0, 40.01]]]) {
+    for (const value of [true, false, null, undefined, '', '1', NaN, Infinity, -Infinity, [], {}, ...outside]) {
+      const style = { [key]: value };
+      assert.throws(() => engine.normalizeLayerStyle(style), /must be a number/);
+      assert.throws(() => engine.makeLayer(fixture(), style), /must be a number/);
+      assert.throws(() => engine.renderCollection({ ...layer, ...style }), /must be a number/);
+    }
+  }
+});
+
+test('style validation rejects accessors, inherited values and unsafe JSON without executing them', () => {
+  for (const key of ['color', 'opacity', 'lineWidth', 'pointRadius']) {
+    const style = Object.defineProperty({}, key, { enumerable: true, get() { assert.fail('Style accessors must not execute'); } });
+    assert.throws(() => engine.normalizeLayerStyle(style), /accessor/);
+  }
+  for (const style of [null, [], Object.create({ color: 'red' }), JSON.parse('{"__proto__":{"color":"red"}}'), { [Symbol('color')]: 'red' }]) {
+    assert.throws(() => engine.normalizeLayerStyle(style), /plain object|unsafe|JSON properties/);
+  }
+  assert.equal({}.color, undefined);
+});
+
+test('uniform color changes legends only, preserving geometry and scalar values in every visualization', () => {
+  for (const visualization of Object.keys(engine.VISUALIZATIONS)) {
+    const input = visualization === 'flow' ? collection(line([[0, 0], [1, 1]], { value: 0 }), line([[1, 0], [0, 1]], { value: 20 }))
+      : ['choropleth', 'extrusion'].includes(visualization) ? collection(polygon([box(0, 0, 1, 1)], { value: 0 }), polygon([box(2, 2, 3, 3)], { value: 20 })) : fixture();
+    const layer = engine.makeLayer(input, { visualization, field: 'value', units: 'index', palette: 'ocean' });
+    const baseline = engine.renderCollection(layer);
+    const before = JSON.stringify(layer);
+    const styled = engine.renderCollection({ ...layer, color: 'red', opacity: .2, lineWidth: 5, pointRadius: 10 });
+    assert.deepEqual(styled.data, baseline.data, visualization);
+    assert.deepEqual(styled.metrics, baseline.metrics, visualization);
+    assert.deepEqual(styled.sourceMetrics, baseline.sourceMetrics, visualization);
+    assert.equal(styled.geometryType, baseline.geometryType);
+    assert.deepEqual(styled.legend.colors, ['#ff0000']);
+    assert.equal(styled.legend.uniformColor, '#ff0000');
+    assert.equal(styled.legend.min, baseline.legend.min);
+    assert.equal(styled.legend.max, baseline.legend.max);
+    assert.match(styled.legend.note, /[Uu]niform color|Single-color heatmap/);
+    assert.equal(JSON.stringify(layer), before);
+  }
+});
+
+test('single-color population heatmaps retain real source ratios, zeros, filters and provenance', () => {
+  for (const values of [[0, 0, 0], [0, 20, 40], [10, 10, 10]]) {
+    const input = collection(...[...values, 1000].map((population, index) => point(index, 0, { population })));
+    const layer = engine.makeLayer(input, { visualization: 'heatmap', color: 'red', field: 'population', units: 'people per source cell', filters: { min: 0 }, source: { name: 'Census fixture', referenceYear: 2011, caveat: 'Actual supplied counts, partial coverage.' } });
+    const before = JSON.stringify(layer);
+    const rendered = engine.renderCollection(layer, { region: [-.1, -.1, 2.1, .1] });
+    const maximum = Math.max(...values);
+    assert.deepEqual(rendered.data.features.map((feature) => feature.properties.population), values);
+    assert.deepEqual(rendered.data.features.map((feature) => feature.properties.__heatWeight), values.map((value) => maximum ? value / maximum : 0));
+    assert.deepEqual(rendered.legend.colors, ['#ff0000']);
+    assert.equal(rendered.legend.max, maximum);
+    assert.equal(rendered.legend.unit, 'people per source cell');
+    assert.match(rendered.legend.note, /zero values add no intensity/);
+    assert.match(rendered.legend.note, /increasing opacity represents relative intensity/);
+    assert.doesNotMatch(rendered.legend.note, /palette midpoint/);
+    assert.equal(JSON.stringify(layer), before);
+    assert.equal(layer.data.features.at(-1).properties.population, 1000);
+    assert.equal(layer.source.referenceYear, '2011');
+  }
+});
+
+test('an explicit empty color restores the original palette and honest value legend', () => {
+  const layer = engine.makeLayer(fixture(), { field: 'value', palette: 'violet' });
+  const baseline = engine.renderCollection(layer);
+  layer.color = 'red';
+  assert.deepEqual(engine.renderCollection(layer).legend.colors, ['#ff0000']);
+  Object.assign(layer, engine.normalizeLayerStyle({ color: '' }));
+  assert.deepEqual(engine.renderCollection(layer), baseline);
+  assert.equal(engine.renderCollection(layer).legend.uniformColor, undefined);
 });
 
 test('numeric filters preserve zero and ignore missing values, exact categorical filters preserve types', () => {

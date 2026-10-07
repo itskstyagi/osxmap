@@ -37,19 +37,21 @@ try:
     from .agent_tools import AgentDependencies, AgentTools
     from .config import BACKEND_DIR, Config, is_loopback_host
     from .errors import ServiceError
+    from .map_geometry import load_city_geometry as fetch_city_geometry, load_road_geometry as fetch_road_geometry, validate_geometry_query
     from .openai_client import OpenAIChatClient
     from .raster_sources import load_population_grid, load_raster_grid
     from .realtime import RealtimeHub
-    from .web_sources import fetch_web_document, validate_web_url
+    from .web_sources import fetch_public_bytes, fetch_web_document, validate_web_url
 except ImportError:  # Supports `python server.py` from the backend directory.
     from agent import MapAgentService
     from agent_tools import AgentDependencies, AgentTools
     from config import BACKEND_DIR, Config, is_loopback_host
     from errors import ServiceError
+    from map_geometry import load_city_geometry as fetch_city_geometry, load_road_geometry as fetch_road_geometry, validate_geometry_query
     from openai_client import OpenAIChatClient
     from raster_sources import load_population_grid, load_raster_grid
     from realtime import RealtimeHub
-    from web_sources import fetch_web_document, validate_web_url
+    from web_sources import fetch_public_bytes, fetch_web_document, validate_web_url
 
 
 EARTH_RADIUS = 6_371_008.8
@@ -1913,6 +1915,56 @@ def save_workspace_state(state: Any) -> dict[str, Any]:
     return safe
 
 
+def _map_geometry_cache_key(kind: str, request: Any) -> str:
+    try:
+        payload = json.dumps(request, sort_keys=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("Geometry request is invalid.", 400) from None
+    return f"map-geometry-{kind}-v1:" + hashlib.sha256(payload).hexdigest()
+
+
+def load_city_geometry(city: dict[str, Any]) -> dict[str, Any]:
+    key = _map_geometry_cache_key("city", {name: value for name, value in city.items() if name != "cached"}) if isinstance(city, dict) else ""
+    cached = CACHE.get_geocode(key) if key else None
+    if cached is not None:
+        return {**cached, "cached": True}
+    document = fetch_city_geometry(city, fetch_bytes=lambda url, **limits: NOMINATIM_QUEUE.run(lambda: fetch_public_bytes(url, **limits)))
+    CACHE.put_geocode(key, document)
+    return {**document, "cached": False}
+
+
+def _fetch_map_road_bytes(url: str, **limits: Any) -> dict[str, Any]:
+    def task() -> dict[str, Any]:
+        cooldown = overpass_cooldown_seconds()
+        if cooldown:
+            raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, cooldown)
+        try:
+            return fetch_public_bytes(url, **limits)
+        except ServiceError as error:
+            if error.retry_after or "(HTTP 429)" in str(error):
+                retry_after = pause_overpass(max(error.retry_after or 0, CONFIG.overpass_backoff_seconds))
+                raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, retry_after) from error
+            raise
+
+    cooldown = overpass_cooldown_seconds()
+    if cooldown:
+        raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, cooldown)
+    return OVERPASS_QUEUE.run(task)
+
+
+def load_road_geometry(query: str, bounds: list[float], classes: list[str] | None = None) -> dict[str, Any]:
+    key = _map_geometry_cache_key("roads", {"query": query, "bounds": bounds, "classes": classes,
+                                          "endpoint": CONFIG.overpass_endpoint})
+    cached = CACHE.get_geocode(key)
+    if cached is not None:
+        return {**cached, "cached": True}
+    document = fetch_road_geometry(query, bounds, classes, fetch_bytes=_fetch_map_road_bytes,
+                                   overpass_endpoint=CONFIG.overpass_endpoint)
+    if not document["coverage"]["truncated"]:
+        CACHE.put_geocode(key, document)
+    return {**document, "cached": False}
+
+
 REALTIME = RealtimeHub(CONFIG)
 AGENT_TOOLS = AgentTools(AgentDependencies(
     suggest_cities=suggest_locations,
@@ -1930,6 +1982,8 @@ AGENT_TOOLS = AgentTools(AgentDependencies(
     read_web_source=fetch_web_document,
     load_population=load_population_grid,
     read_raster_source=load_raster_grid,
+    load_city_geometry=load_city_geometry,
+    load_road_geometry=load_road_geometry,
 ))
 AGENT = MapAgentService(OpenAIChatClient(CONFIG), AGENT_TOOLS, REALTIME)
 
@@ -3047,8 +3101,15 @@ class ApiHandler(BaseHTTPRequestHandler):
     @limited_request
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        query = urllib.parse.parse_qs(parsed.query)
+        query = {}
         try:
+            if parsed.path in {"/api/map/city-boundary", "/api/map/roads"}:
+                try:
+                    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True, max_num_fields=16)
+                except ValueError:
+                    raise ServiceError("Geometry request has too many query fields.", 400) from None
+            else:
+                query = urllib.parse.parse_qs(parsed.query)
             if parsed.path == "/api/health":
                 self.send_json(200, {"ok": True, "cache": "sqlite", "tileZoom": TILE_ZOOM, "overtureRelease": CONFIG.overture_release, "openBuildingMap": bool(CONFIG.openbuildingmap_api_url), "agent": {"available": AGENT.available, "socketPort": CONFIG.socket_port}, "routing": {"provider": "openstreetmap-dijkstra", "profile": CONFIG.osm_router_profile, "osrmFallback": True, "serpFallbackEnabled": CONFIG.enable_serp_directions_fallback}})
                 return
@@ -3064,6 +3125,30 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not result:
                     raise ServiceError("Location not found.", 404)
                 self.send_json(200, {"result": result})
+                return
+            if parsed.path == "/api/map/city-boundary":
+                if any(key not in {"query", "countryCode"} or len(values) != 1 for key, values in query.items()):
+                    raise ServiceError("City boundary accepts only one query and optional countryCode.", 400)
+                value = validate_geometry_query(query.get("query", [""])[0])
+                country = query.get("countryCode", [""])[0]
+                if country and not country_param(country):
+                    raise ServiceError("City countryCode must be an ISO two-letter code.", 400)
+                city = resolve_agent_city(value, country)
+                if not city:
+                    raise ServiceError("No unambiguous city was found for boundary lookup.", 404)
+                document = load_city_geometry(city)
+                self.send_json(200, document, {"Cache-Control": "no-store", "X-Cache": "HIT" if document["cached"] else "MISS"})
+                return
+            if parsed.path == "/api/map/roads":
+                if any(key not in {"query", "west", "south", "east", "north", "classes"} or len(values) != 1 for key, values in query.items()):
+                    raise ServiceError("Road geometry accepts only query, west, south, east, north and optional classes.", 400)
+                value = validate_geometry_query(query.get("query", [""])[0])
+                bounds = [parse_number(query.get(key, [None])[0]) for key in ("west", "south", "east", "north")]
+                if any(number is None for number in bounds):
+                    raise ServiceError("Road geometry needs valid west, south, east and north bounds.", 400)
+                classes = query["classes"][0].split(",") if "classes" in query else None
+                document = load_road_geometry(value, bounds, classes)
+                self.send_json(200, document, {"Cache-Control": "no-store", "X-Cache": "HIT" if document["cached"] else "MISS"})
                 return
             if parsed.path == "/api/country":
                 self.send_json(200, detect_country(parse_number(query.get("lat", [None])[0]), parse_number(query.get("lon", [None])[0])))

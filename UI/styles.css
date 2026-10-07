@@ -524,6 +524,25 @@ svg { flex-shrink: 0; width: 20px; height: 20px; }
 .research-area-label small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .research-area-label a { display: grid; align-items: center; min-height: 44px; padding: 0 3px; color: #d8b785; font-size: 10px; text-underline-offset: 3px; }
 :root[data-theme="light"] .research-area-label a { color: #795721; }
+.map-overlay-legend { flex-basis: 100%; width: 400px; max-width: min(400px, 100%); border: 1px solid var(--line); border-radius: 10px; background: var(--surface-solid); box-shadow: var(--shadow); pointer-events: auto; }
+.map-overlay-legend > summary { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 6px 12px; cursor: pointer; font-size: 11px; list-style: none; }
+.map-overlay-legend > summary::-webkit-details-marker { display: none; }
+.map-overlay-legend > summary > span:first-of-type { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-overlay-swatch { display: block; flex-shrink: 0; width: 14px; height: 14px; border: 1px solid rgba(255, 255, 255, .5); border-radius: 3px; }
+.map-overlay-expand { color: var(--muted); font-size: 10px; }
+.map-overlay-list { max-height: min(32dvh, 280px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; border-top: 1px solid var(--line); }
+.map-overlay-row { padding: 12px; border-bottom: 1px solid var(--line); }
+.map-overlay-heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.map-overlay-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+.map-overlay-row small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.map-overlay-tools { display: flex; gap: 6px; margin-top: 8px; }
+.map-overlay-tools button, .map-overlay-tools input { flex: 1; min-width: 44px; min-height: 44px; padding: 5px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-elevated); font-size: 10px; }
+.map-overlay-tools input { max-width: 44px; cursor: pointer; }
+.map-overlay-source { margin-top: 6px; }
+.map-overlay-source summary { min-height: 32px; padding: 8px 0; color: var(--muted); cursor: pointer; font-size: 10px; overflow-wrap: anywhere; }
+.map-overlay-source a { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); font-size: 10px; text-underline-offset: 3px; }
+.map-overlay-storage { margin: 0; padding: 10px 12px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.map-api-info code { overflow-wrap: anywhere; }
 
 .map-notice, .map-status {
   position: absolute;
@@ -726,6 +745,8 @@ dialog .studio-fields { margin-bottom: 20px; }
   .map-task-chip { justify-content: space-between; width: 100%; }
   .map-task-chip span { flex: 1; }
   .research-area-label { width: 100%; flex-basis: auto; }
+  .map-overlay-legend { width: 100%; flex-basis: auto; }
+  .map-overlay-list { max-height: min(26dvh, 220px); }
   .map-status, .map-notice, :root[data-has-route="true"] .map-status { top: calc(var(--rail-top) + 64px); bottom: auto; max-width: calc(100vw - var(--gutter) * 2); font-size: 11px; }
   .map-notice { top: calc(var(--rail-top) + 116px); }
   :root[data-search-active="true"] :is(.manual-sidebar, .studio-panel, .route-summary, .info-drawer.is-open, .studio-map-overlays),

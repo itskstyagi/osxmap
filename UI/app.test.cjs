@@ -3,6 +3,9 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { pathToFileURL } = require('node:url');
+let mapActions;
+test.before(async () => { mapActions = await import(pathToFileURL(join(__dirname, 'map-actions.js')).href); });
 
 // Deliberately small DOM: layout, browser networking, and the constructor are not run.
 class Element {
@@ -136,6 +139,7 @@ function setup({ mobile = false } = {}) {
     document, window, navigator: {}, AbortController, AbortSignal, URL, URLSearchParams,
     Element, HTMLInputElement: class extends Element {}, HTMLTextAreaElement: class extends Element {},
     API_BASE_URL: '', AGENT_SOCKET_URL: '', apiPath: (path) => path,
+    MAP_ACTION_NAMES: mapActions.MAP_ACTION_NAMES,
     setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: window.clearTimeout,
     fetch: (url, options) => new Promise((resolve, reject) => requests.push({ url, options, resolve, reject })),
@@ -1430,6 +1434,178 @@ function researchSetup() {
   app.applyMapMode = () => {};
   return { ...setupResult, sources, layers, fits };
 }
+
+function overlaySetup() {
+  const result = researchSetup();
+  const { app, layers } = result;
+  app.map.setPaintProperty = (id, key, value) => { const paint = layers.get(id).paint ||= {}; if (value === null) delete paint[key]; else paint[key] = value; };
+  app.map.setLayoutProperty = (id, key, value) => { (layers.get(id).layout ||= {})[key] = value; };
+  app.map.moveLayer = (id) => { const layer = layers.get(id); layers.delete(id); layers.set(id, layer); };
+  app.map.setSky = () => {};
+  const saved = new Map();
+  app.overlayActions = new mapActions.MeridianMapActions(app, { storage: { getItem: (key) => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value), removeItem: (key) => saved.delete(key) } });
+  // Bridge the VM app's records into the module realm, as JSON transport does in the browser.
+  const execute = app.overlayActions.execute.bind(app.overlayActions);
+  app.overlayActions.execute = (input, options) => execute(structuredClone(input), options);
+  const api = app.overlayActions.publicAPI();
+  const data = { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Polygon', coordinates: [[[77.31, 28.51], [77.4, 28.52], [77.43, 28.58], [77.36, 28.61], [77.31, 28.51]]] }, properties: { name: 'Offline city shape' } }] };
+  const add = { action: 'add_layer', layer: { id: 'city', name: 'City shape', data, style: { color: 'red' }, source: { name: 'Offline source', url: 'https://example.org/city', caveat: 'Regression fixture, not the actual Noida boundary.' } } };
+  return { ...result, api, saved, add };
+}
+
+test('highlight, color and style requests reach the agent rather than the geocoder', async () => {
+  const { app, mapInstruction } = setup();
+  const sent = [];
+  app.startAgentRequest = async (query) => sent.push(query);
+  app.resolveSearch = () => assert.fail('Styling instructions must not geocode');
+  const queries = ['highlight map of Noida in Red', 'Color the roads blue', 'Recolour the city green', 'Style the point labels', 'Restyle existing points'];
+  for (const query of queries) {
+    assert.equal(mapInstruction(query), true);
+    app.elements['search-input'].value = query;
+    await app.submitSearch(event());
+  }
+  assert.deepEqual(sent, queries);
+  assert.equal(mapInstruction('Red Fort'), false);
+});
+
+test('Explore agent.map declarative actions create visibly red geometry and expose metadata-only context', () => {
+  const { app, add, layers, sources } = overlaySetup();
+  app.agentRunId = 'highlight';
+  app.agentSnapshot = app.captureMapAction();
+  app.handleAgentEvent({ type: 'agent.map', runId: 'highlight', update: { actions: [add] } });
+  assert.equal(app.productMode, 'explore');
+  assert.equal(app.agentDidMutate, true);
+  assert.equal(layers.get(mapActions.overlayIds('city').fill).paint['fill-color'], '#ff0000');
+  assert.equal(layers.get(mapActions.overlayIds('city').outline).paint['line-color'], '#ff0000');
+  assert.equal(sources.get(mapActions.overlayIds('city').source).data.features[0].geometry.coordinates[0].length, 5);
+  const context = app.agentMapContext();
+  assert.equal(context.mapActions.version, 1);
+  assert.equal(context.mapActions.layers[0].name, 'City shape');
+  assert.equal(JSON.stringify(context).includes('coordinates'), false);
+  assert(context.mapActions.capabilities.includes('style_layer'));
+  app.handleAgentEvent({ type: 'agent.completed', runId: 'highlight', message: 'Highlighted the map.', reversible: false });
+  assert.equal(app.mapActions.length, 1);
+  assert.equal(app.elements['map-overlay-legend'].hidden, false);
+});
+
+test('invalid or unknown agent action batches have no mutations and their visual error survives completion', () => {
+  const { app, add, api, layers } = overlaySetup();
+  api.addLayer(add.layer);
+  app.agentRunId = 'invalid'; app.agentSnapshot = app.captureMapAction();
+  app.handleAgentEvent({ type: 'agent.map', runId: 'invalid', update: { actions: [{ action: 'style_layer', layerId: 'city', style: { color: 'blue' } }, { action: 'run_js', script: 'alert(1)' }] } });
+  assert.equal(app.agentDidMutate, undefined);
+  assert.equal(layers.get(mapActions.overlayIds('city').fill).paint['fill-color'], '#ff0000');
+  assert.match(app.agentApplicationError, /Unknown map action/);
+  app.handleAgentEvent({ type: 'agent.completed', runId: 'invalid', message: 'Styled the map successfully.' });
+  assert.match(app.elements['agent-result-summary'].textContent, /not applied.*Unknown map action/);
+  assert.equal(app.elements['agent-result-details'].open, true);
+  assert.equal(app.elements['agent-panel'].hidden, false);
+  assert.equal(app.applyAgentMapUpdate({ bogus: true }), false);
+  assert.equal(app.applyAgentMapUpdate({}), false);
+});
+
+test('mixed sourced datasets do not skip declared actions and invalid mixed batches apply neither branch', () => {
+  const { app, add, api, layers } = overlaySetup();
+  let datasets = 0;
+  app.studio = { workspace: { id: 'workspace' }, snapshot: () => ({ id: 'workspace' }), applySourcedDataset: () => { datasets++; return { name: 'Population', visualization: 'heatmap' }; }, focusLayer() {}, lastAction: () => null, setAgentBusy() {}, discardRedo() {} };
+  app.setProductMode = (mode) => { app.productMode = mode; };
+  assert.equal(app.applyAgentMapUpdate({ dataset: { data: {} }, actions: [add] }), true);
+  assert.equal(datasets, 1);
+  assert.equal(app.productMode, 'studio');
+  assert.equal(api.getLayers().length, 1);
+  assert.equal(layers.get(mapActions.overlayIds('city').fill).paint['fill-color'], '#ff0000');
+  assert.equal(app.applyAgentMapUpdate({ dataset: { data: {} }, actions: [{ action: 'style_layer', layerId: 'city', style: { color: 'expression' } }] }), false);
+  assert.equal(datasets, 1);
+  assert.equal(api.getLayers()[0].style.color, '#ff0000');
+});
+
+test('a failed mixed action application restores its Studio snapshot and existing overlay color', () => {
+  const { app, add, api } = overlaySetup();
+  api.addLayer(add.layer);
+  let studioState = { id: 'workspace', layerCount: 1 };
+  app.studio = { workspace: studioState, snapshot: () => ({ ...studioState }), applySourcedDataset: () => { studioState.layerCount++; return { name: 'New data', visualization: 'points' }; }, restoreSnapshot: (state) => { studioState = state; }, stopCompare() {}, focusLayer() {}, lastAction: () => null, setAgentBusy() {} };
+  app.setProductMode = (mode) => { app.productMode = mode; };
+  app.productMode = 'studio';
+  const jump = app.map.jumpTo;
+  let fail = true;
+  app.map.jumpTo = (camera) => { if (fail) { fail = false; throw new Error('Injected camera failure'); } jump(camera); };
+  assert.equal(app.applyAgentMapUpdate({ dataset: { data: {} }, actions: [{ action: 'style_layer', layerId: 'city', style: { color: 'blue' } }, { action: 'set_view', center: [0, 0] }] }), false);
+  assert.equal(studioState.layerCount, 1);
+  assert.equal(api.getLayers()[0].style.color, '#ff0000');
+  assert.match(app.agentApplicationError, /rolled back/);
+});
+
+test('overlay snapshots participate in cancellation, generic clear and guarded outer undo', async () => {
+  const { app, add, api, sources } = overlaySetup();
+  app.agentRunId = 'first'; app.agentSnapshot = app.captureMapAction();
+  app.handleAgentEvent({ type: 'agent.map', runId: 'first', update: { actions: [add] } });
+  app.handleAgentEvent({ type: 'agent.cancelled', runId: 'first', rolledBack: true });
+  assert.equal(api.getLayers().length, 0);
+  assert.equal(sources.size, 0);
+  app.agentRunId = 'second'; app.agentSnapshot = app.captureMapAction();
+  app.handleAgentEvent({ type: 'agent.map', runId: 'second', update: { actions: [add] } });
+  app.handleAgentEvent({ type: 'agent.completed', runId: 'second', message: 'Added source geometry', reversible: false });
+  const snapshot = app.mapActions.at(-1).before;
+  assert.equal(snapshot.overlays.layers.length, 0);
+  await app.undoMapAction();
+  assert.equal(api.getLayers().length, 0);
+  api.addLayer(add.layer);
+  app.agentRunId = 'clear'; app.agentLocalConflict = false; app.agentSnapshot = app.captureMapAction();
+  app.handleAgentEvent({ type: 'agent.map', runId: 'clear', update: { clear: true } });
+  assert.equal(api.getLayers().length, 0);
+  app.handleAgentEvent({ type: 'agent.cancelled', runId: 'clear', rolledBack: true });
+  assert.equal(api.getLayers().length, 1);
+});
+
+test('later manual overlays survive cancelled agent runs and prevent stale automatic undo', () => {
+  const { app, add, api } = overlaySetup();
+  app.agentRunId = 'pending'; app.agentSnapshot = app.captureMapAction();
+  app.handleAgentEvent({ type: 'agent.map', runId: 'pending', update: { actions: [add] } });
+  api.styleLayer('city', { color: 'blue' });
+  assert.equal(app.agentLocalConflict, true);
+  app.handleAgentEvent({ type: 'agent.map', runId: 'pending', update: { actions: [{ action: 'remove_layer', layerId: 'city' }] } });
+  assert.equal(api.getLayers().length, 1);
+  app.handleAgentEvent({ type: 'agent.cancelled', runId: 'pending', rolledBack: true });
+  assert.equal(api.getLayers()[0].style.color, '#0000ff');
+  assert.match(app.elements['geo-status'].textContent, /not overwritten/);
+});
+
+test('later legacy clear and rolled-back workspace events cannot overwrite unrelated manual edits', () => {
+  const { app, add, api } = overlaySetup();
+  app.geo.pins = [place('Keep pin')];
+  app.agentRunId = 'conflict'; app.agentSnapshot = app.captureMapAction();
+  app.handleAgentEvent({ type: 'agent.map', runId: 'conflict', update: { actions: [add] } });
+  api.styleLayer('city', { color: 'blue' });
+  app.handleAgentEvent({ type: 'agent.map', runId: 'conflict', update: { clear: true } });
+  assert.equal(api.getLayers().length, 1);
+  assert.equal(app.geo.pins.length, 1);
+  app.applyWorkspaceSnapshot = () => assert.fail('A stale backend snapshot must not overwrite manual edits');
+  app.handleAgentEvent({ type: 'agent.cancelled', runId: 'conflict', rolledBack: true, workspace: { pins: [] } });
+  assert.equal(app.geo.pins[0].name, 'Keep pin');
+  assert.equal(api.getLayers()[0].style.color, '#0000ff');
+});
+
+test('mapUpdate.actions requires an array, not a single object or a claimed empty success', () => {
+  const { app, add, api } = overlaySetup();
+  for (const actions of [add, [], null]) assert.equal(app.applyAgentMapUpdate({ actions }), false);
+  assert.equal(api.getLayers().length, 0);
+  assert.equal(app.applyAgentMapUpdate({ actions: [add] }), true);
+});
+
+test('basemap themes and display preferences never hide or recolor overlay families', () => {
+  const { app, add, api, layers, applyMonochrome } = overlaySetup();
+  api.addLayer(add.layer);
+  app.layerPreferences = { labels: false, roads: false, boundaries: false };
+  app.map.getStyle = () => ({ layers: [...layers.values()] });
+  for (const mode of ['satellite', 'route', 'terrain']) for (const theme of ['dark', 'light']) {
+    app.mapMode = mode;
+    applyMonochrome(app.map, theme, mode);
+    app.applyLayerPreferences();
+    assert.equal(layers.get(mapActions.overlayIds('city').fill).paint['fill-color'], '#ff0000');
+    assert.equal(layers.get(mapActions.overlayIds('city').fill).layout.visibility, 'visible');
+    assert.equal(layers.get(mapActions.overlayIds('city').label).layout.visibility, 'visible');
+  }
+});
 
 test('study extent previews are truthful polygons and preserve existing map content', () => {
   const { app, document, sources, layers, fits } = researchSetup();

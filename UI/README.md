@@ -16,7 +16,7 @@ Open `http://127.0.0.1:8080`.
 Run the dependency-free interaction regression suite with Node:
 
 ```powershell
-node --test UI/app.test.cjs UI/studio-data.test.cjs UI/studio.test.cjs
+node --test UI/map-actions.test.cjs UI/app.test.cjs UI/studio-data.test.cjs UI/studio.test.cjs
 ```
 
 These dependency-free tests cover Explore interactions, geographic validation,
@@ -40,6 +40,60 @@ validation. The application itself has no Node runtime dependency or build step.
 The interface defaults to dark mode. The toolbar theme toggle switches the
 controls between light and dark and stores the preference locally. Satellite
 and street cartography keep their dark appearance; terrain follows the theme.
+
+## Client Map API
+
+After the map initializes, `window.MeridianMap` exposes one validated API in both
+Explore and Studio. Geographic overlays render independently of Studio panels.
+`execute(actionOrBatch)` validates the complete batch before changing the map and
+returns `{applied, reason?}`. No arbitrary JavaScript, MapLibre expressions, remote
+data URLs, or raw basemap layer IDs are accepted.
+
+- Layers: `addLayer`, `updateLayer`, `styleLayer`, `setLayerVisibility`,
+  `moveLayer`, `filterLayer`, `removeLayer`, `clearLayers`, and `fitLayer`.
+- Drawing: `plotPoints`, `drawLine`, `drawPolygon`, `drawCircle` with radius meters,
+  `drawRectangle`, and `addLabel`. Drawn shapes remain explicitly user annotations.
+- Appearance: `setView`, `setBasemap`, `setTerrain`, and `setDisplay`.
+- Inspection: `getLayers`, `getCapabilities`, `getLimits`, `exportGeoJSON`,
+  `captureSnapshot`, and `restoreSnapshot`.
+
+For example, fetch source-backed Noida geometry from the local backend and paint
+its actual polygon red, rather than drawing a bounding rectangle:
+
+```js
+const response = await fetch('http://127.0.0.1:8787/api/map/city-boundary?query=Noida&countryCode=IN');
+if (!response.ok) throw new Error(`Boundary request failed: ${response.status}`);
+const boundary = await response.json();
+const result = window.MeridianMap.execute([
+  { action: 'add_layer', layer: {
+    id: 'noida-boundary', name: boundary.name, data: boundary.dataset,
+    source: boundary.source,
+    style: { color: 'red', fillOpacity: 0.18, lineWidth: 3 }
+  } },
+  { action: 'fit_layer', layerId: 'noida-boundary' }
+]);
+if (!result.applied) throw new Error(result.reason);
+```
+
+Styles support literal hex/basic CSS colors, fill/line/point opacity, outline and
+line width, point radius/stroke, dash lengths, and literal label settings. Filters
+use exact existing fields and typed scalar `eq`, `neq`, `gt`, `gte`, `lt`, or `lte`
+comparisons; `filterLayer(id, null)` clears a filter. Sources and labels are text,
+never HTML or executable content. Camera actions are separate from highlights.
+
+Agent tools `highlight_city`, `highlight_roads`, `plot_points`, `draw_geometry`,
+and `map_action` materialize this same contract. `Highlight Noida in red` retrieves
+an actual OSM-mapped boundary; named road highlighting uses real source segments.
+Source limitations are reported instead of substituting a city center or bbox.
+Follow-up styling uses existing `mapActions.layers` IDs, including in Explore.
+Studio analytical layers additionally support typed style, visibility, remove,
+and move operations without changing their underlying values or filters.
+
+Overlays retain source metadata, persist locally, survive style changes, and join
+the existing guarded cancellation/undo transaction. Controls expose a color swatch,
+Fit, Hide/Show, and Remove. Limits are 32 overlays, 4 MiB GeoJSON per layer,
+10,000 features, 100,000 positions, and 64 actions per batch. Raw data stays in the
+browser; only bounded inventory metadata is sent as agent context.
 
 ## Local API Host
 

@@ -1,9 +1,10 @@
-import { PALETTES, VISUALIZATIONS, normalizeCollection, fieldsFor, boundsFor, makeLayer, filterCollection, metricsFor, renderCollection, temporalValues, exampleCollection } from './studio-data.js';
+import { PALETTES, VISUALIZATIONS, normalizeCollection, normalizeLayerStyle, fieldsFor, boundsFor, makeLayer, filterCollection, metricsFor, renderCollection, temporalValues, exampleCollection } from './studio-data.js';
 
 const STORAGE_KEY = 'meridian.studio.v1';
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_WORKSPACE_BYTES = 32 * 1024 * 1024;
 const MAX_LAYERS = 30;
+const LAYER_ACTIONS = { style: ['color', 'opacity', 'lineWidth', 'pointRadius'], visibility: ['visible'], remove: [], move: ['beforeLayerId'] };
 const EMPTY = { type: 'FeatureCollection', features: [] };
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const id = () => crypto.randomUUID();
@@ -38,6 +39,12 @@ function provenanceFacts(source = {}) {
     .filter(([, value]) => typeof value === 'string' && value.trim() || typeof value === 'number' && Number.isFinite(value));
 }
 
+function legendBackground(legend, visualization) {
+  if (legend.uniformColor) return visualization === 'heatmap'
+    ? `linear-gradient(90deg, ${legend.uniformColor}00, ${legend.uniformColor})` : legend.uniformColor;
+  return `linear-gradient(90deg, ${legend.colors.join(', ')})`;
+}
+
 export function createWorkspace(name = 'Untitled workspace') {
   return {
     id: id(), name, description: '', createdAt: Date.now(), updatedAt: Date.now(),
@@ -65,17 +72,17 @@ export function validateWorkspace(value, validatedDatasets = null) {
   }
   const seen = new Set();
   for (const saved of value.layers) {
-    if (!saved || !/^[\w-]{1,100}$/.test(saved.id) || seen.has(saved.id) || !Object.hasOwn(workspace.datasets, saved.datasetId)) throw new Error('A saved layer has missing data or an invalid identifier.');
+    const style = normalizeLayerStyle(saved);
+    if (!saved || typeof saved.id !== 'string' || !/^[\w-]{1,100}$/.test(saved.id) || seen.has(saved.id) || typeof saved.datasetId !== 'string' || !Object.hasOwn(workspace.datasets, saved.datasetId)) throw new Error('A saved layer has missing data or an invalid identifier.');
     seen.add(saved.id);
     const source = saved.source && typeof saved.source === 'object' ? saved.source : { name: 'Imported workspace' };
     const normalized = makeLayer(workspace.datasets[saved.datasetId], { name: String(saved.name || 'Layer').slice(0, 120), source });
     const available = fieldsFor(workspace.datasets[saved.datasetId]);
     delete normalized.data;
     workspace.layers.push({
-      ...normalized, id: saved.id, datasetId: saved.datasetId,
+      ...normalized, ...style, id: saved.id, datasetId: saved.datasetId,
       visualization: Object.hasOwn(VISUALIZATIONS, saved.visualization) ? saved.visualization : normalized.visualization,
       palette: Object.hasOwn(PALETTES, saved.palette) ? saved.palette : 'olive',
-      opacity: Number.isFinite(saved.opacity) ? Math.max(0, Math.min(1, saved.opacity)) : .75,
       visible: saved.visible !== false, locked: saved.locked === true,
       field: available.numeric.includes(saved.field) ? saved.field : '', units: String(saved.units || '').slice(0, 60),
       timeField: available.temporal.includes(saved.timeField) ? saved.timeField : '',
@@ -117,41 +124,50 @@ export function validateWorkspace(value, validatedDatasets = null) {
 }
 
 export function styleLayers(layer, rendered) {
+  const style = normalizeLayerStyle(layer);
+  const uniformColor = style.color || '';
   const source = `studio-data-${layer.id}`;
   const colors = PALETTES[layer.palette]?.colors || PALETTES.olive.colors;
-  const middle = colors[Math.floor(colors.length / 2)];
-  const color = rendered.legend?.categorical?.length
+  const middle = uniformColor || colors[Math.floor(colors.length / 2)];
+  const color = uniformColor || (rendered.legend?.categorical?.length
     ? ['match', ['coalesce', ['get', '__category'], ''], ...rendered.legend.categorical.flatMap((category) => [category.value, category.color]), '#a7aca4']
-    : ['interpolate', ['linear'], ['coalesce', ['get', '__weight'], .5], ...colors.flatMap((color, index) => [index / (colors.length - 1), color])];
-  const opacity = layer.opacity;
+    : ['interpolate', ['linear'], ['coalesce', ['get', '__weight'], .5], ...colors.flatMap((color, index) => [index / (colors.length - 1), color])]);
+  const opacity = style.opacity ?? .75;
   const base = { source, layout: { visibility: layer.visible ? 'visible' : 'none' } };
   const prefix = `studio-${layer.id}`;
   const types = new Set([rendered.geometryType, ...rendered.data.features.map((feature) => feature.geometry?.type)]);
-  if (layer.visualization === 'heatmap') return [{
-    ...base, id: `${prefix}-heat`, type: 'heatmap', paint: {
-      'heatmap-weight': ['coalesce', ['get', '__heatWeight'], 0], 'heatmap-intensity': 1,
-      'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 5, 12, 15, 44], 'heatmap-opacity': opacity,
-      'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'], 0, 'rgba(0,0,0,0)', .15, colors[0], .5, middle, 1, colors.at(-1)],
-    },
-  }];
+  if (layer.visualization === 'heatmap') {
+    const heatColors = uniformColor
+      ? [0, `rgba(${uniformColor.slice(1).match(/../g).map((hex) => parseInt(hex, 16)).join(',')},0)`, 1, uniformColor]
+      : [0, 'rgba(0,0,0,0)', .15, colors[0], .5, middle, 1, colors.at(-1)];
+    return [{
+      ...base, id: `${prefix}-heat`, type: 'heatmap', paint: {
+        'heatmap-weight': ['coalesce', ['get', '__heatWeight'], 0], 'heatmap-intensity': 1,
+        'heatmap-radius': style.pointRadius ?? ['interpolate', ['linear'], ['zoom'], 5, 12, 15, 44], 'heatmap-opacity': opacity,
+        'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'], ...heatColors],
+      },
+    }];
+  }
   if (types.has('Polygon') || types.has('MultiPolygon')) {
     const extruded = ['extrusion', 'surface'].includes(layer.visualization);
-    return [{
+    const layers = [{
       ...base, id: `${prefix}-fill`, type: extruded ? 'fill-extrusion' : 'fill',
       paint: extruded ? { 'fill-extrusion-color': color, 'fill-extrusion-opacity': opacity, 'fill-extrusion-height': ['max', 0, ['coalesce', ['get', '__height'], 0]], 'fill-extrusion-base': 0, 'fill-extrusion-vertical-gradient': true }
         : { 'fill-color': color, 'fill-opacity': opacity, 'fill-outline-color': middle },
     }];
+    if (style.lineWidth !== undefined) layers.push({ ...base, id: `${prefix}-outline`, type: 'line', layout: { ...base.layout, 'line-join': 'round' }, paint: { 'line-color': middle, 'line-opacity': opacity, 'line-width': style.lineWidth } });
+    return layers;
   }
   if (types.has('LineString') || types.has('MultiLineString')) {
-    const layers = [{ ...base, id: `${prefix}-line`, type: 'line', layout: { ...base.layout, 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': color, 'line-opacity': opacity, 'line-width': layer.visualization === 'contours' ? 1.3 : ['interpolate', ['linear'], ['coalesce', ['get', '__weight'], .5], 0, 1.5, 1, 4] } }];
-    if (layer.visualization === 'flow') layers.push({ ...base, id: `${prefix}-direction`, type: 'symbol', layout: { ...base.layout, 'symbol-placement': 'line', 'symbol-spacing': 110, 'text-field': '>', 'text-font': ['Noto Sans Regular'], 'text-size': 14, 'text-rotation-alignment': 'map', 'text-keep-upright': false }, paint: { 'text-color': colors.at(-1), 'text-opacity': opacity, 'text-halo-color': '#171b18', 'text-halo-width': 1 } });
+    const layers = [{ ...base, id: `${prefix}-line`, type: 'line', layout: { ...base.layout, 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': color, 'line-opacity': opacity, 'line-width': style.lineWidth ?? (layer.visualization === 'contours' ? 1.3 : ['interpolate', ['linear'], ['coalesce', ['get', '__weight'], .5], 0, 1.5, 1, 4]) } }];
+    if (layer.visualization === 'flow') layers.push({ ...base, id: `${prefix}-direction`, type: 'symbol', layout: { ...base.layout, 'symbol-placement': 'line', 'symbol-spacing': 110, 'text-field': '>', 'text-font': ['Noto Sans Regular'], 'text-size': 14, 'text-rotation-alignment': 'map', 'text-keep-upright': false }, paint: { 'text-color': uniformColor || colors.at(-1), 'text-opacity': opacity, 'text-halo-color': '#171b18', 'text-halo-width': 1 } });
     return layers;
   }
   return [{
     ...base, id: `${prefix}-point`, type: 'circle', paint: {
       'circle-color': color, 'circle-opacity': opacity,
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 3, 15, layer.visualization === 'tactical' ? 9 : 7],
-      'circle-stroke-width': layer.visualization === 'tactical' ? 2 : 1, 'circle-stroke-color': '#f0efe8', 'circle-stroke-opacity': opacity,
+      'circle-radius': style.pointRadius ?? ['interpolate', ['linear'], ['zoom'], 5, 3, 15, layer.visualization === 'tactical' ? 9 : 7],
+      'circle-stroke-width': style.lineWidth ?? (layer.visualization === 'tactical' ? 2 : 1), 'circle-stroke-color': '#f0efe8', 'circle-stroke-opacity': opacity,
     },
   }];
 }
@@ -312,19 +328,19 @@ export class MeridianStudio {
     this.save();
   }
 
-  commit(label, before) {
+  commit(label, before, { invalidateCache = true } = {}) {
     this.workspace.updatedAt = Date.now();
     const history = [...this.workspace.history, { label, time: Date.now(), before, after: this.snapshot() }].slice(-20);
     if (new Blob([JSON.stringify({ meridianStudio: 1, workspace: { ...this.workspace, history, future: [] } })]).size > MAX_WORKSPACE_BYTES) throw new Error('This workspace would exceed the 32 MB backup limit. Use a separate workspace for additional data.');
     this.workspace.history = history;
     this.workspace.future = [];
-    this.cache.clear();
+    if (invalidateCache) this.cache.clear();
     this.render();
     this.save();
     this.app.updateActionChip();
   }
 
-  mutate(label, operation, { record = true } = {}) {
+  mutate(label, operation, { record = true, invalidateCache = true } = {}) {
     if (this.app.undoing || record && (this.app.agentSubmitting || this.app.agentRunId)) {
       this.status('Wait for the current map operation to finish before editing the workspace.', true);
       return false;
@@ -333,10 +349,10 @@ export class MeridianStudio {
     const datasetIds = new Set(Object.keys(this.workspace.datasets));
     try {
       operation();
-      if (record) this.commit(label, before);
+      if (record) this.commit(label, before, { invalidateCache });
       else {
         if (new Blob([JSON.stringify({ meridianStudio: 1, workspace: this.workspace })]).size > MAX_WORKSPACE_BYTES) throw new Error('This workspace would exceed its 32 MB backup limit.');
-        this.workspace.updatedAt = Date.now(); this.cache.clear(); this.render(); this.save();
+        this.workspace.updatedAt = Date.now(); if (invalidateCache) this.cache.clear(); this.render(); this.save();
       }
     } catch (error) {
       Object.assign(this.workspace, before);
@@ -663,7 +679,10 @@ export class MeridianStudio {
     const layer = this.selectedLayer();
     if (!layer) return;
     if (layer.locked) return this.status('Unlock this layer before changing its data or visual settings.', true);
-    const candidate = { ...layer, ...patch, filters: { ...layer.filters, ...patch.filters } };
+    let style;
+    try { style = normalizeLayerStyle(patch); }
+    catch (error) { this.status(error.message, true); this.renderSettings(); return; }
+    const candidate = { ...layer, ...patch, ...style, filters: { ...layer.filters, ...patch.filters } };
     if (candidate.filters.min !== null && candidate.filters.max !== null && candidate.filters.min > candidate.filters.max) {
       this.status('The minimum threshold cannot exceed the maximum.', true);
       this.renderSettings();
@@ -738,7 +757,11 @@ export class MeridianStudio {
       const row = element('article', '', 'studio-layer');
       row.dataset.selected = String(layer.id === this.workspace.selectedLayerId);
       const heading = element('div', '', 'studio-layer-heading');
-      const visible = actionButton(layer.visible ? 'On' : 'Off', `${layer.visible ? 'Hide' : 'Show'} ${layer.name}`, () => this.mutate(`Toggle ${layer.name}`, () => { layer.visible = !layer.visible; }));
+      const apply = (operation) => {
+        try { this.applyOperation({ ...operation, layerId: layer.id }); }
+        catch (error) { this.status(error.message, true); }
+      };
+      const visible = actionButton(layer.visible ? 'On' : 'Off', `${layer.visible ? 'Hide' : 'Show'} ${layer.name}`, () => apply({ action: 'visibility', visible: !layer.visible }), layer.locked);
       visible.setAttribute('aria-pressed', String(layer.visible));
       const select = actionButton(layer.name, `Select ${layer.name}`, () => {
         this.workspace.selectedLayerId = layer.id;
@@ -752,7 +775,7 @@ export class MeridianStudio {
       heading.append(visible, select);
       const metadata = element('p', `${VISUALIZATIONS[layer.visualization]?.label || layer.visualization} / ${this.workspace.datasets[layer.datasetId].features.length.toLocaleString()} features${layer.locked ? ' / Locked' : ''}`, 'studio-layer-meta');
       const tools = element('div', '', 'studio-layer-tools');
-      const move = (delta) => this.mutate(`Reorder ${layer.name}`, () => { const target = index + delta; [this.workspace.layers[index], this.workspace.layers[target]] = [this.workspace.layers[target], layer]; });
+      const move = (delta) => apply({ action: 'move', beforeLayerId: this.workspace.layers[index + (delta < 0 ? -1 : 2)]?.id ?? null });
       tools.append(
         actionButton('Up', `Move ${layer.name} up`, () => move(-1), layer.locked || index === 0),
         actionButton('Down', `Move ${layer.name} down`, () => move(1), layer.locked || index === this.workspace.layers.length - 1),
@@ -765,11 +788,7 @@ export class MeridianStudio {
         name.type = 'text'; name.value = layer.name; name.maxLength = 120; name.disabled = layer.locked;
         name.setAttribute('aria-label', 'Rename selected layer');
         name.addEventListener('change', () => this.updateLayer({ name: name.value.trim() || 'Unnamed layer' }, 'Rename layer'));
-        tools.append(actionButton('Copy', `Duplicate ${layer.name}`, () => this.applyOperation({ action: 'duplicate', layerId: layer.id }), this.workspace.layers.length >= MAX_LAYERS), actionButton('Remove', `Remove ${layer.name}`, () => this.mutate(`Remove ${layer.name}`, () => {
-          this.workspace.layers = this.workspace.layers.filter((item) => item.id !== layer.id);
-          this.workspace.selectedLayerId = this.workspace.layers[0]?.id || '';
-          this.closeInspector();
-        }), layer.locked));
+        tools.append(actionButton('Copy', `Duplicate ${layer.name}`, () => apply({ action: 'duplicate' }), this.workspace.layers.length >= MAX_LAYERS), actionButton('Remove', `Remove ${layer.name}`, () => apply({ action: 'remove' }), layer.locked));
         row.append(name, tools);
       }
       list.append(row);
@@ -817,7 +836,7 @@ export class MeridianStudio {
 
   renderedLayer(layer) {
     const context = this.contextFor(layer);
-    const key = JSON.stringify({ ...layer, opacity: undefined, visible: undefined, name: undefined, locked: undefined, renderError: undefined, context: { ...context, bounds: layer.filters.viewport ? context.bounds : null } });
+    const key = JSON.stringify({ ...layer, opacity: undefined, lineWidth: undefined, pointRadius: undefined, visible: undefined, name: undefined, locked: undefined, renderError: undefined, context: { ...context, bounds: layer.filters.viewport ? context.bounds : null } });
     let cached = this.cache.get(layer.id);
     if (!cached || cached.key !== key) {
       cached = { key, result: renderCollection(this.hydrated(layer), context) };
@@ -825,10 +844,11 @@ export class MeridianStudio {
       if (layer.visualization === 'tactical' && layer.filters.categoryField) {
         const field = layer.filters.categoryField;
         const values = [...new Set(this.workspace.datasets[layer.datasetId].features.map((feature) => JSON.stringify(feature.properties?.[field] ?? null)))].sort();
-        const colors = PALETTES[layer.palette].colors;
+        const colors = cached.result.legend.colors;
         cached.result.legend.categorical = values.map((value, index) => ({ value, label: JSON.parse(value) === null ? 'Unspecified' : String(JSON.parse(value)), color: colors[index % colors.length] }));
         cached.result.legend.title = field;
         cached.result.legend.unit = 'categories';
+        if (cached.result.legend.uniformColor) cached.result.legend.note += ' Categories share the uniform color; inspect markers for their category labels.';
         for (const feature of cached.result.data.features) feature.properties.__category = JSON.stringify(feature.properties?.[field] ?? null);
       }
       this.cache.set(layer.id, cached);
@@ -842,10 +862,11 @@ export class MeridianStudio {
     const desired = new Set();
     const specs = [];
     for (const layer of [...this.workspace.layers].reverse()) {
-      if (!this.enabled || !layer.visible) continue;
+      if (!this.enabled) continue;
       try {
-        const rendered = this.renderedLayer(layer);
         const sourceId = `studio-data-${layer.id}`;
+        if (!layer.visible && !map.getSource(sourceId)) continue;
+        const rendered = this.renderedLayer(layer);
         desired.add(sourceId);
         const source = map.getSource(sourceId);
         if (source) {
@@ -898,14 +919,17 @@ export class MeridianStudio {
           container.append(row);
         }
         if (legend.categorical.length > 12) container.append(element('small', `${legend.categorical.length} categories; inspect features for all labels.`));
-        container.append(element('small', 'Category colors remain stable while filtering. Inspect a marker for its text label.'));
+        container.append(element('small', legend.uniformColor ? `Uniform color ${legend.uniformColor}. Categories share this color; inspect a marker for its text label.` : 'Category colors remain stable while filtering. Inspect a marker for its text label.'));
       } else {
         const ramp = element('div', '', 'studio-legend-ramp');
-        ramp.style.background = `linear-gradient(90deg, ${(legend.colors || PALETTES[layer.palette].colors).join(', ')})`;
+        ramp.style.background = legendBackground(legend, layer.visualization);
         ramp.setAttribute('aria-hidden', 'true');
         const range = element('div', '', 'studio-legend-range');
         range.append(...[legend.min, legend.mid, legend.max].map((value) => element('span', number(value))));
         container.append(ramp, range);
+        if (legend.uniformColor) container.append(element('small', layer.visualization === 'heatmap'
+          ? `Single color ${legend.uniformColor}; increasing opacity shows relative intensity. The range describes source values.`
+          : `Uniform color ${legend.uniformColor}; color does not encode value differences. The range describes displayed values.`));
         if (layer.visualization === 'heatmap' && result.metrics.min === 0 && result.metrics.max === 0) container.append(element('small', 'All displayed source values are zero; no heat intensity is drawn.'));
         if (layer.source?.method === 'raster-window' && layer.source.caveat) container.append(element('small', layer.source.caveat, 'studio-legend-caveat'));
         if (legend.note || result.caveat) {
@@ -930,10 +954,14 @@ export class MeridianStudio {
                 const swatch = element('i'); swatch.style.background = category.color;
                 categoryRow.append(swatch, element('span', category.label)); row.append(categoryRow);
               }
+              if (scale.uniformColor) row.append(element('small', `Uniform color ${scale.uniformColor}; inspect markers for category labels.`));
             } else {
-              const ramp = element('div', '', 'studio-legend-ramp'); ramp.style.background = `linear-gradient(90deg, ${scale.colors.join(', ')})`;
+              const ramp = element('div', '', 'studio-legend-ramp'); ramp.style.background = legendBackground(scale, other.visualization);
               row.append(element('small', `${scale.title} / ${scale.unit || 'unit not provided'}`), ramp, element('small', `${number(scale.min)} / ${number(scale.mid)} / ${number(scale.max)}`));
               if (other.visualization === 'heatmap') row.append(element('small', 'Relative intensity; range shows source values.'));
+              if (scale.uniformColor) row.append(element('small', other.visualization === 'heatmap'
+                ? `Single color ${scale.uniformColor}; increasing opacity shows relative intensity.`
+                : `Uniform color ${scale.uniformColor}; color does not encode value differences.`));
             }
           } catch (error) { row.append(element('small', error.message)); }
           details.append(row);
@@ -1044,6 +1072,8 @@ export class MeridianStudio {
           const available = fieldsFor(this.workspace.datasets[layer.datasetId]);
           return {
             id: layer.id, name: layer.name, visualization: layer.visualization, field: layer.field, units: layer.units,
+            palette: layer.palette, color: layer.color || '', opacity: layer.opacity, visible: layer.visible, locked: layer.locked,
+            ...(layer.lineWidth !== undefined ? { lineWidth: layer.lineWidth } : {}), ...(layer.pointRadius !== undefined ? { pointRadius: layer.pointRadius } : {}),
             featureCount: this.workspace.datasets[layer.datasetId].features.length,
             source: { name: String(layer.source?.name || 'User-provided data').slice(0, 120), caveat: String(layer.source?.caveat || '').slice(0, 400) },
             numericFields: available.numeric.filter((name) => name.length <= 128).slice(0, 16), categoricalFields: available.categorical.filter((name) => name.length <= 128).slice(0, 16), timeFields: available.temporal.filter((name) => name.length <= 128).slice(0, 16),
@@ -1076,12 +1106,54 @@ export class MeridianStudio {
     return true;
   }
 
-  applyOperation(operation, { fromAgent = false } = {}) {
-    if (operation.workspaceId && operation.workspaceId !== this.workspace.id) throw new Error('This operation belongs to a different workspace.');
+  applyOperation(operation, { fromAgent = false, outerMapOperation = false } = {}) {
+    const style = normalizeLayerStyle(operation);
+    const record = !fromAgent && !outerMapOperation;
+    if (Object.hasOwn(operation, 'workspaceId') && operation.workspaceId !== this.workspace.id) throw new Error('This operation belongs to a different workspace.');
     const layer = this.workspace.layers.find((candidate) => candidate.id === operation.layerId);
     if (!layer) throw new Error('Select or import a real dataset before running this operation.');
-    if (!['visualize', 'filter', 'summarize', 'hotspots', 'compare', 'duplicate'].includes(operation.action)) throw new Error('This Studio operation is not supported.');
-    if (layer.locked && ['visualize', 'filter'].includes(operation.action)) throw new Error('The target layer is locked. Unlock it before modifying it.');
+    if (typeof operation.action !== 'string') throw new Error('This Studio operation is not supported.');
+    const layerAction = Object.hasOwn(LAYER_ACTIONS, operation.action);
+    if (!layerAction && !['visualize', 'filter', 'summarize', 'hotspots', 'compare', 'duplicate'].includes(operation.action)) throw new Error('This Studio operation is not supported.');
+    if (layer.locked && (layerAction || ['visualize', 'filter', 'compare'].includes(operation.action))) throw new Error('The target layer is locked. Unlock it before modifying it.');
+    const scope = operation.scope;
+    if (Object.hasOwn(operation, 'scope')) {
+      if (!scope || typeof scope !== 'object' || Array.isArray(scope) || ![Object.prototype, null].includes(Object.getPrototypeOf(scope))) throw new Error('This operation requires a valid Studio scope.');
+      if (Object.getOwnPropertySymbols(scope).length || Object.entries(Object.getOwnPropertyDescriptors(scope)).some(([key, descriptor]) => !['type', 'bounds', 'layerId'].includes(key) || descriptor.get || descriptor.set) || !['viewport', 'selection', 'layer', 'workspace'].includes(scope.type)) throw new Error('This operation requires a valid Studio scope.');
+    }
+    if (scope && Object.hasOwn(scope, 'layerId') && scope.layerId !== layer.id) throw new Error('The operation targets a layer outside the selected scope.');
+    if (scope?.type === 'layer' && (scope.layerId !== layer.id || scope.layerId !== this.workspace.selectedLayerId)) throw new Error('The operation targets a layer outside the selected scope.');
+    if (scope && (Object.hasOwn(scope, 'bounds') || ['viewport', 'selection'].includes(scope.type)) && !validBounds(scope.bounds)) throw new Error('Select a valid geographic region before using this scope.');
+    if (layerAction) {
+      // Presentation changes keep the layer's existing data filters and geographic extent.
+      if (fromAgent && (!Object.hasOwn(operation, 'workspaceId') || !scope)) throw new Error('Agent layer changes require the exact workspace and scope.');
+      const allowed = ['action', 'layerId', 'workspaceId', 'scope', ...LAYER_ACTIONS[operation.action]];
+      if (Object.getOwnPropertyNames(operation).some((key) => !allowed.includes(key))) throw new Error('Unsupported parameter for this Studio operation.');
+      if (operation.action === 'style' && !Object.keys(style).length) throw new Error('Specify at least one layer style setting.');
+      if (operation.action === 'visibility' && typeof operation.visible !== 'boolean') throw new Error('Visibility must be a boolean.');
+      if (operation.action === 'move' && operation.beforeLayerId !== null && (typeof operation.beforeLayerId !== 'string' || !this.workspace.layers.some((item) => item.id === operation.beforeLayerId))) throw new Error('The before-layer target is not in the current workspace.');
+      const changed = this.mutate(`${operation.action[0].toUpperCase()}${operation.action.slice(1)} ${layer.name}`, () => {
+        if (operation.action === 'style') Object.assign(layer, style);
+        else if (operation.action === 'visibility') layer.visible = operation.visible;
+        else if (operation.action === 'remove') {
+          this.workspace.layers = this.workspace.layers.filter((item) => item.id !== layer.id);
+          this.cache.delete(layer.id);
+          if (this.workspace.selectedLayerId === layer.id) {
+            this.workspace.selectedLayerId = this.workspace.layers[0]?.id || '';
+            this.workspace.time = null;
+            this.closeInspector();
+          }
+        } else if (operation.beforeLayerId !== layer.id) {
+          const layers = this.workspace.layers.filter((item) => item.id !== layer.id);
+          layers.splice(operation.beforeLayerId === null ? layers.length : layers.findIndex((item) => item.id === operation.beforeLayerId), 0, layer);
+          this.workspace.layers = layers;
+        }
+      }, { record, invalidateCache: false });
+      if (!changed) throw new Error('The operation could not be applied. The previous valid state was retained.');
+      this.status(`${operation.action[0].toUpperCase()}${operation.action.slice(1)} applied to ${layer.name}.`);
+      return;
+    }
+    if (Object.keys(style).length) throw new Error('Use the style action to change layer styles.');
     if (['duplicate', 'hotspots'].includes(operation.action) && this.workspace.layers.length >= MAX_LAYERS) throw new Error('Remove an unused layer before creating another output.');
     const available = fieldsFor(this.workspace.datasets[layer.datasetId]);
     const candidate = { ...layer, filters: { ...layer.filters } };
@@ -1111,10 +1183,7 @@ export class MeridianStudio {
       candidate.filters.category = category;
     }
     if (candidate.filters.min !== null && candidate.filters.max !== null && candidate.filters.min > candidate.filters.max) throw new Error('The minimum threshold cannot exceed the maximum.');
-    const scope = operation.scope;
-    if (scope?.type === 'layer' && scope.layerId !== layer.id) throw new Error('The operation targets a layer outside the selected scope.');
     if (scope && ['viewport', 'selection'].includes(scope.type)) {
-      if (!validBounds(scope.bounds)) throw new Error('Select a valid geographic region before using this scope.');
       candidate.scopeBounds = scope.bounds;
       candidate.filters.viewport = false;
       candidate.ignoreRegion = false;
@@ -1127,10 +1196,11 @@ export class MeridianStudio {
     if (operation.action === 'compare') {
       renderCollection(this.hydrated(candidate), context);
       if (!this.startCompare()) throw new Error('The reference map could not be captured. Wait for the map to load and try again.');
-      this.mutate(`Compare ${layer.name}`, () => {
+      const changed = this.mutate(`Compare ${layer.name}`, () => {
         this.workspace.selectedLayerId = layer.id;
         Object.assign(layer, candidate);
-      }, { record: !fromAgent });
+      }, { record });
+      if (!changed) throw new Error('The operation could not be applied. The previous valid state was retained.');
       return;
     }
     if (['visualize', 'filter'].includes(operation.action)) renderCollection(this.hydrated(candidate), context);
@@ -1161,7 +1231,7 @@ export class MeridianStudio {
         this.workspace.analyses = this.workspace.analyses.slice(-40);
         this.workspace.insights = this.workspace.insights.slice(-40);
       }
-    }, { record: !fromAgent });
+    }, { record });
     if (!changed) throw new Error('The operation could not be applied. The previous valid state was retained.');
     if (['extrusion', 'surface'].includes(candidate.visualization) && !this.app.terrainEnabled) this.app.setTerrainView(true);
     this.setPane('right');
