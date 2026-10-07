@@ -253,6 +253,8 @@ def _check_tree(value, max_depth=32, property_values=False):
                     raise ServiceError("Web source JSON contains unsafe properties.", 422)
                 stack.append((child, depth + 1))
         elif isinstance(item, list):
+            if len(item) > 500000:
+                raise ServiceError("Web source JSON value limit exceeded.", 413)
             stack.extend((child, depth + 1) for child in item)
         elif type(item) in {float, int}:
             try:
@@ -261,8 +263,11 @@ def _check_tree(value, max_depth=32, property_values=False):
                 finite = False
             if not finite:
                 raise ServiceError("Web source JSON contains non-finite numbers.", 422)
-        elif property_values and isinstance(item, str) and len(item) > 8000:
-            raise ServiceError("Web source property text limit exceeded.", 413)
+        elif isinstance(item, str):
+            if any(0xD800 <= ord(char) <= 0xDFFF for char in item):
+                raise ServiceError("Web source JSON contains invalid Unicode.", 422)
+            if property_values and len(item) > 8000:
+                raise ServiceError("Web source property text limit exceeded.", 413)
 
 
 def _load_json(text):
@@ -309,6 +314,8 @@ def _geometry(geometry, budget):
     kind = geometry.get("type") if isinstance(geometry, dict) else None
     if not isinstance(kind, str) or kind not in levels:
         raise ServiceError("Web source GeoJSON geometry is unsupported.", 422)
+    if geometry.get("crs") is not None:
+        raise ServiceError("Web source GeoJSON coordinate reference metadata is unsupported.", 422)
     coordinates = geometry.get("coordinates")
 
     def positions(value, level):
@@ -340,6 +347,8 @@ def _geometry(geometry, budget):
 def _dataset(value):
     if not isinstance(value, dict) or value.get("type") not in ("FeatureCollection", "Feature"):
         return None
+    if value.get("crs") is not None:
+        raise ServiceError("Web source GeoJSON coordinate reference metadata is unsupported.", 422)
     features = value.get("features") if value["type"] == "FeatureCollection" else [value]
     if not isinstance(features, list):
         raise ServiceError("Web source GeoJSON features are invalid.", 422)
@@ -349,6 +358,8 @@ def _dataset(value):
     for feature in features:
         if not isinstance(feature, dict) or feature.get("type") != "Feature" or "properties" not in feature:
             raise ServiceError("Web source GeoJSON feature is invalid.", 422)
+        if feature.get("crs") is not None:
+            raise ServiceError("Web source GeoJSON coordinate reference metadata is unsupported.", 422)
         properties = feature.get("properties")
         if properties is not None and not isinstance(properties, dict):
             raise ServiceError("Web source GeoJSON properties are invalid.", 422)
@@ -372,7 +383,7 @@ def _json_text(value):
 class _HTMLDocument(HTMLParser):
     _void = set("area base br col embed hr img input link meta param source track wbr".split())
     _skip = set("script style nav noscript template iframe object embed svg footer aside".split())
-    _blocks = set("p div section article main h1 h2 h3 h4 h5 h6 li tr br hr table".split())
+    _blocks = set("p div section article main h1 h2 h3 h4 h5 h6 li tr td th br hr table".split())
 
     def __init__(self, url):
         super().__init__(convert_charrefs=True)
@@ -439,7 +450,7 @@ class _HTMLDocument(HTMLParser):
             if old in targets:
                 self._close(index)
                 break
-            if old == "table" or (tag in {"td", "th"} and old == "tr"):
+            if old == "table" or (tag in {"td", "th"} and old == "tr") or (tag == "li" and old in {"ul", "ol"}):
                 break
         attrs = dict(attrs)
         skipped = (bool(self.stack and self.stack[-1][1]) or tag in self._skip or "hidden" in attrs
@@ -489,17 +500,17 @@ class _HTMLDocument(HTMLParser):
     def handle_data(self, data):
         if self.stack and self.stack[-1][1]:
             return
-        text = " ".join(data.split())
+        text = re.sub(r"\s+", " ", data)
         if any(tag == "title" for tag, _ in self.stack):
             self.title += text[:max(0, 160 - len(self.title))]
             return
-        self._text(text + " " if text else "")
+        self._text(text)
         if self.active_tables and self.active_tables[-1] is not None:
             table = self.active_tables[-1]
             if table["cell"] is not None:
-                table["cell"] += (text + " ")[:max(0, 500 - len(table["cell"]))]
+                table["cell"] += text[:max(0, 500 - len(table["cell"]))]
         if self.anchor is not None:
-            self.anchor["title"] += (text + " ")[:max(0, 160 - len(self.anchor["title"]))]
+            self.anchor["title"] += text[:max(0, 160 - len(self.anchor["title"]))]
 
 
 def _scalar(value):
@@ -535,10 +546,10 @@ def _parse_csv(text, document):
             if not any(cell.strip() for cell in row):
                 continue
             count += 1
-            if count > MAX_FEATURES or any(len(cell) > 8000 for cell in row):
-                raise ServiceError("Web source CSV row or field limit exceeded.", 413)
             if len(row) > len(headers):
                 raise ServiceError("Web source CSV row has too many columns.", 422)
+            if count > MAX_FEATURES or any(len(cell) > 8000 for cell in row):
+                raise ServiceError("Web source CSV row or field limit exceeded.", 413)
             row += [""] * (len(headers) - len(row))
             if len(table["rows"]) < 100:
                 table["rows"].append([cell[:500] for cell in row[:30]])
@@ -571,7 +582,8 @@ def parse_web_document(raw: bytes, content_type: str, url: str) -> dict:
     media = _media_type(content_type)
     extension = urlsplit(url).path.lower().rsplit(".", 1)[-1]
     if extension in {"pdf", "tif", "tiff", "png", "jpg", "jpeg", "gif", "exe", "dll", "zip", "gz", "wasm"} or raw.startswith(
-            (b"%PDF", b"MZ", b"\x7fELF", b"\x89PNG", b"GIF8", b"II*\x00", b"MM\x00*", b"PK\x03\x04", b"\x1f\x8b")):
+            (b"%PDF", b"MZ", b"\x7fELF", b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF", b"II*\x00", b"MM\x00*",
+             b"II+\x00", b"MM\x00+", b"PK\x03\x04", b"\x1f\x8b")):
         raise ServiceError("Web source format is unsupported; binary sources are not parsed.", 415)
     message = Message()
     message["Content-Type"] = content_type

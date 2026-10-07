@@ -114,7 +114,7 @@ class GroundedWebAgentTests(BackendCase):
         update = result["mapUpdate"]["dataset"]
         self.assertEqual(update["data"], self.dataset)
         self.assertIsNot(update["data"], self.dataset)
-        self.assertEqual(update["scope"], {"type": "viewport", "bounds": [0, 0, 10, 10]})
+        self.assertEqual(update["scope"], {"type": "workspace"})
         self.assertEqual(update["workspaceId"], "workspace-a")
         self.assertEqual(update["source"]["url"], "https://example.org/population")
         self.assertIn("not independently verified", update["source"]["caveat"])

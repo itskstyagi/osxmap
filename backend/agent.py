@@ -373,12 +373,26 @@ class MapAgentService:
         if not isinstance(arguments, dict):
             return {"error": "Tool arguments must be a JSON object (e.g. {\"query\": \"Paris\"}), not a " + type(arguments).__name__ + "."}
         self._emit(run, "agent.status", stage=name, label=self.tools.stage_label(name))
+        if name in {"search_web", "read_web_source", "load_web_dataset", "map_source_table", "report_limitation"}:
+            try:
+                return self._execute_research_tool(run, context, name, arguments)
+            except ServiceError as error:
+                if error.status == 409:
+                    raise
+                return {"error": str(error)[:700], "status": error.status, "retryAfter": error.retry_after, "message": "This tool did not produce a valid map update. Try another already-discovered source within the run budget, or honestly report the unsupported source/data capability."}
         if name in {"present_map", "clear_map", "studio_operation", "load_web_dataset", "map_source_table"}:
             def mutation() -> dict[str, Any]:
                 self._check_cancelled(run)
                 return self.tools.execute(context, name, arguments)
 
             result, run.expected = self.tools.dependencies.mutate_workspace(run.expected, mutation)
+            run.mapped = run.mapped or "mapUpdate" in result
+            return result
+        return self.tools.execute(context, name, arguments)
+
+    def _execute_research_tool(self, run: AgentRun, context: AgentRunContext, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name in {"load_web_dataset", "map_source_table"}:
+            result, run.expected = self.tools.dependencies.mutate_workspace(run.expected, lambda: self.tools.execute(context, name, arguments))
             run.mapped = run.mapped or "mapUpdate" in result
             return result
         return self.tools.execute(context, name, arguments)
