@@ -240,6 +240,8 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "field": {"type": "string", "description": "Exact numericFields from the read source; required for heatmap."},
                     "units": {"type": "string", "maxLength": 60, "description": "Unit stated in the actual source. Leave blank rather than guessing counts versus density."},
                     "visualization": {"type": "string", "enum": ["heatmap", "points", "choropleth"]},
+                    "timeField": {"type": "string", "description": "Exact source temporal field from the reader. Required with timeValue for datasets containing multiple observations/years."},
+                    "timeValue": {"type": "string", "description": "Exact normalized observation/year returned by source timeValues; never combine census years into one population layer."},
                 },
                 "required": ["sourceRef"], "additionalProperties": False,
             },
@@ -256,6 +258,8 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "sourceRef": {"type": "string"}, "tableIndex": {"type": "integer", "minimum": 0},
                     "nameColumn": {"type": "string"}, "valueColumn": {"type": "string"},
                     "regionColumn": {"type": "string", "description": "Optional exact source-table administrative-region column; required in workspace scope. Its original row text must match the returned location address, not a model-invented region."},
+                    "timeColumn": {"type": "string", "description": "Exact source-table year/date column for temporal records."},
+                    "timeValue": {"type": "string", "description": "Exact source observation/year to retain, required for tables with multiple times."},
                     "matches": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "object", "properties": {"rowIndex": {"type": "integer", "minimum": 0}, "placeRef": {"type": "string"}}, "required": ["rowIndex", "placeRef"], "additionalProperties": False}},
                     "name": {"type": "string", "maxLength": 120}, "units": {"type": "string", "maxLength": 60},
                     "visualization": {"type": "string", "enum": ["heatmap", "points"]},
@@ -423,6 +427,35 @@ class AgentTools:
                     fields.add(key)
         return sorted(fields)[:80]
 
+    @staticmethod
+    def _time_value(value: Any) -> str | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        text = str(value).strip()
+        if re.fullmatch(r"(?:18|19|20|21)\d{2}", text):
+            return text
+        if not re.match(r"^\d{4}-\d{2}-\d{2}(?:T|$)", text):
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).isoformat()
+        except ValueError:
+            return None
+
+    @classmethod
+    def _temporal_fields(cls, data: dict[str, Any]) -> dict[str, list[str]]:
+        values: dict[str, set[str]] = {}
+        for feature in data.get("features", []):
+            properties = feature.get("properties") if isinstance(feature, dict) else None
+            if not isinstance(properties, dict):
+                continue
+            for key, value in properties.items():
+                if not isinstance(key, str) or not re.search(r"year|date|observ|time|census", key, re.I):
+                    continue
+                time_value = cls._time_value(value)
+                if time_value:
+                    values.setdefault(key, set()).add(time_value)
+        return {key: sorted(values[key]) for key in sorted(values)[:16]}
+
     def _read_web_source(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
         source = self._source(context, arguments.get("sourceRef"))
         reference = source["sourceRef"]
@@ -456,7 +489,8 @@ class AgentTools:
         data = document.get("dataset")
         dataset = None
         if isinstance(data, dict) and isinstance(data.get("features"), list):
-            dataset = {"featureCount": len(data["features"]), "numericFields": self._dataset_fields(data), "geometryTypes": sorted({str(feature.get("geometry", {}).get("type", "")) for feature in data["features"] if isinstance(feature, dict) and isinstance(feature.get("geometry"), dict)}), "metadata": _text(json.dumps(data.get("metadata", {}), ensure_ascii=True), 2000)}
+            times = self._temporal_fields(data)
+            dataset = {"featureCount": len(data["features"]), "numericFields": self._dataset_fields(data), "temporalFields": list(times), "timeValues": {key: values[:24] for key, values in times.items()}, "geometryTypes": sorted({str(feature.get("geometry", {}).get("type", "")) for feature in data["features"] if isinstance(feature, dict) and isinstance(feature.get("geometry"), dict)}), "metadata": _text(json.dumps(data.get("metadata", {}), ensure_ascii=True), 2000)}
         return {
             "source": copy.deepcopy(source), "format": _text(document.get("format"), 40),
             "text": _text(document.get("text"), 24000), "tables": tables, "links": links, "dataset": dataset,
@@ -474,6 +508,8 @@ class AgentTools:
             raise ServiceError("The requested sourced visualization is not supported.", 400)
         if visualization == "heatmap" and not field:
             raise ServiceError("Choose an exact numeric source field for the heatmap. Population is not inferred.", 400)
+        if visualization in {"heatmap", "points"} and any(not isinstance(feature.get("geometry"), dict) or feature["geometry"].get("type") != "Point" for feature in data.get("features", [])):
+            raise ServiceError("Sourced quantitative point/heatmap layers require original Point observations. Regional polygon totals, line values, or a shared MultiPoint value cannot be redistributed into valley population intensity.", 400)
         if visualization == "choropleth" and not any(isinstance(feature.get("geometry"), dict) and feature["geometry"].get("type") in {"Polygon", "MultiPolygon"} for feature in data.get("features", [])):
             raise ServiceError("A quantitative sourced choropleth needs real polygon boundaries. Point-count cells would discard the selected population values.", 400)
         if len(json.dumps(data, ensure_ascii=True, allow_nan=False).encode("utf-8")) > 4 * 1024 * 1024:
@@ -483,7 +519,8 @@ class AgentTools:
         if not isinstance(units, str) or len(units) > 60:
             raise ServiceError("Source units must be a string of at most 60 characters.", 400)
         notes = f"{caveat} Source: {source['url']}. Read {source.get('readAt', '')}. Units and population reference year must be checked against the original source; partial coverage is not a complete regional census."
-        provenance = {"name": source["title"], "url": source["url"], "attribution": source.get("publisher") or source["title"], "caveat": notes, "retrievedAt": source.get("readAt", ""), "publishedDate": source.get("date", ""), "method": "coordinate-source" if "Matched table" not in caveat else "source-table-place-join"}
+        reference_time = arguments.get("timeValue", "")
+        provenance = {"name": source["title"], "url": source["url"], "attribution": source.get("publisher") or source["title"], "caveat": notes, "retrievedAt": source.get("readAt", ""), "publishedDate": source.get("date", ""), "referenceYear": reference_time, "method": "coordinate-source" if "Matched table" not in caveat else "source-table-place-join"}
         context.loaded_datasets += 1
         context.presented = True
         context.requires_presentation = False
@@ -498,7 +535,20 @@ class AgentTools:
         field = arguments.get("field", "")
         if not isinstance(field, str) or field and field not in self._dataset_fields(data):
             raise ServiceError("The dataset field must be an actual numeric field returned by the source reader.", 400)
-        return self._dataset_update(context, source, copy.deepcopy(data), arguments, "Parsed real GeoJSON/coordinate CSV supplied by the retrieved source; source accuracy is not independently verified.", field)
+        times = self._temporal_fields(data)
+        time_field, time_value = arguments.get("timeField", ""), arguments.get("timeValue", "")
+        if any(len(values) > 1 for values in times.values()) and not time_field:
+            raise ServiceError("This source contains multiple observation dates or census years. Choose an exact timeField and timeValue from the reader rather than combining them into a population heatmap.", 400)
+        selected = copy.deepcopy(data)
+        if time_field or time_value:
+            normalized = self._time_value(time_value)
+            if not isinstance(time_field, str) or time_field not in times or normalized not in times[time_field]:
+                raise ServiceError("The selected source timeField/timeValue does not exist.", 400)
+            selected["features"] = [feature for feature in selected["features"] if self._time_value((feature.get("properties") or {}).get(time_field)) == normalized]
+            arguments = {**arguments, "timeValue": normalized}
+        elif len(times) == 1 and len(next(iter(times.values()))) == 1:
+            arguments = {**arguments, "timeValue": next(iter(times.values()))[0]}
+        return self._dataset_update(context, source, selected, arguments, "Parsed real GeoJSON/coordinate CSV supplied by the retrieved source; source accuracy is not independently verified.", field)
 
     def _map_source_table(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
         source = self._source(context, arguments.get("sourceRef"))

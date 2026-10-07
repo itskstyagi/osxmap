@@ -1159,6 +1159,7 @@ export class MeridianStudio {
     const field = typeof update.field === 'string' ? update.field : '';
     if (field && !available.numeric.includes(field)) throw new Error('The source does not contain the requested numeric field.');
     if (!['points', 'heatmap', 'choropleth'].includes(update.visualization) || update.visualization === 'heatmap' && !field) throw new Error('A heatmap requires a real numeric source field.');
+    if (['heatmap', 'points'].includes(update.visualization) && data.features.some((feature) => feature.geometry.type !== 'Point')) throw new Error('Sourced heatmaps require original Point observations. Regional polygon or MultiPoint totals cannot be redistributed into population intensity.');
     const layer = makeLayer(data, {
       name: String(update.name || 'Researched geographic dataset').slice(0, 120), field, units: String(update.units || '').slice(0, 60), visualization: update.visualization,
       source: update.source && typeof update.source === 'object' ? update.source : { name: 'Web source', caveat: 'Review the source and its data date before use.' }, palette: 'thermal',
@@ -1167,6 +1168,7 @@ export class MeridianStudio {
     layer.ignoreRegion = scope.type === 'workspace';
     const rendered = renderCollection(layer, { ...this.contextFor(layer), region: layer.scopeBounds, time: null });
     if (!rendered.inputCount) throw new Error('No source observations fall inside the selected scope. The scope was not silently broadened.');
+    if (!rendered.data.features.length) throw new Error('No valid source values can be displayed inside the chosen scope. Missing observations were not treated as zero or replaced with invented values.');
     const changed = this.mutate(`Load sourced ${layer.name}`, () => {
       const datasetId = id();
       this.workspace.datasets[datasetId] = layer.data;
