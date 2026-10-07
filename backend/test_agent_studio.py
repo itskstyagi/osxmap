@@ -178,7 +178,7 @@ class ContextAndStudioTests(BackendCase):
 
     def test_all_schemas_enforce_the_fixed_parameter_allowlist(self):
         names = {tool["function"]["name"] for tool in AGENT_TOOL_SCHEMAS}
-        self.assertEqual(names, {"find_city", "search_places", "plan_route", "present_map", "clear_map", "ask_user", "studio_operation", "report_limitation"})
+        self.assertEqual(names, {"find_city", "search_places", "plan_route", "present_map", "clear_map", "ask_user", "studio_operation", "report_limitation", "search_web", "read_web_source", "load_web_dataset", "map_source_table"})
         context = self.tools.new_context(studio_context())
         for name in names | {"run_python", "read_settings"}:
             with self.subTest(name=name), self.assertRaises(server.ServiceError):
@@ -312,7 +312,7 @@ class CapabilityLimitationTests(BackendCase):
         run_id = service.start_run(hub.session, "Search the internet and create its population heatmap", {})
         event = hub.wait(run_id)
         self.assertEqual(event["type"], "agent.limitation")
-        self.assertIn("cannot browse arbitrary websites", event["message"])
+        self.assertIn("public source reader", event["message"])
         self.assertFalse(any(item["type"] == "agent.map" for _, item in hub.events))
         self.assertEqual(self.cache.capture_workspace(), before)
         self.assertEqual(len(client.messages), 3)

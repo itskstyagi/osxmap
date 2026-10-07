@@ -39,6 +39,7 @@ try:
     from .errors import ServiceError
     from .openai_client import OpenAIChatClient
     from .realtime import RealtimeHub
+    from .web_sources import fetch_web_document, validate_web_url
 except ImportError:  # Supports `python server.py` from the backend directory.
     from agent import MapAgentService
     from agent_tools import AgentDependencies, AgentTools
@@ -46,6 +47,7 @@ except ImportError:  # Supports `python server.py` from the backend directory.
     from errors import ServiceError
     from openai_client import OpenAIChatClient
     from realtime import RealtimeHub
+    from web_sources import fetch_web_document, validate_web_url
 
 
 EARTH_RADIUS = 6_371_008.8
@@ -334,6 +336,14 @@ class Cache:
                 (provider, request_key),
             ).fetchone()
         return json.loads(row["response_json"]) if row else None
+
+    def provider_received_at(self, provider: str, request_key: str) -> int | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT received_at FROM provider_responses WHERE provider = ? AND request_key = ? ORDER BY received_at DESC, response_id DESC LIMIT 1",
+                (provider, request_key),
+            ).fetchone()
+        return int(row["received_at"]) if row else None
 
     def put_provider_response(self, provider: str, request_key: str, request: dict[str, Any], response: Any) -> None:
         response_id = f"provider-response-{uuid.uuid4().hex}"
@@ -761,6 +771,10 @@ def serp_request_key(params: dict[str, Any]) -> str:
 
 def redact_provider_payload(value: Any) -> Any:
     """Preserve useful provider data without retaining credentials in local storage."""
+    if isinstance(value, str):
+        if CONFIG.serp_api_key:
+            value = value.replace(CONFIG.serp_api_key, "[redacted]")
+        value = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|authorization|token)\s*[:=]\s*)[^\s&,;]+", r"\1[redacted]", value)
     if isinstance(value, str) and value.startswith(("http://", "https://")):
         parsed = urllib.parse.urlsplit(value)
         params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -814,17 +828,121 @@ def fetch_serp_response(params: dict[str, Any]) -> Any:
     def task() -> Any:
         stored = CACHE.get_provider_response("serpapi", key)
         if stored is not None:
-            return stored
+            validate_serp_payload(stored)
+            return redact_provider_payload(stored)
         if not CONFIG.serp_api_key:
             raise ServiceError("SerpApi is not configured and this request is not stored locally.", 503)
-        payload = fetch_json(
+        payload = fetch_serp_json(
             "https://serpapi.com/search.json?" + urllib.parse.urlencode({**request, "api_key": CONFIG.serp_api_key}),
-            {"Accept": "application/json"}, 20,
         )
+        validate_serp_payload(payload)
         CACHE.put_provider_response("serpapi", key, request, payload)
-        return payload
+        return redact_provider_payload(payload)
 
     return SERP_QUEUE.run(task)
+
+
+def validate_serp_payload(payload: Any) -> None:
+    if not isinstance(payload, dict) or not isinstance(payload.get("search_metadata", {}), dict):
+        raise ServiceError("SerpApi returned an invalid search response.", 503)
+    error = payload.get("error")
+    status = payload.get("search_metadata", {}).get("status")
+    if error or status not in {None, "Success"}:
+        if isinstance(error, str) and "hasn't returned any results" in error.casefold():
+            return
+        raise ServiceError("SerpApi could not complete this search. Check provider configuration and quota, then retry.", 503)
+
+
+def fetch_serp_json(url: str) -> dict[str, Any]:
+    """Read only a fixed SerpApi endpoint with bounded JSON and safe errors."""
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "Accept-Encoding": "identity"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            final = urllib.parse.urlsplit(response.geturl())
+            if final.scheme != "https" or final.hostname != "serpapi.com" or final.username or final.password:
+                raise ServiceError("SerpApi redirected to an unsupported endpoint.", 503)
+            raw = response.read(4 * 1024 * 1024 + 1)
+            if len(raw) > 4 * 1024 * 1024:
+                raise ServiceError("SerpApi response exceeded the 4 MB limit.", 503)
+            payload = json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code == 429:
+            raise ServiceError("SerpApi is rate limiting requests.", 503, retry_after_seconds(error.headers.get("Retry-After"))) from None
+        raise ServiceError(f"SerpApi returned HTTP {error.code}.", 503) from None
+    except (urllib.error.URLError, OSError, UnicodeError, ValueError):
+        raise ServiceError("SerpApi returned invalid data or could not be reached.", 503) from None
+    if not isinstance(payload, dict):
+        raise ServiceError("SerpApi returned an invalid search response.", 503)
+    return payload
+
+
+def search_serp_web(query: str, engine: str, country_code: str) -> dict[str, Any]:
+    """Expose cited web research separately from geographic place discovery."""
+    if engine not in {"google", "google_news", "google_scholar"} or not isinstance(query, str) or not 2 <= len(query.strip()) <= 500:
+        raise ServiceError("Web research requires a supported engine and a query of 2-500 characters.", 400)
+    params = {"engine": engine, "q": query.strip(), "hl": "en"}
+    if engine != "google_scholar" and country_param(country_code):
+        params["gl"] = country_param(country_code)
+    if engine == "google_scholar":
+        params["num"] = "8"
+    request_key = serp_request_key(params)
+    stored = CACHE.provider_received_at("serpapi", request_key) is not None
+    payload = fetch_serp_response(params)
+    validate_serp_payload(payload)
+    received = CACHE.provider_received_at("serpapi", request_key)
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def text(value: Any, maximum: int) -> str:
+        value = value if isinstance(value, str) else ""
+        if CONFIG.serp_api_key:
+            value = value.replace(CONFIG.serp_api_key, "[redacted]")
+        return re.sub(r"(?i)(?:api[_-]?key|access[_-]?token|authorization|token)\s*[:=]\s*[^\s&,;]+", "[redacted]", value)[:maximum]
+
+    def add(item: Any, kind: str) -> None:
+        if not isinstance(item, dict) or len(results) >= 8:
+            return
+        url = item.get("link")
+        title = text(item.get("title"), 200)
+        if not title or not isinstance(url, str):
+            return
+        try:
+            url = validate_web_url(url)
+        except ServiceError:
+            return
+        if url in seen:
+            return
+        seen.add(url)
+        source = item.get("source")
+        publisher = source.get("name", "") if isinstance(source, dict) else source
+        publication = item.get("publication_info")
+        date = item.get("iso_date") or item.get("date")
+        results.append({
+            "title": title, "url": url, "snippet": text(item.get("snippet") or item.get("description"), 1200),
+            "publisher": text(publisher, 160), "date": text(date, 100), "kind": kind,
+            "publication": text(publication.get("summary", "") if isinstance(publication, dict) else "", 300),
+        })
+
+    root = payload.get("news_results" if engine == "google_news" else "organic_results", [])
+    if not isinstance(root, list):
+        raise ServiceError("SerpApi returned an invalid web result list.", 503)
+    for item in root[:40]:
+        add(item, "news" if engine == "google_news" else "publication" if engine == "google_scholar" else "web")
+        if engine == "google_news" and isinstance(item, dict) and isinstance(item.get("stories"), list):
+            for story in item["stories"][:8]:
+                add(story, "news")
+    if engine == "google":
+        graph = payload.get("knowledge_graph")
+        if isinstance(graph, dict) and isinstance(graph.get("source"), dict):
+            add({"title": graph.get("title"), "link": graph["source"].get("link"), "description": graph.get("description"), "source": graph["source"].get("name")}, "knowledge-source")
+        answer = payload.get("answer_box")
+        if isinstance(answer, dict):
+            add(answer, "answer-source")
+    return {
+        "results": results, "provider": "serpapi", "engine": engine, "query": params["q"], "stored": stored,
+        "retrievedAt": datetime.fromtimestamp(received, timezone.utc).isoformat() if received else None,
+        "caveat": "Search snippets are discovery evidence, not verified numeric observations or a population dataset. Cached searches may be historical; publication date, dataset year, and retrieval time are distinct.",
+    }
 
 
 def country_param(value: str) -> str:
@@ -1734,6 +1852,8 @@ AGENT_TOOLS = AgentTools(AgentDependencies(
     capture_workspace=CACHE.capture_workspace,
     mutate_workspace=CACHE.mutate_workspace,
     restore_workspace=CACHE.restore_workspace,
+    search_web=search_serp_web,
+    read_web_source=fetch_web_document,
 ))
 AGENT = MapAgentService(OpenAIChatClient(CONFIG), AGENT_TOOLS, REALTIME)
 

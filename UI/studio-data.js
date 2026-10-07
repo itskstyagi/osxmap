@@ -362,6 +362,10 @@ export function makeLayer(collection, options = {}) {
     caveat: [...new Set(caveats)].join(' ') || 'Source and accuracy are user supplied, not independently verified.',
     attribution: String(provided.attribution ?? inherited.attribution ?? data.attribution ?? data.metadata?.attribution ?? ''),
   };
+  for (const key of ['url', 'retrievedAt', 'publishedDate', 'referenceYear', 'license', 'resolution', 'method']) {
+    const value = provided[key] ?? inherited[key];
+    if (typeof value === 'string' || typeof value === 'number' && Number.isFinite(value)) source[key] = String(value).slice(0, key === 'url' ? 2048 : 300);
+  }
   return {
     id: options.id || globalThis.crypto?.randomUUID?.() || `layer-${Date.now().toString(36)}-${++nextId}`,
     name: String(options.name || data.name || source.name), data, source, visualization,

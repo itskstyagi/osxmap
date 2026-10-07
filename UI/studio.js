@@ -977,6 +977,16 @@ export class MeridianStudio {
       }
       const filters = [layer.filters.category !== '' && layer.filters.category != null ? `${layer.filters.categoryField} = ${layer.filters.category}` : '', layer.filters.min !== null ? `minimum ${layer.filters.min}` : '', layer.filters.max !== null ? `maximum ${layer.filters.max}` : '', layer.filters.viewport ? 'current viewport' : '', !layer.ignoreRegion && (this.workspace.region || layer.scopeBounds) ? 'selected geographic bounds' : '', this.contextFor(layer).time ? `time ${this.workspace.time}` : ''].filter(Boolean);
       provenance.append(element('h3', 'Provenance'), element('p', `${layer.source?.name || 'User-provided data'} > ${filters.join(', ') || 'all records'} > ${VISUALIZATIONS[layer.visualization]?.label || layer.visualization}`, 'studio-provenance-path'), element('p', layer.source?.caveat || 'Source accuracy is not independently verified.'));
+      if (layer.source?.url) {
+        try {
+          const url = new URL(layer.source.url);
+          if (['https:', 'http:'].includes(url.protocol) && !url.username && !url.password) {
+            const link = element('a', 'Open original data source'); link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; provenance.append(link);
+          }
+        } catch { /* Invalid source links are never rendered as executable content. */ }
+      }
+      if (layer.source?.attribution) provenance.append(element('p', `Attribution: ${layer.source.attribution}`));
+      if (layer.source?.retrievedAt) provenance.append(element('small', `Retrieved ${layer.source.retrievedAt}. Publication date is not the population reference year.`));
       const rendered = this.renderedLayer(layer);
       const transformationNote = rendered.caveat?.replace(layer.source?.caveat || '', '').trim();
       if (transformationNote) provenance.append(element('p', transformationNote));
@@ -1135,6 +1145,42 @@ export class MeridianStudio {
     if (['extrusion', 'surface'].includes(candidate.visualization) && !this.app.terrainEnabled) this.app.setTerrainView(true);
     this.setPane('right');
     this.status(explanation || `${VISUALIZATIONS[candidate.visualization].label} applied using ${candidate.source?.name || 'the loaded dataset'}.`);
+  }
+
+  applySourcedDataset(update) {
+    if (update.workspaceId && update.workspaceId !== this.workspace.id) throw new Error('The sourced dataset belongs to a different workspace.');
+    if (this.workspace.layers.length >= MAX_LAYERS) throw new Error('Remove an unused layer before loading another dataset.');
+    const data = normalizeCollection(update.data);
+    if (!data.features.length) throw new Error('The source contains no geographic observations.');
+    const scope = update.scope || { type: 'workspace' };
+    if (!['workspace', 'viewport', 'selection'].includes(scope.type)) throw new Error('Choose a geographic or workspace scope before loading a new dataset.');
+    if (['viewport', 'selection'].includes(scope.type) && !validBounds(scope.bounds)) throw new Error('The supplied source scope is invalid.');
+    const available = fieldsFor(data);
+    const field = typeof update.field === 'string' ? update.field : '';
+    if (field && !available.numeric.includes(field)) throw new Error('The source does not contain the requested numeric field.');
+    if (!['points', 'heatmap', 'choropleth'].includes(update.visualization) || update.visualization === 'heatmap' && !field) throw new Error('A heatmap requires a real numeric source field.');
+    const layer = makeLayer(data, {
+      name: String(update.name || 'Researched geographic dataset').slice(0, 120), field, units: String(update.units || '').slice(0, 60), visualization: update.visualization,
+      source: update.source && typeof update.source === 'object' ? update.source : { name: 'Web source', caveat: 'Review the source and its data date before use.' }, palette: 'thermal',
+    });
+    layer.scopeBounds = scope.type === 'workspace' ? null : scope.bounds;
+    layer.ignoreRegion = scope.type === 'workspace';
+    const rendered = renderCollection(layer, { ...this.contextFor(layer), region: layer.scopeBounds, time: null });
+    if (!rendered.inputCount) throw new Error('No source observations fall inside the selected scope. The scope was not silently broadened.');
+    const changed = this.mutate(`Load sourced ${layer.name}`, () => {
+      const datasetId = id();
+      this.workspace.datasets[datasetId] = layer.data;
+      delete layer.data;
+      layer.datasetId = datasetId;
+      this.workspace.layers.unshift(layer);
+      this.workspace.selectedLayerId = layer.id;
+      this.workspace.time = null;
+    }, { record: false });
+    if (!changed) throw new Error('The sourced dataset could not be added. The preceding valid workspace was retained.');
+    this.setTab('layers');
+    if (scope.type === 'workspace') this.focusLayer(layer);
+    this.status(`Loaded ${rendered.inputCount.toLocaleString()} source observations. Check the source date, units, and partial-coverage caveats in Insights.`);
+    return layer;
   }
 
   captureAgentArtifacts(update) {

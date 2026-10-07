@@ -220,6 +220,11 @@ svg { flex-shrink: 0; width: 20px; height: 20px; }
 .agent-feedback { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .agent-feedback:empty { display: none; }
 .agent-result-summary { margin: 10px 0 4px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.agent-sources { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.agent-sources h3 { margin: 0 0 6px; color: var(--muted); font-size: 10px; font-weight: 600; }
+.agent-sources a { display: block; padding: 7px 0; color: var(--accent); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-sources small { display: block; margin-bottom: 5px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.studio-provenance a { color: var(--accent); font-size: 11px; text-underline-offset: 3px; }
 .agent-result-details { margin-top: 9px; }
 .agent-result-details summary { min-height: 40px; padding: 10px 0; color: var(--muted); font-size: 11px; cursor: pointer; }
 .agent-response { margin-top: 6px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }

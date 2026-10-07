@@ -1007,12 +1007,36 @@ class CityExplorer {
     this.elements['agent-feedback'].textContent = '';
     this.elements['agent-result-details'].hidden = !detail;
     this.elements['agent-result-details'].open = false;
-    if (detail) renderAgentReply(this.elements['agent-response'], detail);
+    if (detail) renderAgentReply(this.elements['agent-response'], this.agentApplicationError ? `${this.agentApplicationError}\n\nService response: ${detail}` : detail);
     else this.elements['agent-response'].hidden = true;
     this.agentActivity.tool = 'No active tool';
     this.agentActivity.request = 'Map updated';
     this.searchFocused = false;
     this.updateSearchDiscovery();
+  }
+
+  renderAgentSources(sources = []) {
+    const container = this.elements['agent-sources'];
+    if (!container) return;
+    container.replaceChildren();
+    this.agentSources = [];
+    for (const source of Array.isArray(sources) ? sources.slice(0, 12) : []) {
+      if (!source || typeof source.url !== 'string') continue;
+      try {
+        const url = new URL(source.url);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || source.url.length > 2048) continue;
+        this.agentSources.push({ ...source, url: url.href });
+      } catch { /* Source URLs are data, never executable HTML or script. */ }
+    }
+    container.hidden = !this.agentSources.length;
+    if (container.hidden) return;
+    const heading = document.createElement('h3'); heading.textContent = 'Researched sources'; container.append(heading);
+    for (const source of this.agentSources) {
+      const link = document.createElement('a'); link.textContent = String(source.title || source.url).slice(0, 200); link.href = source.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; container.append(link);
+      const note = document.createElement('small');
+      note.textContent = [source.publisher, source.date ? `Publication: ${source.date}` : '', source.readAt ? `Read: ${source.readAt}` : source.stored ? 'Stored search result; may be historical' : 'Search discovery; source content not verified'].filter(Boolean).join(' / ');
+      container.append(note);
+    }
   }
 
   applyLocalInstruction(query) {
@@ -1242,8 +1266,9 @@ class CityExplorer {
       this.settleAgentAction(event);
       this.finishAgentRun();
       this.agentResultSummary = '';
-      const title = { dataset_unavailable: 'A sourced geographic dataset is required', web_search_unavailable: 'Map-place search cannot download statistical datasets', analysis_unavailable: 'This analysis is not supported by the current tools' }[event.reason] || 'This request needs unavailable data or tools';
+      const title = { dataset_unavailable: 'A sourced geographic dataset is required', web_search_unavailable: 'The web source or reader could not supply this data', analysis_unavailable: 'This analysis is not supported by the current tools' }[event.reason] || 'This request needs unavailable data or tools';
       this.showCommandResult(title, event.message || 'This request needs data or tools that are not available in the current workspace.');
+      this.renderAgentSources(event.sources);
       this.elements['agent-result-details'].open = true;
       this.setAgentActivity({ request: 'Capability limitation explained', tool: 'No map substituted' });
       return;
@@ -1254,6 +1279,7 @@ class CityExplorer {
       const message = event.message || 'Your map is ready.';
       const summary = this.agentResultSummary || String(message).replace(/[#*_`]/g, '').split('\n').find((line) => line.trim())?.slice(0, 180) || 'Map updated';
       this.showCommandResult(summary, message);
+      this.renderAgentSources(event.sources);
       this.setAgentActivity({ request: 'Map request completed', tool: 'Completed' });
       return;
     }
@@ -1304,6 +1330,8 @@ class CityExplorer {
     this.agentQuestionOpen = false;
     this.elements['agent-question'].classList.add('is-hidden');
     this.agentSubmitting = true;
+    this.renderAgentSources([]);
+    this.agentApplicationError = '';
     this.agentSnapshot = this.captureMapAction();
     this.agentDidMutate = false;
     this.agentLocalConflict = false;
@@ -1544,6 +1572,22 @@ class CityExplorer {
 
   applyAgentMapUpdate(update) {
     if (!update || typeof update !== 'object') return;
+    if (update.dataset) {
+      try {
+        const layer = this.studio?.applySourcedDataset(update.dataset);
+        if (!layer) throw new Error('Studio could not load the source dataset.');
+        if (this.productMode !== 'studio') {
+          this.setProductMode('studio');
+          this.studio.focusLayer(layer);
+        }
+        this.agentResultSummary = `${layer.name} / sourced ${layer.visualization}`;
+      } catch (error) {
+        this.agentApplicationError = `The sourced dataset was not applied: ${error.message}`;
+        this.agentResultSummary = this.agentApplicationError;
+        this.setGeoStatus(this.agentApplicationError, true);
+      }
+      return;
+    }
     if (update.studio) {
       try {
         this.studio?.applyOperation(update.studio, { fromAgent: true });
