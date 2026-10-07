@@ -96,6 +96,10 @@ svg { flex-shrink: 0; width: 20px; height: 20px; }
 .brand-tagline { font: 8px var(--mono); letter-spacing: .16em; text-transform: uppercase; opacity: .75; }
 .workspace-nav { display: flex; align-items: center; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); text-shadow: none; }
 .workspace-nav button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   min-width: 74px;
   min-height: 40px;
   padding: 0 14px;
@@ -104,7 +108,10 @@ svg { flex-shrink: 0; width: 20px; height: 20px; }
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
 }
+.workspace-nav button svg { display: block; width: 16px; height: 16px; flex: 0 0 16px; }
 .workspace-nav button[aria-pressed="true"] { color: var(--accent); background: var(--surface-elevated); box-shadow: inset 0 0 0 1px var(--line); }
 .workspace-nav button:hover { color: var(--ink); background: var(--control); }
 .app-actions {
@@ -255,7 +262,7 @@ svg { flex-shrink: 0; width: 20px; height: 20px; }
 }
 .manual-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 48px; padding: 0; background: transparent; font-size: 13px; font-weight: 600; }
 .manual-toggle > span { display: flex; align-items: center; gap: 9px; }
-.manual-toggle b { width: 24px; font-size: 18px; font-weight: 400; text-align: center; color: var(--muted); transition: transform 200ms ease; }
+.manual-toggle b { width: 24px; font-size: 18px; font-weight: 400; text-align: center; color: var(--muted); transition: transform 200ms ease; display: flex; align-items: center; justify-content: center; }
 .manual-toggle[aria-expanded="true"] b { transform: rotate(180deg); }
 .panel-icon { width: 12px; height: 12px; border: 1px solid var(--muted); border-radius: 2px; background: linear-gradient(90deg, transparent 35%, var(--muted) 35%, var(--muted) 43%, transparent 43%); }
 .map-modes { display: flex; align-items: center; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-elevated); }
