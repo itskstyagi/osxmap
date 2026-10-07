@@ -1,7 +1,7 @@
 import { AGENT_SOCKET_URL, API_BASE_URL, apiPath } from './config.js';
 
 const TILE_ZOOM = 14;
-const ACCENT = '#315efb';
+const ACCENT = '#c4d798';
 const PREVIEW_LAYER = 'local-buildings-preview';
 const TERRAIN_SOURCE = 'local-terrain-dem';
 const TERRAIN_TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
@@ -240,23 +240,29 @@ async function ipLocation() {
   };
 }
 
-function applyMonochrome(map, theme) {
-  const dark = theme === 'dark';
+function applyMonochrome(map, theme, mode = 'route') {
+  const dark = theme === 'dark' || mode !== 'terrain';
+  const satellite = mode === 'satellite';
+  const terrain = mode === 'terrain';
   const colors = dark
     ? { background: '#111113', land: '#18181b', park: '#202123', water: '#0b0c0e', line: '#3b3b40', text: '#c9c9c6', halo: '#111113' }
-    : { background: '#ecece8', land: '#e5e5e1', park: '#dcdcd7', water: '#f4f4f0', line: '#b6b6b1', text: '#3a3a3c', halo: '#f1f1ed' };
+    : { background: '#e8e5dc', land: '#e8e5dc', park: '#deded1', water: '#d2d6d2', line: '#a39f93', text: '#57574e', halo: '#e8e5dc' };
   for (const layer of map.getStyle().layers || []) {
     if (layer.id.startsWith('local-') || layer.id.startsWith('geo-')) continue;
     const id = layer.id.toLowerCase();
     try {
-      if (id.includes('building')) map.setLayoutProperty(layer.id, 'visibility', 'none');
+      map.setLayoutProperty(layer.id, 'visibility', satellite && ['background', 'fill', 'fill-extrusion'].includes(layer.type) ? 'none' : 'visible');
+      if (id.includes('building')) map.setLayoutProperty(layer.id, 'visibility', mode === 'route' ? 'visible' : 'none');
       if (layer.type === 'background') map.setPaintProperty(layer.id, 'background-color', colors.background);
       if (layer.type === 'fill') {
         const color = id.includes('water') ? colors.water : /park|wood|grass|landcover/.test(id) ? colors.park : colors.land;
         map.setPaintProperty(layer.id, 'fill-color', color);
         map.setPaintProperty(layer.id, 'fill-outline-color', color);
       }
-      if (layer.type === 'line') map.setPaintProperty(layer.id, 'line-color', colors.line);
+      if (layer.type === 'line') {
+        map.setPaintProperty(layer.id, 'line-color', satellite ? '#d3d5c6' : colors.line);
+        map.setPaintProperty(layer.id, 'line-opacity', satellite ? 0.18 : terrain ? 0.45 : 0.85);
+      }
       if (layer.type === 'symbol') {
         map.setPaintProperty(layer.id, 'text-color', colors.text);
         map.setPaintProperty(layer.id, 'text-halo-color', colors.halo);
@@ -269,10 +275,35 @@ function applyMonochrome(map, theme) {
   for (const [id, color] of [['local-water', colors.water], ['local-park', colors.park], ['local-road', colors.line]]) {
     if (map.getLayer(id)) map.setPaintProperty(id, id === 'local-road' ? 'line-color' : 'fill-color', color);
   }
-  const buildingColor = dark ? '#e0e0da' : '#38383c';
+  const buildingColor = satellite ? '#b9bdae' : dark ? '#343638' : '#b4b2a8';
   for (const id of [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred']) {
     if (map.getLayer(id)) map.setPaintProperty(id, 'fill-extrusion-color', buildingColor);
+    if (map.getLayer(id) && id !== PREVIEW_LAYER) map.setLayoutProperty(id, 'visibility', terrain || mode === 'route' ? 'none' : 'visible');
   }
+  for (const id of ['local-water', 'local-park', 'local-road']) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', satellite ? 'none' : 'visible');
+  }
+  if (map.getLayer('local-satellite')) map.setLayoutProperty('local-satellite', 'visibility', satellite ? 'visible' : 'none');
+  for (const id of ['local-hillshade', 'local-contours', 'local-contour-labels']) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', terrain ? 'visible' : 'none');
+  }
+  if (map.getLayer('local-hillshade')) {
+    map.setPaintProperty('local-hillshade', 'hillshade-shadow-color', dark ? '#000000' : '#5b574f');
+    map.setPaintProperty('local-hillshade', 'hillshade-highlight-color', dark ? '#72776f' : '#fffdf3');
+    map.setPaintProperty('local-hillshade', 'hillshade-accent-color', dark ? '#242722' : '#a8a393');
+  }
+  if (map.getLayer('local-contours')) map.setPaintProperty('local-contours', 'line-color', dark ? '#969b8e' : '#827c6d');
+  if (map.getLayer('local-contour-labels')) {
+    map.setPaintProperty('local-contour-labels', 'text-color', dark ? '#a8ac9f' : '#716b5d');
+    map.setPaintProperty('local-contour-labels', 'text-halo-color', colors.background);
+  }
+  const routeColor = terrain && !dark ? '#343830' : '#ffffff';
+  for (const [id, property, color] of [
+    ['geo-route', 'line-color', routeColor], ['geo-route-casing', 'line-color', dark ? '#101310' : '#faf9f2'],
+    ['geo-route-search', 'line-color', '#9ba88a'], ['geo-route-search-casing', 'line-color', dark ? '#333a30' : '#f8f7ef'],
+    ['geo-pin-label', 'text-color', '#1a2117'], ['geo-route-stop-label', 'text-color', '#1a2117'],
+    ['local-search-result-label', 'text-color', colors.text], ['local-search-result-label', 'text-halo-color', colors.halo],
+  ]) if (map.getLayer(id)) map.setPaintProperty(id, property, color);
   try {
     map.setFog({
       color: dark ? '#111113' : '#ecece8',
@@ -334,8 +365,8 @@ function addLocalLayers(map, theme) {
   map.addLayer({ id: 'geo-area-outline', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'area'], paint: { 'line-color': ACCENT, 'line-width': 2, 'line-opacity': 0.95 } });
   map.addLayer({ id: 'geo-route-search-casing', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-search'], paint: { 'line-color': '#ffffff', 'line-width': 5, 'line-opacity': ['coalesce', ['get', 'opacity'], 0.72] } });
   map.addLayer({ id: 'geo-route-search', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-search'], paint: { 'line-color': '#7080a2', 'line-width': 2.5, 'line-opacity': ['coalesce', ['get', 'opacity'], 0.72], 'line-dasharray': [1.5, 1.5] } });
-  map.addLayer({ id: 'geo-route-casing', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route'], paint: { 'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9 } });
-  map.addLayer({ id: 'geo-route', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route'], paint: { 'line-color': ACCENT, 'line-width': 4, 'line-opacity': 1 } });
+  map.addLayer({ id: 'geo-route-casing', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#101310', 'line-width': 9, 'line-opacity': 0.6 } });
+  map.addLayer({ id: 'geo-route', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffffff', 'line-width': 5, 'line-opacity': 1 } });
   map.addLayer({ id: 'geo-pin', type: 'circle', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'pin'], paint: { 'circle-radius': 7, 'circle-color': ACCENT, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
   map.addLayer({ id: 'geo-pin-label', type: 'symbol', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'pin'], layout: { 'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'], 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff' } });
   map.addLayer({ id: 'geo-route-stop-halo', type: 'circle', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-stop'], paint: { 'circle-radius': 13, 'circle-color': ACCENT, 'circle-opacity': 0.18 } });
@@ -344,13 +375,14 @@ function addLocalLayers(map, theme) {
   map.addLayer({ id: 'local-search-result-halo', type: 'circle', source: SEARCH_RESULTS_SOURCE, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 8, 15, 15], 'circle-color': '#e6953f', 'circle-opacity': 0.18 } });
   map.addLayer({ id: 'local-search-result', type: 'circle', source: SEARCH_RESULTS_SOURCE, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 4, 15, 6.5], 'circle-color': '#e6953f', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.25, 'circle-opacity': 0.95 } });
   map.addLayer({ id: 'local-search-result-label', type: 'symbol', source: SEARCH_RESULTS_SOURCE, minzoom: 13, layout: { 'text-field': ['get', 'name'], 'text-size': 10, 'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'], 'text-offset': [0, 1.1], 'text-anchor': 'top', 'text-max-width': 14 }, paint: { 'text-color': '#374151', 'text-halo-color': '#ffffff', 'text-halo-width': 1.25 } });
-  applyMonochrome(map, theme);
 }
 
 class CityExplorer {
   constructor() {
     this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'use-location', 'use-approximate-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-stops', 'route-stop-count', 'route-plan-hint', 'add-route-stop', 'trace-route', 'pin-list', 'area-list', 'geo-status', 'toggle-geo-tools', 'geo-content', 'toggle-manual-controls', 'manual-controls-content', 'agent-composer', 'agent-input', 'agent-submit', 'agent-cancel', 'agent-question', 'agent-question-text', 'agent-question-choices', 'agent-connection', 'agent-request', 'agent-tool'].map((id) => [id, document.getElementById(id)]));
     this.theme = localStorage.getItem('theme') || 'dark';
+    this.mapMode = ['satellite', 'route', 'terrain'].includes(localStorage.getItem('mapMode')) ? localStorage.getItem('mapMode') : 'satellite';
+    this.workspaceView = 'explore';
     this.country = { country: '', countryCode: '', method: 'detecting' };
     this.selected = null;
     this.stream = { loaded: 0, total: 0, buildings: 0, inferred: 0, active: false, preview: false, source: '', degraded: false };
@@ -363,7 +395,7 @@ class CityExplorer {
     this.buildings = 0;
     this.generation = 0;
     this.previewVisible = true;
-    this.terrainEnabled = false;
+    this.terrainEnabled = this.mapMode === 'satellite';
     this.suggestionController = null;
     this.suggestionTimer = null;
     this.routeStopControllers = new Map();
@@ -394,6 +426,8 @@ class CityExplorer {
     this.createMap();
     this.bootstrap();
     this.connectAgentSocket();
+    this.updateDashboard();
+    this.clockTimer = window.setInterval(() => this.updateClock(), 30_000);
   }
 
   bindUi() {
@@ -421,11 +455,28 @@ class CityExplorer {
     document.querySelectorAll('[data-map-action]').forEach((button) => button.addEventListener('click', () => this.operate(button.dataset.mapAction)));
     document.addEventListener('keydown', (event) => this.handleShortcut(event));
     this.worker.onmessage = ({ data }) => this.handleWorkerMessage(data);
+    const desktop = window.matchMedia('(min-width: 901px)').matches;
     this.setGeoToolsOpen(false);
-    this.setManualControlsOpen(false);
+    this.setManualControlsOpen(desktop);
+    el['manual-controls-content'].append(el['stream-card']);
+    document.querySelectorAll('[data-map-mode]').forEach((button) => button.addEventListener('click', () => this.setMapMode(button.dataset.mapMode)));
+    document.querySelectorAll('[data-workspace-view]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView(button.dataset.workspaceView)));
+    document.getElementById('theme-toggle')?.addEventListener('click', () => this.setTheme(this.theme === 'dark' ? 'light' : 'dark'));
+    document.getElementById('focus-route')?.addEventListener('click', () => this.focusRoute());
+    document.getElementById('fullscreen-toggle')?.addEventListener('click', async () => {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await document.documentElement.requestFullscreen();
+      } catch { this.setGeoStatus('Fullscreen is not available in this browser.', true); }
+    });
+    document.addEventListener('fullscreenchange', () => {
+      document.getElementById('fullscreen-toggle')?.setAttribute('aria-pressed', String(Boolean(document.fullscreenElement)));
+      this.map?.resize();
+    });
     this.renderAgentActivity();
     window.addEventListener('beforeunload', () => {
       window.clearTimeout(this.agentReconnectTimer);
+      window.clearInterval(this.clockTimer);
       this.agentSocket?.close();
     });
   }
@@ -435,6 +486,8 @@ class CityExplorer {
     const sidebar = this.elements['manual-controls-content'].closest('.manual-sidebar');
     const toggle = this.elements['toggle-manual-controls'];
     sidebar.classList.toggle('is-open', open);
+    sidebar.classList.toggle('is-collapsed', !open);
+    document.documentElement.dataset.sidebar = open ? 'open' : 'closed';
     toggle.setAttribute('aria-expanded', String(open));
     toggle.querySelector('b').textContent = open ? 'CLOSE' : 'OPEN';
   }
@@ -459,6 +512,8 @@ class CityExplorer {
     el['agent-request'].textContent = this.agentActivity.request;
     el['agent-tool'].textContent = this.agentActivity.tool;
     const active = this.agentSubmitting || Boolean(this.agentRunId);
+    const activityPanel = document.getElementById('agent-hud');
+    if (active && activityPanel) activityPanel.open = true;
     el['agent-submit'].disabled = !this.agentSocketReady || active;
     el['agent-submit'].textContent = active ? 'WORKING' : 'SEND';
     el['agent-cancel'].classList.toggle('is-hidden', !active);
@@ -833,13 +888,19 @@ class CityExplorer {
   }
 
   createMap() {
-    this.map = new window.maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/positron', center: [8, 31], zoom: 2.8, pitch: 0, bearing: 0, maxPitch: 78, attributionControl: false, antialias: true });
+    if (window.mlcontour) {
+      this.contourDem = new window.mlcontour.DemSource({ url: TERRAIN_TILE_URL, encoding: 'terrarium', maxzoom: 13, worker: true });
+      this.contourDem.setupMaplibre(window.maplibregl);
+    }
+    this.map = new window.maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/positron', center: [-122.48, 37.82], zoom: 11, pitch: this.terrainEnabled ? 45 : 0, bearing: -12, maxPitch: 78, attributionControl: false, antialias: true });
     this.map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'bottom-right');
+    this.map.addControl(new window.maplibregl.ScaleControl({ maxWidth: 100, unit: 'metric' }), 'bottom-left');
     this.map.on('style.load', () => {
       this.addTerrainSource();
       this.applyTerrain();
+      this.addCartographyLayers();
       addLocalLayers(this.map, this.theme);
-      if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', this.previewVisible ? 'visible' : 'none');
+      this.applyMapMode();
       this.map.getSource('local-city')?.setData({ type: 'FeatureCollection', features: [...this.features.values()] });
       this.map.getSource(FOCUS_SOURCE)?.setData(this.selected ? this.focusFeature(this.selected) : EMPTY_COLLECTION);
       this.renderGeography();
@@ -865,7 +926,18 @@ class CityExplorer {
     this.map.on('mouseleave', 'local-search-result', () => { this.map.getCanvas().style.cursor = ''; });
     this.map.on('movestart', () => { if (this.selected && this.map.getZoom() >= 13) this.setPreviewVisible(true); });
     this.map.on('moveend', () => {
+      this.updateDashboard();
       if (this.selected && this.map.getZoom() >= 13) this.worker.postMessage({ type: 'append', tiles: visibleTiles(this.map) });
+    });
+    this.map.on('error', (event) => {
+      const source = event.sourceId || event.error?.sourceId;
+      if (source === 'local-imagery') {
+        this.imageryUnavailable = true;
+        if (this.mapMode === 'satellite') this.setMapMode('route');
+        this.showMapNotice('Satellite imagery is unavailable. Showing the street map.');
+      } else if (source === 'local-contour-source' || source === TERRAIN_SOURCE) {
+        this.showMapNotice('Some elevation data is unavailable. Map navigation remains active.');
+      }
     });
     this.map.on('dblclick', (event) => {
       if (!this.selected) return;
@@ -882,13 +954,121 @@ class CityExplorer {
     requestAnimationFrame(() => this.map.resize());
   }
 
+  addCartographyLayers() {
+    const layers = this.map.getStyle().layers || [];
+    const firstLayer = layers.find((layer) => layer.type !== 'background')?.id;
+    const lastFill = layers.reduce((index, layer, current) => layer.type === 'fill' ? current : index, -1);
+    const firstLine = layers.slice(lastFill + 1).find((layer) => layer.type === 'line' || layer.type === 'symbol')?.id;
+    this.map.addSource('local-imagery', {
+      type: 'raster', tiles: ['https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 19,
+      attribution: 'Imagery &copy; <a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9">Esri, Vantor, Earthstar Geographics, GIS User Community</a>',
+    });
+    this.map.addLayer({ id: 'local-satellite', type: 'raster', source: 'local-imagery', layout: { visibility: this.mapMode === 'satellite' ? 'visible' : 'none' }, paint: { 'raster-saturation': -0.65, 'raster-brightness-max': 0.72, 'raster-contrast': 0.12, 'raster-fade-duration': 300 } }, firstLayer);
+    this.map.addLayer({ id: 'local-hillshade', type: 'hillshade', source: TERRAIN_SOURCE, layout: { visibility: 'none' }, paint: { 'hillshade-exaggeration': 0.7, 'hillshade-illumination-direction': 315 } }, firstLine);
+    if (!this.contourDem) return;
+    this.map.addSource('local-contour-source', {
+      type: 'vector', maxzoom: 15,
+      tiles: [this.contourDem.contourProtocolUrl({ thresholds: { 8: [200, 1000], 10: [100, 500], 12: [50, 250], 14: [20, 100], 15: [10, 50] }, multiplier: 1, contourLayer: 'contours', elevationKey: 'ele', levelKey: 'level' })],
+    });
+    this.map.addLayer({ id: 'local-contours', type: 'line', source: 'local-contour-source', 'source-layer': 'contours', layout: { visibility: 'none' }, paint: { 'line-color': '#827c6d', 'line-opacity': 0.55, 'line-width': ['match', ['get', 'level'], 1, 1, 0.45] } }, firstLine);
+    this.map.addLayer({ id: 'local-contour-labels', type: 'symbol', source: 'local-contour-source', 'source-layer': 'contours', filter: ['>', ['get', 'level'], 0], layout: { visibility: 'none', 'symbol-placement': 'line', 'text-field': ['concat', ['to-string', ['get', 'ele']], ' m'], 'text-font': ['Open Sans Regular'], 'text-size': 9, 'symbol-spacing': 350 }, paint: { 'text-color': '#716b5d', 'text-halo-color': '#e8e5dc', 'text-halo-width': 1 } });
+  }
+
+  showMapNotice(message) {
+    const notice = document.getElementById('map-notice');
+    if (!notice) return;
+    notice.textContent = message;
+    notice.classList.remove('is-hidden');
+  }
+
+  applyMapMode() {
+    document.documentElement.dataset.mapMode = this.mapMode;
+    document.querySelectorAll('[data-map-mode]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.mapMode === this.mapMode)));
+    if (this.map?.isStyleLoaded() || this.map?.getLayer('geo-route')) {
+      applyMonochrome(this.map, this.theme, this.mapMode);
+      if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', this.previewVisible && this.mapMode === 'satellite' ? 'visible' : 'none');
+    }
+    this.updateDashboard();
+  }
+
+  setMapMode(mode) {
+    if (!['satellite', 'route', 'terrain'].includes(mode)) return;
+    if (mode === 'satellite' && this.imageryUnavailable) {
+      this.showMapNotice('Satellite service is unavailable. Choose another view or reload to retry.');
+      return;
+    }
+    this.mapMode = mode;
+    localStorage.setItem('mapMode', mode);
+    document.getElementById('map-notice')?.classList.add('is-hidden');
+    this.applyMapMode();
+    this.setTerrainView(mode === 'satellite');
+    if (mode === 'terrain' && !this.contourDem) this.showMapNotice('Contour library unavailable. Showing shaded terrain only.');
+  }
+
+  setWorkspaceView(view) {
+    this.workspaceView = view;
+    document.querySelectorAll('[data-workspace-view]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.workspaceView === view)));
+    this.setManualControlsOpen(true);
+    this.setGeoToolsOpen(view !== 'explore');
+    const utility = document.querySelector('.utility-tools');
+    if (utility) utility.open = view === 'workspace';
+    if (view === 'routes') this.setMapMode('route');
+    if (view === 'explore') this.elements['search-input'].focus();
+    this.updateDashboard();
+  }
+
+  updateClock() {
+    const clock = document.getElementById('dashboard-clock');
+    if (clock) clock.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  updateDashboard() {
+    const set = (id, value) => { const element = document.getElementById(id); if (element) element.textContent = value; };
+    const summary = this.geo.route?.summary;
+    document.documentElement.dataset.workspaceView = this.workspaceView;
+    document.documentElement.dataset.hasRoute = String(Boolean(this.geo.route));
+    set('metric-pins', this.geo.pins.length);
+    set('metric-areas', this.geo.areas.filter((area) => !area.summary?.invalid).length);
+    set('metric-buildings', this.buildings.toLocaleString());
+    set('metric-distance', summary ? formatDistance(summary.distanceMeters) || '--' : '--');
+    const distance = document.getElementById('metric-distance');
+    if (distance && summary) {
+      const parts = distance.textContent.split(' ');
+      if (parts.length === 2) {
+        const unit = document.createElement('span');
+        unit.className = 'metric-unit';
+        unit.textContent = ` ${parts[1]}`;
+        distance.replaceChildren(document.createTextNode(parts[0]), unit);
+      }
+    }
+    set('metric-duration', summary ? formatDuration(summary.durationSeconds) || '--' : '--');
+    set('metric-stops', this.geo.routeStops.filter((stop) => stop.place).length);
+    set('metric-provider', this.geo.route ? sourceName(this.geo.route.provider) || 'Road network' : 'No active route');
+    set('view-location', this.selected?.name || 'Find a place. Make it yours.');
+    set('view-title', this.workspaceView === 'routes' ? 'Route Planner' : this.workspaceView === 'workspace' ? 'Your Workspace' : this.mapMode === 'terrain' ? 'Terrain Explorer' : 'City Explorer');
+    set('view-mode-label', this.mapMode === 'satellite' ? 'Satellite / Live map' : this.mapMode === 'route' ? 'Monochrome / Route map' : 'Topographic / Contours in meters');
+    const center = this.map?.getCenter();
+    if (center) set('map-coordinates', `${Math.abs(center.lat).toFixed(4)} ${center.lat < 0 ? 'S' : 'N'} / ${Math.abs(center.lng).toFixed(4)} ${center.lng < 0 ? 'W' : 'E'}`);
+    const focus = document.getElementById('focus-route');
+    if (focus) focus.disabled = !this.geo.route?.geometry;
+    this.updateClock();
+  }
+
+  focusRoute() {
+    const coordinates = this.geo.route?.geometry?.coordinates || [];
+    if (coordinates.length < 2) return;
+    const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
+    const desktop = window.innerWidth > 900;
+    this.map.fitBounds(bounds, { padding: desktop ? { top: 170, right: 290, bottom: 240, left: this.manualControlsOpen ? 390 : 90 } : { top: 200, right: 40, bottom: 240, left: 40 }, pitch: 0, maxZoom: 16, duration: 800 });
+  }
+
   addTerrainSource() {
     if (!this.map.getSource(TERRAIN_SOURCE)) {
       this.map.addSource(TERRAIN_SOURCE, {
         type: 'raster-dem',
-        tiles: [TERRAIN_TILE_URL],
+        tiles: [this.contourDem?.sharedDemProtocolUrl || TERRAIN_TILE_URL],
         tileSize: 256,
-        maxzoom: 15,
+        maxzoom: this.contourDem ? 13 : 15,
         encoding: 'terrarium',
         attribution: '<a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md">Terrain tiles</a> by Mapzen',
       });
@@ -896,6 +1076,7 @@ class CityExplorer {
   }
 
   applyTerrain() {
+    if (!this.map?.getSource(TERRAIN_SOURCE)) return;
     const active = this.terrainEnabled && Boolean(this.map?.getSource(TERRAIN_SOURCE));
     try {
       this.map?.setTerrain(active ? { source: TERRAIN_SOURCE, exaggeration: 1.25 } : null);
@@ -919,7 +1100,10 @@ class CityExplorer {
     document.documentElement.dataset.theme = this.theme;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', this.theme === 'dark' ? '#111113' : '#ecece8');
     localStorage.setItem('theme', this.theme);
-    if (this.map?.isStyleLoaded()) applyMonochrome(this.map, this.theme);
+    const toggle = document.getElementById('theme-toggle');
+    toggle?.setAttribute('aria-label', `Switch to ${this.theme === 'dark' ? 'light' : 'dark'} mode`);
+    toggle?.setAttribute('aria-pressed', String(this.theme === 'light'));
+    if (this.map) this.applyMapMode();
   }
 
   async bootstrap() {
@@ -1050,6 +1234,7 @@ class CityExplorer {
     this.renderRegion();
     this.setStream({ loaded: 0, total: 9, buildings: 0, inferred: 0, active: true, preview: true, source: '', degraded: false });
     this.resetMapForLocation({ immediate });
+    this.updateDashboard();
   }
 
   resetMapForLocation({ immediate = false } = {}) {
@@ -1057,12 +1242,12 @@ class CityExplorer {
     this.features.clear(); this.tileFeatures.clear(); this.tileMetadata.clear(); this.loaded.clear(); this.failed.clear();
     this.buildings = 0; this.inferred = 0; this.total = 9; this.previewVisible = true; this.generation += 1;
     this.map.getSource('local-city')?.setData(EMPTY_COLLECTION);
-    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', 'visible');
+    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', this.mapMode === 'satellite' ? 'visible' : 'none');
     if (this.map.getLayer('local-selection')) this.map.setFilter('local-selection', ['==', ['get', 'sourceId'], '__none__']);
     this.map.getSource(FOCUS_SOURCE)?.setData(this.focusFeature(location));
-    this.terrainEnabled = true;
+    this.terrainEnabled = this.mapMode === 'satellite';
     this.applyTerrain();
-    const camera = { center: [location.lon, location.lat], zoom: 15.5, pitch: 60, bearing: -20 };
+    const camera = { center: [location.lon, location.lat], zoom: this.mapMode === 'terrain' ? 12 : 14, pitch: this.terrainEnabled ? 45 : 0, bearing: this.mapMode === 'route' ? 0 : -12 };
     if (immediate) this.map.jumpTo(camera);
     else this.map.flyTo({ ...camera, duration: 1800, essential: true });
     this.worker.postMessage({ type: 'reset', apiBaseUrl: API_BASE_URL, context: { region: location.id, lat: location.lat, lon: location.lon }, tiles: spiralTiles(location.lon, location.lat, 1) });
@@ -1117,7 +1302,7 @@ class CityExplorer {
 
   setPreviewVisible(visible) {
     this.previewVisible = visible;
-    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', visible ? 'visible' : 'none');
+    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', visible && this.mapMode === 'satellite' ? 'visible' : 'none');
   }
 
   setStream(stream) {
@@ -1135,7 +1320,7 @@ class CityExplorer {
   }
 
   updateIntroCard() {
-    // The map is always anchored to Geo-IP or an explicitly selected location.
+    this.updateDashboard();
   }
 
   setLoading(loading) { this.elements['search-loader'].classList.toggle('is-hidden', !loading); }
@@ -1288,6 +1473,7 @@ class CityExplorer {
 
   renderGeography() {
     this.map?.getSource(GEOGRAPHY_SOURCE)?.setData(this.geographyFeatures());
+    this.updateDashboard();
   }
 
   routeSearchEdges(route) {
@@ -1531,6 +1717,9 @@ class CityExplorer {
     this.stopRouteAnimation(false);
     this.geo.route = null;
     this.renderGeography();
+    const complete = this.routePlan().every((item) => item.place);
+    this.elements['trace-route'].disabled = !complete;
+    this.elements['route-stop-count'].textContent = `${this.routePlan().filter((item) => item.place).length} STOPS`;
     this.queueRouteStopSuggestions(index, query);
   }
 
@@ -1830,11 +2019,7 @@ class CityExplorer {
           : `${formatDistance(summary.distanceMeters)} / ${formatDuration(summary.durationSeconds)} from the OSRM fallback for this ${stops.length}-stop plan.`);
       if (searchedEdges) this.animateRoute(response.route);
       else this.renderGeography();
-      const coordinates = response.route.geometry?.coordinates || [];
-      if (coordinates.length > 1) {
-        const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
-        this.map.fitBounds(bounds, { padding: 90, maxZoom: 16, duration: 800, essential: true });
-      }
+      this.focusRoute();
     } catch (error) {
       this.setGeoStatus(error.message, true);
     }
@@ -1862,6 +2047,7 @@ class CityExplorer {
     }
     if (event.key === '/') {
       event.preventDefault();
+      this.setManualControlsOpen(true);
       this.elements['search-input'].focus();
       return;
     }
@@ -1889,9 +2075,7 @@ class CityExplorer {
     if (action === 'out') this.map.zoomOut({ duration: 250 });
     if (action === 'pitch') this.setTerrainView(!this.terrainEnabled);
     if (action === 'reset' && this.selected) {
-      this.terrainEnabled = true;
-      this.applyTerrain();
-      this.map.flyTo({ center: [this.selected.lon, this.selected.lat], zoom: 15.5, pitch: 60, bearing: -20 });
+      this.map.flyTo({ center: [this.selected.lon, this.selected.lat], zoom: this.mapMode === 'terrain' ? 12 : 14, pitch: this.terrainEnabled ? 45 : 0, bearing: this.mapMode === 'route' ? 0 : -12 });
     }
   }
 }

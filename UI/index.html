@@ -1,47 +1,62 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#ecece8">
-    <meta name="description" content="A monochrome 3D city explorer with OSM-first place, pin, area, and routing tools.">
+    <meta name="theme-color" content="#181c1b">
+    <meta name="description" content="Explore places, trace routes, and discover the landscape with an open-data map workspace.">
     <title>Monument / City Explorer</title>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-    <link rel="stylesheet" href="./styles.css?v=20260725-9">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css?v=20261007-3">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
-    <script type="module" src="./app.js?v=20260725-9"></script>
+    <script defer src="https://unpkg.com/maplibre-contour@0.0.5/dist/index.min.js"></script>
+    <script type="module" src="./app.js?v=20261007-2"></script>
   </head>
   <body>
     <main class="app-shell">
+      <div class="floating-toolbar">
+        <nav class="workspace-nav" aria-label="Workspace navigation">
+          <button type="button" data-workspace-view="explore" aria-pressed="true">Explore</button>
+          <button type="button" data-workspace-view="routes" aria-pressed="false">Routes</button>
+          <button type="button" data-workspace-view="workspace" aria-pressed="false">Workspace</button>
+        </nav>
+        <div class="topbar-actions">
+          <button id="theme-toggle" class="icon-button" type="button" aria-label="Toggle light and dark theme" aria-pressed="false" title="Toggle theme"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 14.1A8.4 8.4 0 0 1 9.9 4a8.4 8.4 0 1 0 10.2 10.1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>
+          <button id="fullscreen-toggle" class="icon-button" type="button" aria-label="Toggle fullscreen" aria-pressed="false" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+        </div>
+      </div>
       <aside class="manual-sidebar" aria-label="Manual map controls">
-        <button id="toggle-manual-controls" class="manual-toggle" type="button" aria-expanded="false"><span>MANUAL CONTROLS</span><b>OPEN</b></button>
+        <button id="toggle-manual-controls" class="manual-toggle" type="button" aria-expanded="true" aria-controls="manual-controls-content"><span><i class="panel-icon" aria-hidden="true"></i>Explorer tools</span><b>Close</b></button>
         <div id="manual-controls-content" class="manual-controls-content">
           <section class="search-panel" aria-label="City search">
           <form id="search-form" class="search-form">
             <span class="search-icon" aria-hidden="true"></span>
-            <input id="search-input" placeholder="Search city, country" aria-label="Search city and country" aria-autocomplete="list" aria-expanded="false" autocomplete="off">
+            <input id="search-input" placeholder="Find a place..." aria-label="Search city and country" aria-autocomplete="list" aria-expanded="false" aria-controls="suggestions" autocomplete="off">
             <span id="search-loader" class="mini-loader is-hidden" aria-label="Loading"></span>
-            <button type="submit" class="go-button" aria-label="Explore city">EXPLORE</button>
+            <button type="submit" class="go-button" aria-label="Explore city">Go</button>
           </form>
           <div id="suggestions" class="suggestions is-hidden" role="listbox"></div>
-          <div class="search-meta"><span id="status-dot" class="status-dot pulse"></span><span id="region-label">Detecting search region</span><span class="meta-separator">/</span><span>OSM-first geography tools</span></div>
+          <div class="search-meta"><span id="status-dot" class="status-dot pulse"></span><span id="region-label">Finding your search region</span></div>
           <section class="geo-panel" aria-label="Route planner and map tools">
-            <button id="toggle-geo-tools" class="geo-toggle" type="button" aria-expanded="false"><span>ROUTE PLANNER</span><b>OPEN</b></button>
+            <button id="toggle-geo-tools" class="geo-toggle" type="button" aria-expanded="false" aria-controls="geo-content"><span>Plan a journey</span><b>Open</b></button>
             <div id="geo-content" class="geo-content">
               <form id="route-form" class="route-form">
-                <div class="route-planner-heading"><span>YOUR STOPS</span><b id="route-stop-count">0 STOPS</b></div>
+                <div class="route-planner-heading"><span>Your stops</span><b id="route-stop-count">0 stops</b></div>
                 <div id="route-stops" class="route-stops" aria-label="Ordered route stops"></div>
-              <div class="route-actions"><button id="add-route-stop" type="button">ADD STOP</button><button id="trace-route" type="submit">TRACE PLAN</button></div>
-              <p id="route-plan-hint" class="route-plan-hint">Type to search places saved from earlier searches. Press Enter to search OpenStreetMap first.</p>
+              <div class="route-actions"><button id="add-route-stop" type="button">+ Add stop</button><button id="trace-route" type="submit">Trace route</button></div>
+              <p id="route-plan-hint" class="route-plan-hint">Find a saved place, or press Enter to search OpenStreetMap.</p>
               </form>
-              <div class="geo-actions"><button id="pin-mode" type="button" aria-pressed="false">PIN STOP ON MAP</button><button id="use-location" type="button">ADD MY LOCATION</button><button id="use-approximate-location" type="button">ADD APPROX. LOCATION</button></div>
+              <div class="geo-actions"><button id="pin-mode" type="button" aria-pressed="false">Pin on map</button><button id="use-location" type="button">My location</button><button id="use-approximate-location" type="button">Approx. location</button></div>
               <details class="utility-tools">
-                <summary>MORE MAP TOOLS</summary>
+                <summary>Workspace &amp; map tools</summary>
                 <div class="utility-content">
-                  <div class="geo-actions"><button id="show-area" type="button">MEASURE PIN AREA</button><button id="clear-additions" type="button">CLEAR WORKSPACE</button></div>
-                  <div class="tool-heading">SAVED PINS</div>
+                  <div class="geo-actions"><button id="show-area" type="button">Measure pin area</button><button id="clear-additions" type="button">Clear workspace</button></div>
+                  <div class="tool-heading">Saved pins</div>
                   <div id="pin-list" class="pin-list" aria-label="Saved pins"></div>
-                  <div class="tool-heading">MEASURED AREAS</div>
+                  <div class="tool-heading">Measured areas</div>
                   <div id="area-list" class="area-list" aria-label="Saved areas"></div>
                 </div>
               </details>
@@ -54,28 +69,47 @@
 
       <section class="map-region">
         <div id="map" class="map-canvas" aria-label="Interactive 3D city map"></div>
+        <section class="map-mode-panel" aria-label="Map appearance">
+          <div class="section-subhead"><span>Perspective</span><span id="view-mode-label">Satellite relief</span></div>
+          <div class="map-modes">
+            <button type="button" data-map-mode="satellite" aria-pressed="true"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m3 12 4-7 4 7 3-4 3 7H3v-3Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>Satellite</button>
+            <button type="button" data-map-mode="route" aria-pressed="false"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 5h8a3 3 0 0 1 0 6H7a3 3 0 0 0 0 6h8" stroke="currentColor" stroke-width="1.3"/><circle cx="5" cy="5" r="2" stroke="currentColor" stroke-width="1.3"/></svg>Route</button>
+            <button type="button" data-map-mode="terrain" aria-pressed="false"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M2 15c3-7 5 3 8-5s5 1 8-5M2 10c3-7 5 3 8-5s5 1 8-3M2 19c3-7 5 3 8-5s5 1 8-5" stroke="currentColor" stroke-width="1.2"/></svg>Terrain</button>
+          </div>
+        </section>
+        <div id="map-notice" class="map-notice is-hidden" role="status" aria-live="polite"></div>
         <div id="stream-card" class="stream-card is-hidden" aria-live="polite">
-          <div class="stream-heading"><span id="stream-title">ENRICHING CITY</span><b id="stream-count">0/0</b></div>
+          <div class="stream-heading"><span id="stream-title">Enriching city</span><b id="stream-count">0/0</b></div>
           <div class="stream-track"><i id="stream-progress"></i></div>
           <div class="stream-detail"><span id="stream-buildings">0 buildings</span><span id="stream-source">cache / open data</span></div>
         </div>
         <nav class="map-controls" aria-label="Map controls"><button type="button" data-map-action="in" aria-label="Zoom in">+</button><button type="button" data-map-action="out" aria-label="Zoom out">-</button><button type="button" data-map-action="pitch" aria-label="Enable 3D terrain view" aria-pressed="false">3D</button><button type="button" data-map-action="reset" aria-label="Reset map view">R</button></nav>
-        <aside id="agent-hud" class="agent-hud" aria-live="polite">
-          <div class="agent-hud-heading"><span>MAP AGENT</span><b id="agent-connection">CONNECTING</b></div>
-          <div class="agent-hud-stage"><span>REQUEST</span><strong id="agent-request">Waiting for connection</strong></div>
-          <div class="agent-hud-stage"><span>TOOL</span><strong id="agent-tool">No active tool</strong></div>
-        </aside>
+        <details id="agent-hud" class="agent-hud" aria-live="polite" aria-label="Map agent activity">
+          <summary class="agent-hud-heading"><span><i class="activity-icon" aria-hidden="true"></i>Live activity</span><b id="agent-connection">Connecting</b></summary>
+          <div class="agent-hud-stage"><span>Request</span><strong id="agent-request">Waiting for connection</strong></div>
+          <div class="agent-hud-stage"><span>Tool</span><strong id="agent-tool">No active tool</strong></div>
+          <div class="agent-hud-footnote">Your map. An open conversation.</div>
+        </details>
         <section id="agent-question" class="agent-question is-hidden" aria-live="polite" aria-label="Map agent clarification">
-          <p>MAP AGENT NEEDS A DETAIL</p>
+          <p>A little more detail</p>
           <strong id="agent-question-text"></strong>
           <div id="agent-question-choices" class="agent-question-choices"></div>
         </section>
         <form id="agent-composer" class="agent-composer" aria-label="Ask the map agent">
-          <input id="agent-input" maxlength="2000" placeholder="Ask the map agent to explore, route, or compare..." aria-label="Map agent request" autocomplete="off">
-          <button id="agent-submit" type="submit">SEND</button>
-          <button id="agent-cancel" class="agent-cancel is-hidden" type="button">CANCEL</button>
+          <span class="composer-symbol" aria-hidden="true">+</span>
+          <input id="agent-input" maxlength="2000" placeholder="Ask anything about this place..." aria-label="Map agent request" autocomplete="off">
+          <button id="agent-submit" type="submit">Send</button>
+          <button id="agent-cancel" class="agent-cancel is-hidden" type="button">Cancel</button>
         </form>
-        <footer class="attribution-note">OVERTURE / OPENSTREETMAP / NOMINATIM / OPTIONAL SERPAPI</footer>
+        <section class="workspace-metrics" aria-label="Workspace metrics">
+          <div class="section-subhead"><span>Your workspace</span><span class="metrics-mark" aria-hidden="true">+</span></div>
+          <div class="metrics-grid"><div><strong id="metric-pins">0</strong><span>Saved pins</span></div><div><strong id="metric-areas">0</strong><span>Areas</span></div><div><strong id="metric-buildings">0</strong><span>Buildings</span></div></div>
+        </section>
+        <section class="route-summary" aria-label="Current route summary">
+          <div class="route-summary-heading"><span><i class="route-line-icon" aria-hidden="true"></i>Journey overview</span><button id="focus-route" type="button" aria-label="Fit current route to map">View route <span aria-hidden="true">&#8599;</span></button></div>
+          <div class="route-metrics"><div><strong id="metric-distance">--</strong><span>Distance</span></div><div><strong id="metric-duration">--</strong><span>Travel time</span></div><div><strong id="metric-stops">0</strong><span>Stops</span></div><div><strong id="metric-provider">--</strong><span>Route source</span></div></div>
+        </section>
+        <footer class="attribution-note"><span>Overture / OpenStreetMap / Nominatim / Optional SerpAPI</span><span id="map-coordinates">--, --</span></footer>
       </section>
     </main>
   </body>
