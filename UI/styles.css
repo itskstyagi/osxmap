@@ -2225,6 +2225,8 @@ svg {
   white-space: normal;
 }
 .manual-sidebar .agent-panel {
+  display: flex;
+  flex-direction: column;
   flex-shrink: 0;
   min-height: 0;
   max-height: min(40dvh, 360px);
@@ -2302,6 +2304,37 @@ svg {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+.manual-sidebar .assistant-heading,
+.manual-sidebar #agent-feedback,
+.manual-sidebar .agent-question {
+  flex-shrink: 0;
+}
+.agent-response {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0 0 14px;
+  padding: 0 6px 0 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.agent-response[hidden] { display: none; }
+.agent-response > :first-child { margin-top: 0; }
+.agent-response > :last-child { margin-bottom: 0; }
+.agent-response p, .agent-response ul, .agent-response ol, .agent-response pre { margin: 0 0 12px; }
+.agent-response h3 { margin: 16px 0 8px; font-size: 14px; font-weight: 500; }
+.agent-response ul, .agent-response ol { padding-left: 20px; }
+.agent-response li { margin: 5px 0; }
+.agent-response strong { font-weight: 600; }
+.agent-response a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.agent-response code { padding: 2px 4px; border-radius: 4px; background: var(--control); font: 11px var(--mono); }
+.agent-response pre { padding: 10px; border: 1px solid var(--line); border-radius: 10px; white-space: pre-wrap; }
+.agent-response pre code { padding: 0; background: transparent; }
 .manual-sidebar .agent-hud-heading {
   margin: 0;
 }

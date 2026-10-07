@@ -135,7 +135,7 @@ function setup({ mobile = false } = {}) {
   const source = readFileSync(join(__dirname, 'app.js'), 'utf8')
     .replace(/^import[^\n]*\n/, '')
     .replaceAll('import.meta.url', JSON.stringify('file:///UI/app.js'));
-  vm.runInContext(`${source}\nglobalThis.CityExplorer = CityExplorer; globalThis.applyMonochrome = applyMonochrome;`, context, { filename: 'app.js' });
+  vm.runInContext(`${source}\nglobalThis.CityExplorer = CityExplorer; globalThis.applyMonochrome = applyMonochrome; globalThis.renderAgentReply = renderAgentReply;`, context, { filename: 'app.js' });
   const app = Object.create(context.CityExplorer.prototype);
   app.elements = Object.fromEntries(document.querySelectorAll('[id]').map((element) => [element.id, element]));
   Object.assign(app, {
@@ -149,7 +149,7 @@ function setup({ mobile = false } = {}) {
     renderRegion() {}, setStream() {}, resetMapForLocation() {},
   });
   return {
-    app, document, window, requests, timers, applyMonochrome: context.applyMonochrome,
+    app, document, window, requests, timers, applyMonochrome: context.applyMonochrome, renderAgentReply: context.renderAgentReply,
     async runTimer() {
       const [id, callback] = timers.entries().next().value;
       timers.delete(id);
@@ -191,6 +191,40 @@ test('display controls stay outside the sidebar after UI initialization', () => 
     assert.equal(control.listeners.get('click').length, 1);
   }
   assert.equal(document.querySelector('.workspace-nav').closest('.manual-sidebar'), document.querySelector('.manual-sidebar'));
+});
+
+test('assistant replies render safe formatting without treating HTML or unsafe links as markup', () => {
+  const { document, renderAgentReply } = setup();
+  const response = document.getElementById('agent-response');
+  renderAgentReply(response, '# Places\n\nFound **three places** with *great views* and `map data`.\nSecond line.\n\n- First place\n- Second place\n\n1. Next stop\n2. Last stop\n\n[Map](https://example.com/map) [Unsafe](javascript:alert)\n<script>alert(1)</script>\n\n```\n<img src=x onerror=alert(1)>\n```');
+  assert.equal(response.hidden, false);
+  assert.equal(response.querySelectorAll('h3').length, 1);
+  assert.equal(response.querySelectorAll('strong').length, 1);
+  assert.equal(response.querySelectorAll('em').length, 1);
+  assert.equal(response.querySelectorAll('li').length, 4);
+  assert.equal(response.querySelectorAll('a').length, 1);
+  assert.equal(response.querySelector('a').getAttribute('href'), 'https://example.com/map');
+  assert.equal(response.querySelector('a').getAttribute('rel'), 'noopener noreferrer');
+  assert.equal(response.querySelectorAll('script').length, 0);
+  assert.equal(response.querySelectorAll('img').length, 0);
+  assert.equal(response.querySelector('pre').querySelector('code').textContent, '<img src=x onerror=alert(1)>\n');
+});
+
+test('completed AI replies are not truncated or overwritten by reconnect and progress statuses', () => {
+  const { app, document } = setup();
+  const message = `A long reply\n\n${'Map information. '.repeat(300)}THE END`;
+  app.agentRunId = 'current-run';
+  app.handleAgentEvent({ type: 'agent.completed', runId: 'current-run', message });
+  const response = document.getElementById('agent-response');
+  assert.equal(response.hidden, false);
+  assert.equal(response.children[1].children[0].textContent.endsWith('THE END'), true);
+  const previous = response.children[1];
+  app.setAgentActivity({ connection: 'CONNECTING', request: 'Waiting for connection' });
+  assert.equal(response.children[1], previous);
+  app.setAgentActivity({ request: 'Request in progress', tool: 'Finding places' });
+  assert.equal(response.children[1], previous);
+  assert.equal(app.agentRunId, '');
+  assert.equal(document.getElementById('agent-feedback').textContent, 'Request in progress');
 });
 
 test('view mode toggles accessibly without changing panel or workspace state', async () => {

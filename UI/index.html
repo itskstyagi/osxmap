@@ -10,10 +10,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20261007-21">
+    <link rel="stylesheet" href="./styles.css?v=20261007-22">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
     <script defer src="https://unpkg.com/maplibre-contour@0.0.5/dist/index.min.js"></script>
-    <script type="module" src="./app.js?v=20261007-18"></script>
+    <script type="module" src="./app.js?v=20261007-22"></script>
   </head>
   <body>
     <main class="app-shell">
@@ -101,6 +101,7 @@
         <section class="agent-panel" aria-label="Map assistant">
           <div class="assistant-heading"><span>Map assistant</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m10 2 2.2 5.8L18 10l-5.8 2.2L10 18l-2.2-5.8L2 10l5.8-2.2L10 2Z" stroke="currentColor" stroke-width="1.2"/></svg></div>
           <p id="agent-feedback" class="agent-feedback" role="status">Connecting to the map assistant...</p>
+          <div id="agent-response" class="agent-response" role="region" aria-label="Assistant reply" aria-live="polite" tabindex="0" hidden></div>
           <section id="agent-question" class="agent-question is-hidden" aria-label="Map agent clarification" tabindex="-1">
             <p>A little more detail</p>
             <strong id="agent-question-text"></strong>

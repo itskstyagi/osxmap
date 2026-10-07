@@ -22,6 +22,85 @@ function readable(value) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function renderAgentReply(container, message) {
+  container.replaceChildren();
+  const inline = (parent, text) => {
+    const tokens = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s)]+\))/g;
+    let start = 0;
+    const append = (tag, value) => {
+      const node = document.createElement(tag);
+      node.textContent = value;
+      parent.append(node);
+      return node;
+    };
+    for (const match of text.matchAll(tokens)) {
+      if (match.index > start) append('span', text.slice(start, match.index));
+      const token = match[0];
+      if (token.startsWith('`')) append('code', token.slice(1, -1));
+      else if (token.startsWith('**')) append('strong', token.slice(2, -2));
+      else if (token.startsWith('*')) append('em', token.slice(1, -1));
+      else {
+        const link = token.match(/^\[([^\]]+)\]\((.+)\)$/);
+        let url;
+        try { url = new URL(link[2]); } catch { /* Invalid links stay plain text. */ }
+        const node = append(url && ['https:', 'http:'].includes(url.protocol) ? 'a' : 'span', link[1]);
+        if (node.tagName.toLowerCase() === 'a') {
+          node.setAttribute('href', url.href);
+          node.setAttribute('target', '_blank');
+          node.setAttribute('rel', 'noopener noreferrer');
+        }
+      }
+      start = match.index + token.length;
+    }
+    if (start < text.length) append('span', text.slice(start));
+  };
+  let paragraph;
+  let list;
+  let code;
+  for (const line of String(message).replace(/\r\n?/g, '\n').split('\n')) {
+    if (line.trim().startsWith('```')) {
+      paragraph = list = null;
+      if (code) code = null;
+      else {
+        const pre = document.createElement('pre');
+        code = document.createElement('code');
+        pre.append(code);
+        container.append(pre);
+      }
+      continue;
+    }
+    if (code) { code.textContent += `${line}\n`; continue; }
+    if (!line.trim()) { paragraph = list = null; continue; }
+    const item = line.match(/^\s*(?:([-*])|\d+[.)])\s+(.+)$/);
+    if (item) {
+      paragraph = null;
+      const tag = item[1] ? 'ul' : 'ol';
+      if (!list || list.tagName.toLowerCase() !== tag) {
+        list = document.createElement(tag);
+        container.append(list);
+      }
+      const node = document.createElement('li');
+      inline(node, item[2]);
+      list.append(node);
+    } else {
+      list = null;
+      const heading = line.match(/^#{1,6}\s+(.+)$/);
+      if (heading) {
+        paragraph = null;
+        const node = document.createElement('h3');
+        inline(node, heading[1]);
+        container.append(node);
+      } else {
+        if (!paragraph) { paragraph = document.createElement('p'); container.append(paragraph); }
+        else paragraph.append(document.createElement('br'));
+        inline(paragraph, line);
+      }
+    }
+  }
+  container.hidden = false;
+  container.scrollTop = 0;
+}
+
 function meters(value) {
   const amount = numeric(value);
   return amount !== null && amount > 0 ? `${amount.toLocaleString(undefined, { maximumFractionDigits: 1 })} m` : '';
@@ -674,7 +753,8 @@ class CityExplorer {
     }
     if (event.type === 'agent.completed') {
       this.finishAgentRun();
-      this.setAgentActivity({ request: String(event.message || 'Map request completed').slice(0, 2000), tool: 'Completed' });
+      renderAgentReply(document.getElementById('agent-response'), event.message || 'Your map is ready.');
+      this.setAgentActivity({ request: 'Map request completed', tool: 'Completed' });
       return;
     }
     if (event.type === 'agent.failed') {
