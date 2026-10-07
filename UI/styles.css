@@ -361,3 +361,71 @@ svg { flex-shrink: 0; }
   .agent-hud { top: calc(197px + env(safe-area-inset-top)); }
   .map-notice { top: calc(255px + env(safe-area-inset-top)); }
 }
+
+/* A single control rail leaves the map free of dashboard overlays. */
+.manual-sidebar {
+  --surface: rgba(30, 30, 31, .94);
+  --surface-solid: #272729;
+  --hud: rgba(39, 39, 41, .8);
+  --ink: #eeeef0;
+  --muted: #a3a3a8;
+  --line: rgba(255, 255, 255, .1);
+  --accent: #c4d798;
+  --accent-ink: #252b1e;
+  color: var(--ink);
+  top: 16px; bottom: 16px; right: 16px; left: auto;
+  width: 350px; max-height: none;
+  display: flex; flex-direction: column;
+  background: linear-gradient(150deg, rgba(44, 44, 46, .96), rgba(24, 24, 26, .96));
+  border-radius: 18px; box-shadow: 0 18px 50px rgba(0, 0, 0, .25);
+}
+.manual-sidebar .floating-toolbar { position: static; flex-shrink: 0; padding: 14px 12px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; backdrop-filter: none; gap: 8px; }
+.manual-sidebar .workspace-nav { gap: 16px; padding: 0 4px; }
+.manual-sidebar .workspace-nav button { font-size: 11px; }
+.manual-sidebar .topbar-actions { margin-left: auto; }
+.manual-sidebar .manual-toggle { flex-shrink: 0; height: 46px; }
+.manual-sidebar .manual-controls-content { flex: 1; min-height: 0; max-height: none; padding: 0 16px 18px; overflow-y: auto; }
+.manual-sidebar .map-mode-panel,
+.manual-sidebar .map-controls,
+.manual-sidebar .map-notice,
+.manual-sidebar .workspace-metrics,
+.manual-sidebar .route-summary,
+.manual-sidebar .agent-hud,
+.manual-sidebar .agent-question { position: static; width: 100%; max-width: none; transform: none; margin: 0 0 16px; }
+.manual-sidebar .map-modes { background: rgba(255, 255, 255, .035); box-shadow: none; }
+.manual-sidebar .map-controls { display: flex; flex-direction: row; background: transparent; width: fit-content; box-shadow: none; }
+.manual-sidebar .map-controls button { width: 38px; height: 32px; border-bottom: 0; border-right: 1px solid var(--line); }
+.manual-sidebar .map-controls button:last-child { border-right: 0; }
+.manual-sidebar .search-panel { margin-bottom: 18px; }
+.manual-sidebar .route-summary,
+.manual-sidebar .workspace-metrics,
+.manual-sidebar .agent-hud { padding: 14px; background: var(--hud); box-shadow: none; border-radius: 12px; }
+.manual-sidebar .route-metrics { grid-template-columns: 1fr 1fr; gap: 16px 8px; }
+.manual-sidebar .route-metrics > div { padding-left: 12px; }
+.manual-sidebar .route-metrics > div:nth-child(odd) { padding-left: 0; border-left: 0; }
+.manual-sidebar .route-metrics strong { font-size: 20px; }
+.manual-sidebar .route-metrics .metric-unit { display: inline; font-size: 10px; letter-spacing: 0; }
+.manual-sidebar .route-metrics > div:last-child strong { font: 10px var(--mono); }
+.manual-sidebar .agent-composer { position: static; flex-shrink: 0; width: auto; transform: none; margin: 12px; background: var(--surface-solid); box-shadow: none; }
+.manual-sidebar .agent-composer input { font-size: 11px; }
+.manual-sidebar .agent-composer button { padding: 0 12px; }
+.manual-sidebar .agent-question { max-height: none; }
+.manual-sidebar .agent-hud-heading { margin: 0; }
+.manual-sidebar .agent-hud[open] .agent-hud-heading { margin-bottom: 12px; }
+@media (min-width: 901px) {
+  .map-region { right: 382px; }
+  .manual-sidebar.is-collapsed .agent-composer { margin-top: auto; }
+}
+@media (max-width: 900px) {
+  .manual-sidebar,
+  .manual-sidebar.is-open { top: auto; left: auto; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); width: min(350px, calc(100vw - 24px)); max-height: min(74dvh, 650px); }
+  .manual-sidebar .floating-toolbar { justify-content: space-between; padding: 10px; }
+  .manual-sidebar.is-open .manual-controls-content { max-height: none; }
+  .manual-sidebar .agent-composer input { font-size: 16px; }
+  .app-shell:has(.manual-sidebar.is-open) .manual-sidebar .map-mode-panel,
+  .app-shell:has(.manual-sidebar.is-open) .manual-sidebar .map-notice,
+  .app-shell:has(.manual-sidebar.is-open) .manual-sidebar .agent-hud { visibility: visible; }
+  .manual-sidebar .agent-hud { display: block; }
+  :root[data-map-mode="route"] .manual-sidebar .workspace-metrics { display: block; }
+  :root:not([data-workspace-view="workspace"]) .manual-sidebar .workspace-metrics { display: none; }
+}

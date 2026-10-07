@@ -278,7 +278,10 @@ function applyMonochrome(map, theme, mode = 'route') {
   const buildingColor = satellite ? '#b9bdae' : dark ? '#343638' : '#b4b2a8';
   for (const id of [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred']) {
     if (map.getLayer(id)) map.setPaintProperty(id, 'fill-extrusion-color', buildingColor);
-    if (map.getLayer(id) && id !== PREVIEW_LAYER) map.setLayoutProperty(id, 'visibility', terrain || mode === 'route' ? 'none' : 'visible');
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
+  }
+  for (const id of ['local-selection', 'local-hover']) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', satellite ? 'none' : 'visible');
   }
   for (const id of ['local-water', 'local-park', 'local-road']) {
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', satellite ? 'none' : 'visible');
@@ -459,8 +462,13 @@ class CityExplorer {
     this.setGeoToolsOpen(false);
     this.setManualControlsOpen(desktop);
     el['manual-controls-content'].append(el['stream-card']);
-    document.querySelectorAll('[data-map-mode]').forEach((button) => button.addEventListener('click', () => this.setMapMode(button.dataset.mapMode)));
-    document.querySelectorAll('[data-workspace-view]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView(button.dataset.workspaceView)));
+    const sidebar = el['manual-controls-content'].closest('.manual-sidebar');
+    sidebar.prepend(document.querySelector('.floating-toolbar'));
+    el['manual-controls-content'].prepend(document.querySelector('.map-mode-panel'), document.querySelector('.map-controls'));
+    el['manual-controls-content'].append(document.getElementById('map-notice'), document.querySelector('.workspace-metrics'), document.querySelector('.route-summary'), document.getElementById('agent-hud'), el['agent-question']);
+    sidebar.append(el['agent-composer']);
+    document.querySelectorAll('button[data-map-mode]').forEach((button) => button.addEventListener('click', () => this.setMapMode(button.dataset.mapMode)));
+    document.querySelectorAll('button[data-workspace-view]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView(button.dataset.workspaceView)));
     document.getElementById('theme-toggle')?.addEventListener('click', () => this.setTheme(this.theme === 'dark' ? 'light' : 'dark'));
     document.getElementById('focus-route')?.addEventListener('click', () => this.focusRoute());
     document.getElementById('fullscreen-toggle')?.addEventListener('click', async () => {
@@ -983,10 +991,10 @@ class CityExplorer {
 
   applyMapMode() {
     document.documentElement.dataset.mapMode = this.mapMode;
-    document.querySelectorAll('[data-map-mode]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.mapMode === this.mapMode)));
+    document.querySelectorAll('button[data-map-mode]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.mapMode === this.mapMode)));
     if (this.map?.isStyleLoaded() || this.map?.getLayer('geo-route')) {
       applyMonochrome(this.map, this.theme, this.mapMode);
-      if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', this.previewVisible && this.mapMode === 'satellite' ? 'visible' : 'none');
+      if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', 'none');
     }
     this.updateDashboard();
   }
@@ -1007,7 +1015,7 @@ class CityExplorer {
 
   setWorkspaceView(view) {
     this.workspaceView = view;
-    document.querySelectorAll('[data-workspace-view]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.workspaceView === view)));
+    document.querySelectorAll('button[data-workspace-view]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.workspaceView === view)));
     this.setManualControlsOpen(true);
     this.setGeoToolsOpen(view !== 'explore');
     const utility = document.querySelector('.utility-tools');
@@ -1059,7 +1067,7 @@ class CityExplorer {
     if (coordinates.length < 2) return;
     const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
     const desktop = window.innerWidth > 900;
-    this.map.fitBounds(bounds, { padding: desktop ? { top: 170, right: 290, bottom: 240, left: this.manualControlsOpen ? 390 : 90 } : { top: 200, right: 40, bottom: 240, left: 40 }, pitch: 0, maxZoom: 16, duration: 800 });
+    this.map.fitBounds(bounds, { padding: desktop ? 60 : { top: 40, right: 30, bottom: 260, left: 30 }, pitch: 0, maxZoom: 16, duration: 800 });
   }
 
   addTerrainSource() {
@@ -1242,7 +1250,7 @@ class CityExplorer {
     this.features.clear(); this.tileFeatures.clear(); this.tileMetadata.clear(); this.loaded.clear(); this.failed.clear();
     this.buildings = 0; this.inferred = 0; this.total = 9; this.previewVisible = true; this.generation += 1;
     this.map.getSource('local-city')?.setData(EMPTY_COLLECTION);
-    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', this.mapMode === 'satellite' ? 'visible' : 'none');
+    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', 'none');
     if (this.map.getLayer('local-selection')) this.map.setFilter('local-selection', ['==', ['get', 'sourceId'], '__none__']);
     this.map.getSource(FOCUS_SOURCE)?.setData(this.focusFeature(location));
     this.terrainEnabled = this.mapMode === 'satellite';
@@ -1302,7 +1310,7 @@ class CityExplorer {
 
   setPreviewVisible(visible) {
     this.previewVisible = visible;
-    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', visible && this.mapMode === 'satellite' ? 'visible' : 'none');
+    if (this.map.getLayer(PREVIEW_LAYER)) this.map.setLayoutProperty(PREVIEW_LAYER, 'visibility', 'none');
   }
 
   setStream(stream) {
