@@ -2184,6 +2184,7 @@ class CityExplorer {
 
   handleShortcut(event) {
     const target = event.target;
+    if (target instanceof Element && target.closest('dialog[open]')) return;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === 'Escape' && this.agentQuestionOpen) {
