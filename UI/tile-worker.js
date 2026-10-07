@@ -5,6 +5,7 @@ let requestContext = null;
 let apiBaseUrl = '';
 let activeController = null;
 const queued = new Set();
+const retries = new Set();
 
 function headerNumber(response, name) {
   const value = Number.parseInt(response.headers.get(name) || '', 10);
@@ -16,13 +17,15 @@ self.onmessage = (event) => {
   if (type === 'reset') {
     generation += 1;
     activeController?.abort();
+    retries.forEach((timer) => clearTimeout(timer));
+    retries.clear();
     queue = [];
     queued.clear();
     requestContext = event.data.context;
     apiBaseUrl = event.data.apiBaseUrl;
     enqueue(event.data.tiles, generation, false);
   }
-  if (type === 'append') enqueue(event.data.tiles, generation, true);
+  if (type === 'append' && requestContext) enqueue(event.data.tiles, generation, true);
 };
 
 function enqueue(tiles, currentGeneration, prioritize) {
@@ -79,8 +82,13 @@ async function processQueue() {
       if (tile.generation === generation && error.name !== 'AbortError') {
         if ((error instanceof TypeError || error.retryable) && tile.attempt < 3) {
           const delay = error.retryAfter ? Math.min(error.retryAfter * 1000, 300000) : 600 * 2 ** tile.attempt;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          if (tile.generation === generation) queue.unshift({ ...tile, attempt: tile.attempt + 1 });
+          const timer = setTimeout(() => {
+            retries.delete(timer);
+            if (tile.generation !== generation) return;
+            queue.unshift({ ...tile, attempt: tile.attempt + 1 });
+            processQueue();
+          }, delay);
+          retries.add(timer);
         } else {
           queued.delete(tile.key);
           self.postMessage({ type: 'tileError', key: tile.key, message: error.message, generation: tile.generation });
