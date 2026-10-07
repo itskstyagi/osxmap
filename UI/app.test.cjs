@@ -127,6 +127,7 @@ function setup({ mobile = false } = {}) {
     matchMedia: (query) => ({ matches: query.includes('max-width') ? mobile : !mobile, addEventListener() {} }),
     addEventListener() {},
     clearTimeout: (id) => timers.delete(id),
+    setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
     clearInterval() {},
     cancelAnimationFrame() {},
     requestAnimationFrame() { assert.fail('Route calculation must not start animation'); },
@@ -1161,4 +1162,51 @@ test('Geo-IP opens at regional overview zoom while explicit searches retain clos
   assert.equal(cameras[0].bearing, 0);
   app.resetMapForLocation({ immediate: true });
   assert.equal(cameras[1].zoom, 14);
+});
+
+test('dismissed map instruction failures stay dismissed after activity rerenders', () => {
+  const { app } = setup();
+  app.setAgentActivity({ request: 'Network unavailable', tool: 'Failed' });
+  assert.equal(app.elements['agent-panel'].hidden, false);
+  app.dismissAgentResult();
+  app.renderAgentActivity();
+  assert.equal(app.elements['agent-panel'].hidden, true);
+  assert.equal(app.elements['search-input'].disabled, false);
+});
+
+test('clarification retires its run so late events cannot hijack a subsequent request', () => {
+  const { app } = setup();
+  app.agentRunId = 'old-run';
+  app.handleAgentEvent({ type: 'agent.question', runId: 'old-run', question: 'Which city?', choices: ['Paris', 'London'] });
+  assert.equal(app.agentRunId, '');
+  assert.equal(app.agentQuestionOpen, true);
+  app.agentSubmitting = true;
+  app.handleAgentEvent({ type: 'agent.map', runId: 'old-run', update: {} });
+  assert.equal(app.agentRunId, '');
+  assert.equal(app.agentEventIsCurrent('new-run'), true);
+});
+
+test('socket disconnect releases unified search and preserves interruption feedback on reconnect', () => {
+  const { app, window } = setup();
+  class Socket {
+    static OPEN = 1;
+    static CONNECTING = 0;
+    constructor() { this.listeners = new Map(); this.readyState = 0; }
+    addEventListener(type, handler) { this.listeners.set(type, handler); }
+  }
+  window.WebSocket = Socket;
+  app.agentReconnectAttempts = 0;
+  app.agentSessionId = 'session-1';
+  app.agentRunId = 'interrupted-run';
+  app.connectAgentSocket();
+  const socket = app.agentSocket;
+  socket.listeners.get('close')();
+  assert.equal(app.agentRunId, '');
+  assert.equal(app.agentPostSerial, 0);
+  assert.equal(app.elements['search-input'].disabled, false);
+  assert.match(app.elements['agent-feedback'].textContent, /Connection interrupted/);
+  app.connectAgentSocket();
+  app.handleAgentSocketMessage(app.agentSocket, { data: JSON.stringify({ type: 'session.ready', sessionId: 'session-1' }) });
+  assert.equal(app.agentSocketReady, true);
+  assert.match(app.elements['agent-feedback'].textContent, /Connection interrupted/);
 });

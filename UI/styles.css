@@ -493,7 +493,7 @@ svg { flex-shrink: 0; width: 20px; height: 20px; }
   .agent-panel { max-height: min(48dvh, calc(100dvh - 240px)); }
   .search-discovery { max-height: calc(100dvh - 240px); overflow-y: auto; }
   .manual-sidebar { width: min(var(--sidebar-width), calc(100vw - 32px)); max-height: calc(100dvh - var(--rail-top) - var(--attribution-height, 24px) - 70px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
-  :root[data-has-route="true"] .manual-sidebar { max-height: calc(100dvh - 410px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+  :root[data-has-route="true"] .manual-sidebar { max-height: calc(100dvh - var(--rail-top) - var(--attribution-height, 24px) - var(--route-summary-height, 170px) - 96px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
   .map-modes button { min-height: 38px; font-size: 10px; }
   .map-controls button { min-height: 40px; }
   .command-group > button { min-height: 40px; }

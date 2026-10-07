@@ -888,7 +888,7 @@ class CityExplorer {
     el['agent-cancel'].classList.toggle('is-hidden', !active);
     el['search-input'].disabled = active;
     const failed = this.agentActivity.tool === 'Failed' || this.agentActivity.tool === 'Request failed';
-    el['agent-panel'].hidden = !(active || this.agentQuestionOpen || failed || (!this.agentPanelDismissed && this.agentResultSummary));
+    el['agent-panel'].hidden = !(active || this.agentQuestionOpen || (!this.agentPanelDismissed && (failed || this.agentResultSummary)));
     document.querySelector('.floating-search').setAttribute('aria-busy', String(active));
     this.setLoading(Boolean(this.searchLoading));
     this.updateSearchDiscovery();
@@ -902,7 +902,8 @@ class CityExplorer {
       return;
     }
     this.agentSocketReady = false;
-    this.setAgentActivity({ connection: 'CONNECTING', request: this.agentRunId ? 'Connection lost; reconnecting' : 'Waiting for connection' });
+    const failed = this.agentActivity.tool === 'Failed' || this.agentActivity.tool === 'Request failed';
+    this.setAgentActivity({ connection: 'CONNECTING', request: failed ? this.agentActivity.request : this.agentRunId ? 'Connection lost; reconnecting' : 'Waiting for connection' });
     const socket = new window.WebSocket(AGENT_SOCKET_URL);
     this.agentSocket = socket;
     socket.addEventListener('open', () => {
@@ -942,7 +943,8 @@ class CityExplorer {
     if (message.type === 'session.ready' && message.sessionId === this.agentSessionId) {
       this.agentSocketReady = true;
       this.agentReconnectAttempts = 0;
-      this.setAgentActivity({ connection: 'READY', request: this.agentRunId ? 'Request in progress' : 'Search a place or give the map an instruction.' });
+      const failed = this.agentActivity.tool === 'Failed' || this.agentActivity.tool === 'Request failed';
+      this.setAgentActivity({ connection: 'READY', request: failed ? this.agentActivity.request : this.agentRunId ? 'Request in progress' : 'Search a place or give the map an instruction.' });
       return;
     }
     if (message.type === 'error') {
@@ -977,10 +979,7 @@ class CityExplorer {
       return;
     }
     if (event.type === 'agent.question') {
-      this.agentSubmitting = false;
-      this.agentRunId = '';
-      this.agentCancelRequested = false;
-      this.agentPostSerial = 0;
+      this.finishAgentRun();
       this.showAgentQuestion(event.question, event.choices);
       this.setAgentActivity({ request: 'Waiting for your choice', tool: 'Clarification requested' });
       return;
@@ -1353,8 +1352,8 @@ class CityExplorer {
       if (this.selected && this.map.getZoom() >= 13) this.setPreviewVisible(true);
     });
     this.map.on('moveend', () => {
-      this.updateDashboard();
       this.updateSatelliteImagery();
+      this.updateDashboard();
       this.refreshMapMetadata();
       if (this.selected && this.map.getZoom() >= 13) this.worker.postMessage({ type: 'append', tiles: visibleTiles(this.map) });
     });
@@ -1378,7 +1377,7 @@ class CityExplorer {
     });
     this.map.on('click', (event) => {
       if (this.viewMode || (!this.pinMode && (this.mapMode !== 'terrain' || this.workspaceView !== 'explore'))) return;
-      const interactiveLayers = [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred', 'local-poi-marker', 'local-search-result', 'geo-pin', 'geo-route-stop', 'geo-area-fill', 'geo-route', 'geo-route-search']
+      const interactiveLayers = [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred', 'local-poi-marker', 'local-search-result', 'geo-pin', 'geo-route-stop', 'geo-area-fill']
         .filter((layer) => this.map.getLayer(layer));
       if (interactiveLayers.length && this.map.queryRenderedFeatures(event.point, { layers: interactiveLayers }).length) return;
       if (this.pinMode) this.addMapPin(event.lngLat.lng, event.lngLat.lat);
@@ -1387,8 +1386,10 @@ class CityExplorer {
     const attribution = this.map.getContainer().querySelector('.maplibregl-ctrl-bottom-right');
     this.attributionObserver = new ResizeObserver(() => {
       document.documentElement.style.setProperty('--attribution-height', `${Math.ceil(attribution.getBoundingClientRect().height)}px`);
+      document.documentElement.style.setProperty('--route-summary-height', `${Math.ceil(document.querySelector('.route-summary').getBoundingClientRect().height)}px`);
     });
     this.attributionObserver.observe(attribution);
+    this.attributionObserver.observe(document.querySelector('.route-summary'));
     requestAnimationFrame(() => this.map.resize());
   }
 
@@ -1431,9 +1432,9 @@ class CityExplorer {
       applyMonochrome(this.map, this.theme, this.mapMode);
       this.setPreviewVisible(this.previewVisible);
     }
+    this.updateSatelliteImagery();
     this.updateDashboard();
     this.applyLayerPreferences();
-    this.updateSatelliteImagery();
     this.refreshMapMetadata();
   }
 
@@ -1516,7 +1517,7 @@ class CityExplorer {
     document.documentElement.dataset.hasRoute = String(Boolean(this.geo.route));
     document.documentElement.dataset.hasWorkspace = String(Boolean(this.geo.pins.length || this.geo.areas.length));
     set('context-place', this.selected?.shortName || this.selected?.name || 'San Francisco Bay Area');
-    set('context-mode', this.mapMode === 'satellite' ? 'Satellite imagery' : this.mapMode === 'route' ? 'Street map' : 'Topographic / Elevation contours');
+    set('context-mode', this.mapMode === 'satellite' ? this.regionalImageryActive ? 'Regional satellite / Sentinel-2 scene' : 'Satellite / Aerial composite' : this.mapMode === 'route' ? 'Street map' : 'Topographic / Elevation contours');
     set('context-zoom', this.map ? `${this.map.getZoom().toFixed(1)} / ${this.terrainEnabled ? '3D terrain' : 'Plan view'}` : '--');
     set('context-guidance', this.regionalImageryActive
       ? `Sentinel-2 scene from ${REGIONAL_IMAGERY.date} at 30 m. Clouds and small gaps remain; elevations are sampled, not survey measurements.`
@@ -3080,6 +3081,13 @@ class CityExplorer {
       event.preventDefault();
       this.setPinMode(false);
       this.setGeoStatus('Map pin mode turned off.');
+      return;
+    }
+    if (event.key === 'Escape') {
+      if (this.terrainPointPopup) this.terrainPointPopup.remove();
+      else if (document.getElementById('info-drawer-content').hidden === false) this.setInfoDrawerOpen(false);
+      else if (this.agentRunId || this.agentSubmitting) this.cancelAgentRequest();
+      else if (!this.elements['agent-panel'].hidden) this.dismissAgentResult();
       return;
     }
     if (event.key === '/') {
