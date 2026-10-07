@@ -14,6 +14,8 @@ const REGIONAL_IMAGERY = {
 const FOCUS_SOURCE = 'local-city-focus';
 const GEOGRAPHY_SOURCE = 'local-geography';
 const SEARCH_RESULTS_SOURCE = 'local-search-results';
+const RESEARCH_AREA_SOURCE = 'local-research-area';
+const RESEARCH_AREA_CAVEAT = 'Geocoded study extent, not an administrative boundary';
 const EMPTY_COLLECTION = { type: 'FeatureCollection', features: [] };
 const MAX_ROUTE_STOPS = 50;
 const originalFillOpacity = new WeakMap();
@@ -44,7 +46,7 @@ function coordinateQuery(query) {
 }
 
 function mapInstruction(query) {
-  return /^(?:find|show|hide|what|where|which|how|tell|take|plan|create|draw|go|zoom|clear|save|pin|add|remove|turn|enable|disable|switch|search|route|navigate|locate|analy[sz]e|summari[sz]e|compare|filter|visuali[sz]e|undo|redo|duplicate|open|research|browse|investigate|fetch|download|load)\b/i.test(query) ||
+  return /^(?:find|show|hide|what|where|which|how|tell|take|plan|create|make|generate|plot|map|draw|go|zoom|clear|save|pin|add|remove|turn|enable|disable|switch|search|route|navigate|locate|analy[sz]e|summari[sz]e|compare|filter|visuali[sz]e|undo|redo|duplicate|open|research|browse|investigate|fetch|download|load)\b/i.test(query) ||
     /\S\s+to\s+\S|\b(?:near|nearby|around|above|below)\b|\?$|\b(?:on|off)\s*$/i.test(query);
 }
 
@@ -52,6 +54,13 @@ function numeric(value) {
   if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function geographicBounds(value) {
+  if (!Array.isArray(value) || value.length !== 4 || !value.every(Number.isFinite)) return null;
+  const [west, south, east, north] = value;
+  if (Math.abs(west) > 180 || Math.abs(east) > 180 || south < -90 || north > 90 || south >= north || west === east || west - east === 360) return null;
+  return [...value];
 }
 
 function readable(value) {
@@ -553,6 +562,7 @@ class CityExplorer {
     this.routeStopControllers = new Map();
     this.routeStopTimers = new Map();
     this.searchResults = [];
+    this.researchArea = null;
     this.pinMode = false;
     this.geoToolsOpen = false;
     this.manualControlsOpen = false;
@@ -785,7 +795,7 @@ class CityExplorer {
       selected: this.selected, mapMode: this.mapMode, theme: this.theme, terrainEnabled: this.terrainEnabled,
       layerPreferences: this.layerPreferences, contourStrength: this.contourStrength,
       geo: { ...this.geo, routeAnimation: null, routeStops: this.routePlan().map((stop) => ({ ...stop, suggestions: [] })) },
-      searchResults: this.searchResults, studio: this.studio?.snapshot(), comparing: Boolean(this.studio?.compareMap),
+      searchResults: this.searchResults, researchArea: this.researchArea, studio: this.studio?.snapshot(), comparing: Boolean(this.studio?.compareMap),
     }));
   }
 
@@ -803,7 +813,7 @@ class CityExplorer {
     if (studio) { delete studio.camera; delete studio.updatedAt; delete studio.selectedLayerId; delete studio.scope; }
     return JSON.stringify({
       selected: this.selected, pins: this.geo.pins, areas: this.geo.areas, route: this.geo.route,
-      stops: this.routePlan().map((stop) => ({ query: stop.query, place: stop.place })), searchResults: this.searchResults,
+      stops: this.routePlan().map((stop) => ({ query: stop.query, place: stop.place })), searchResults: this.searchResults, researchArea: this.researchArea,
       mapMode: this.mapMode, terrainEnabled: this.terrainEnabled, preferences: this.layerPreferences, studio,
     });
   }
@@ -872,6 +882,8 @@ class CityExplorer {
       }
       if (snapshot.studio) this.studio?.restoreSnapshot(snapshot.studio, { restoreCamera: false });
       if (!snapshot.comparing) this.studio?.stopCompare();
+      this.researchArea = snapshot.researchArea ? JSON.parse(JSON.stringify(snapshot.researchArea)) : null;
+      this.renderResearchArea();
       this.renderWorkspace();
       this.renderGeography();
       this.renderSearchResults();
@@ -896,11 +908,11 @@ class CityExplorer {
       this.agentDidMutate = false;
       return;
     }
-    if (event.rolledBack === true && !this.agentLocalConflict) {
+    if (event.rolledBack === true || ['agent.failed', 'agent.cancelled'].includes(event.type) && event.rolledBack !== false) {
       const camera = this.agentUserCamera ? this.captureMapAction().camera : before.camera;
       this.restoreMapAction({ ...before, camera });
     }
-    else if (event.type === 'agent.completed' || event.type === 'agent.question') {
+    else if (event.type === 'agent.completed' || event.type === 'agent.question' || event.type === 'agent.limitation' && event.contextOnly === true && event.rolledBack !== false) {
       this.recordMapAction(this.agentLastMessage || 'Meridian map operation', before, { runId: event.runId, serverUndo: event.reversible === true });
     } else if (event.rolledBack === false || this.agentLocalConflict) {
       this.setGeoStatus('The workspace changed during this operation. Existing changes were kept rather than overwritten.', true);
@@ -1250,11 +1262,14 @@ class CityExplorer {
       return;
     }
     if (event.type === 'agent.map') {
-      this.agentDidMutate = true;
       this.applyingAgentMap = true;
-      try { this.applyAgentMapUpdate(event.update); }
+      let applied = false;
+      try { applied = this.applyAgentMapUpdate(event.update); }
       finally { this.applyingAgentMap = false; }
-      this.setAgentActivity({ request: 'Map updated', tool: 'Map changes applied' });
+      if (applied) this.agentDidMutate = true;
+      this.setAgentActivity(applied
+        ? { request: 'Map updated', tool: event.update.researchArea ? 'Study extent shown / researching data' : 'Map changes applied' }
+        : { request: 'Map update not applied', tool: this.agentApplicationError || 'The browser could not apply this map update' });
       return;
     }
     if (event.type === 'agent.question') {
@@ -1268,21 +1283,23 @@ class CityExplorer {
       this.settleAgentAction(event);
       this.finishAgentRun();
       this.agentResultSummary = '';
-      const title = { dataset_unavailable: 'A sourced geographic dataset is required', web_search_unavailable: 'The web source or reader could not supply this data', analysis_unavailable: 'This analysis is not supported by the current tools' }[event.reason] || 'This request needs unavailable data or tools';
+      const contextKept = event.contextOnly === true && event.rolledBack !== true && Boolean(this.researchArea);
+      const title = this.agentApplicationError || (contextKept ? 'Study area shown / data unavailable' : { dataset_unavailable: 'A sourced geographic dataset is required', web_search_unavailable: 'The web source or reader could not supply this data', analysis_unavailable: 'This analysis is not supported by the current tools' }[event.reason] || 'This request needs unavailable data or tools');
       this.renderAgentSources(event.sources);
       this.showCommandResult(title, event.message || 'This request needs data or tools that are not available in the current workspace.');
       this.elements['agent-result-details'].open = true;
-      this.setAgentActivity({ request: 'Capability limitation explained', tool: 'No map substituted' });
+      this.setAgentActivity({ request: 'Capability limitation explained', tool: contextKept ? 'Study extent kept / no data layer added' : 'No map substituted' });
       return;
     }
     if (event.type === 'agent.completed') {
       this.settleAgentAction(event);
       this.finishAgentRun();
       const message = event.message || 'Your map is ready.';
-      const summary = this.agentResultSummary || String(message).replace(/[#*_`]/g, '').split('\n').find((line) => line.trim())?.slice(0, 180) || 'Map updated';
+      const summary = this.agentApplicationError || this.agentResultSummary || String(message).replace(/[#*_`]/g, '').split('\n').find((line) => line.trim())?.slice(0, 180) || 'Map updated';
       this.renderAgentSources(event.sources);
       this.showCommandResult(summary, message);
-      this.setAgentActivity({ request: 'Map request completed', tool: 'Completed' });
+      if (this.agentApplicationError) this.elements['agent-result-details'].open = true;
+      this.setAgentActivity(this.agentApplicationError ? { request: this.agentApplicationError, tool: 'Map not fully applied' } : { request: 'Map request completed', tool: 'Completed' });
       return;
     }
     if (event.type === 'agent.failed') {
@@ -1539,6 +1556,8 @@ class CityExplorer {
   }
 
   clearWorkspaceLocal(clearCity = false) {
+    this.researchArea = null;
+    this.renderResearchArea();
     this.geo.pins = [];
     this.geo.areas = [];
     this.stopRouteAnimation(false);
@@ -1558,22 +1577,24 @@ class CityExplorer {
   }
 
   applyAgentView(view) {
-    if (!view || typeof view !== 'object' || !this.map) return;
-    if (Array.isArray(view.bounds) && view.bounds.length === 4 && view.bounds.every((value) => numeric(value) !== null)) {
-      const [west, south, east, north] = view.bounds.map(Number);
-      if (west >= -180 && east <= 180 && south >= -90 && north <= 90 && west < east && south < north) {
-        this.map.fitBounds([[west, south], [east, north]], { padding: 90, maxZoom: 16, duration: motionDuration(450) });
-        return;
-      }
+    if (!view || typeof view !== 'object' || !this.map) return false;
+    const bounds = geographicBounds(view.bounds);
+    if (bounds) {
+      const [west, south, east, north] = bounds;
+      this.map.fitBounds([[west, south], [east < west ? east + 360 : east, north]], { padding: 90, maxZoom: 16, duration: motionDuration(450) });
+      return true;
     }
     if (Array.isArray(view.center) && view.center.length >= 2 && numeric(view.center[0]) !== null && numeric(view.center[1]) !== null) {
+      if (Math.abs(Number(view.center[0])) > 180 || Math.abs(Number(view.center[1])) > 90) return false;
       const zoom = numeric(view.zoom);
       this.map.flyTo({ center: [Number(view.center[0]), Number(view.center[1])], zoom: zoom === null ? Math.max(12, this.map.getZoom()) : Math.max(1, Math.min(20, zoom)), duration: motionDuration(450) });
+      return true;
     }
+    return false;
   }
 
   applyAgentMapUpdate(update) {
-    if (!update || typeof update !== 'object') return;
+    if (!update || typeof update !== 'object' || Array.isArray(update)) return false;
     if (update.dataset) {
       try {
         const layer = this.studio?.applySourcedDataset(update.dataset);
@@ -1583,28 +1604,52 @@ class CityExplorer {
           this.studio.focusLayer(layer);
         }
         this.agentResultSummary = `${layer.name} / sourced ${layer.visualization}`;
+        return true;
       } catch (error) {
         this.agentApplicationError = `The sourced dataset was not applied: ${error.message}`;
         this.agentResultSummary = this.agentApplicationError;
         this.setGeoStatus(this.agentApplicationError, true);
+        return false;
       }
-      return;
     }
     if (update.studio) {
       try {
-        this.studio?.applyOperation(update.studio, { fromAgent: true });
+        if (!this.studio) throw new Error('Studio is unavailable.');
+        this.studio.applyOperation(update.studio, { fromAgent: true });
         this.agentResultSummary = 'Studio updated from the loaded dataset';
+        return true;
       } catch (error) {
-        this.agentResultSummary = `Studio operation was not applied: ${error.message}`;
+        this.agentApplicationError = `Studio operation was not applied: ${error.message}`;
+        this.agentResultSummary = this.agentApplicationError;
         this.setGeoStatus(this.agentResultSummary, true);
+        return false;
       }
-      return;
     }
     if (update.clear === true) {
       this.clearWorkspaceLocal(false);
       this.setGeoStatus('The map agent cleared the workspace.');
       this.agentResultSummary = 'Workspace cleared / saved route records kept';
-      return;
+      return true;
+    }
+    if (Object.hasOwn(update, 'researchArea')) {
+      const area = update.researchArea;
+      const bounds = geographicBounds(area?.bounds);
+      const name = typeof area?.name === 'string' ? area.name.trim().slice(0, 160) : '';
+      if (area !== null && (!bounds || !name)) {
+        this.agentApplicationError = 'The study extent was not applied: a name and finite, non-empty geographic bounds are required.';
+        this.agentResultSummary = this.agentApplicationError;
+        this.setGeoStatus(this.agentApplicationError, true);
+        return false;
+      }
+      this.researchArea = area === null ? null : {
+        name, bounds, caveat: String(area.caveat || RESEARCH_AREA_CAVEAT).slice(0, 500),
+        source: { name: String(area.source?.name || 'Geocoded study extent').slice(0, 160), url: String(area.source?.url || '').slice(0, 2048) },
+      };
+      this.locationRevision = (this.locationRevision || 0) + 1;
+      this.renderResearchArea();
+      if (bounds) this.applyAgentView(update.view || { bounds });
+      this.agentResultSummary = this.researchArea ? `Study area / ${name}` : 'Study extent cleared';
+      return true;
     }
     const selected = this.agentLocation(update.selectedCity);
     if (selected) this.chooseLocation(selected);
@@ -1633,6 +1678,7 @@ class CityExplorer {
       : this.searchResults.length
         ? `${this.searchResults.length} place${this.searchResults.length === 1 ? '' : 's'} on the map`
         : selected ? `Exploring ${selected.shortName || selected.name}` : 'Map updated';
+    return true;
   }
 
   createMap() {
@@ -1653,6 +1699,7 @@ class CityExplorer {
       this.map.getSource(FOCUS_SOURCE)?.setData(this.selected ? this.focusFeature(this.selected) : EMPTY_COLLECTION);
       this.renderGeography();
       this.renderSearchResults();
+      this.renderResearchArea();
       this.studio?.renderMap();
       this.refreshMapMetadata();
       if (this.map.getLayer(PREVIEW_LAYER) && !this.previewBuildingEventsBound) {
@@ -2238,6 +2285,8 @@ class CityExplorer {
 
   chooseLocation(location, { source = 'selected', immediate = false } = {}) {
     if (this.markManualChange()) return;
+    this.researchArea = null;
+    this.renderResearchArea();
     this.locationRevision = (this.locationRevision || 0) + 1;
     this.searchController?.abort();
     this.suggestionController?.abort();
@@ -2880,6 +2929,62 @@ class CityExplorer {
   renderGeography() {
     this.map?.getSource(GEOGRAPHY_SOURCE)?.setData(this.geographyFeatures());
     this.updateDashboard();
+  }
+
+  renderResearchArea() {
+    const map = this.map;
+    const area = this.researchArea;
+    let label = this.elements['research-area-label'];
+    if (!area) {
+      if (label) label.hidden = true;
+      for (const id of ['local-research-area-outline', 'local-research-area-fill']) if (map?.getLayer?.(id)) map.removeLayer(id);
+      if (map?.getSource?.(RESEARCH_AREA_SOURCE)) map.removeSource(RESEARCH_AREA_SOURCE);
+      return;
+    }
+    if (!label) {
+      label = document.createElement('div');
+      label.id = 'research-area-label';
+      label.className = 'research-area-label';
+      label.setAttribute('role', 'status');
+      label.setAttribute('aria-live', 'polite');
+      label.setAttribute('aria-atomic', 'true');
+      this.elements['research-area-label'] = label;
+      document.querySelector('.map-feedback-stack').prepend(label);
+    }
+    const swatch = document.createElement('span');
+    swatch.className = 'research-area-swatch';
+    swatch.setAttribute('aria-hidden', 'true');
+    const copy = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = `Study area / ${area.name}`;
+    const note = document.createElement('small');
+    note.textContent = RESEARCH_AREA_CAVEAT;
+    copy.append(title, note);
+    label.replaceChildren(swatch, copy);
+    label.title = area.caveat;
+    try {
+      const url = new URL(area.source.url);
+      if (['https:', 'http:'].includes(url.protocol) && !url.username && !url.password) {
+        const link = document.createElement('a');
+        link.textContent = 'Source';
+        link.href = url.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.setAttribute('aria-label', `Study extent source: ${area.source.name}`);
+        label.append(link);
+      }
+    } catch { /* An invalid source URL is never an executable link. */ }
+    label.hidden = false;
+    if (!map?.getStyle?.()?.layers || (!map.isStyleLoaded() && !map.getLayer('geo-route'))) return;
+    const [west, south, east, north] = area.bounds;
+    const polygon = (w, e) => [[[w, south], [e, south], [e, north], [w, north], [w, south]]];
+    const geometry = west < east ? { type: 'Polygon', coordinates: polygon(west, east) }
+      : { type: 'MultiPolygon', coordinates: [polygon(west, 180), polygon(-180, east)].filter((part) => part[0][0][0] !== part[0][1][0]) };
+    const data = { type: 'FeatureCollection', features: [{ type: 'Feature', geometry, properties: { name: area.name, kind: 'study-extent', caveat: RESEARCH_AREA_CAVEAT } }] };
+    if (map.getSource(RESEARCH_AREA_SOURCE)) map.getSource(RESEARCH_AREA_SOURCE).setData(data);
+    else map.addSource(RESEARCH_AREA_SOURCE, { type: 'geojson', data });
+    if (!map.getLayer('local-research-area-fill')) map.addLayer({ id: 'local-research-area-fill', source: RESEARCH_AREA_SOURCE, type: 'fill', paint: { 'fill-color': '#c7a270', 'fill-opacity': .04 } }, map.getLayer('geo-area-fill') ? 'geo-area-fill' : undefined);
+    if (!map.getLayer('local-research-area-outline')) map.addLayer({ id: 'local-research-area-outline', source: RESEARCH_AREA_SOURCE, type: 'line', paint: { 'line-color': '#c7a270', 'line-width': 1.5, 'line-opacity': .9, 'line-dasharray': [4, 3] } });
   }
 
   routeSearchEdges(route) {

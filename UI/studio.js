@@ -33,6 +33,11 @@ function validBounds(value) {
     Math.abs(value[0]) <= 180 && Math.abs(value[2]) <= 180 && value[1] >= -90 && value[3] <= 90 && value[1] < value[3];
 }
 
+function provenanceFacts(source = {}) {
+  return [['Reference year', source.referenceYear], ['Resolution', source.resolution], ['Method', source.method], ['License', source.license]]
+    .filter(([, value]) => typeof value === 'string' && value.trim() || typeof value === 'number' && Number.isFinite(value));
+}
+
 export function createWorkspace(name = 'Untitled workspace') {
   return {
     id: id(), name, description: '', createdAt: Date.now(), updatedAt: Date.now(),
@@ -683,7 +688,8 @@ export class MeridianStudio {
   focusLayer(layer = this.selectedLayer()) {
     if (!layer) return;
     this.app.cameraInteractionRevision = (this.app.cameraInteractionRevision || 0) + 1;
-    const bounds = boundsFor(this.workspace.datasets[layer.datasetId]);
+    const context = this.contextFor(layer);
+    const bounds = context.region || boundsFor(filterCollection(this.hydrated(layer), context));
     if (!bounds) return;
     const [west, south, east, north] = bounds;
     const narrow = window.innerWidth <= 900;
@@ -879,6 +885,8 @@ export class MeridianStudio {
       const result = this.renderedLayer(layer);
       const legend = result.legend;
       container.append(element('strong', layer.name), element('span', `${legend.title || layer.field || 'Feature count'} / ${legend.unit || layer.units || 'features'}`));
+      const facts = provenanceFacts(layer.source).filter(([label]) => label === 'Reference year' || label === 'Resolution');
+      if (facts.length) container.append(element('small', facts.map(([label, value]) => `${label}: ${value}`).join(' / '), 'studio-legend-provenance'));
       if (layer.visualization === 'heatmap') container.append(element('small', 'Relative intensity. The range below describes source values, not population density.'));
       if (legend.categorical) {
         for (const category of legend.categorical.slice(0, 12)) {
@@ -898,6 +906,8 @@ export class MeridianStudio {
         const range = element('div', '', 'studio-legend-range');
         range.append(...[legend.min, legend.mid, legend.max].map((value) => element('span', number(value))));
         container.append(ramp, range);
+        if (layer.visualization === 'heatmap' && result.metrics.max === 0) container.append(element('small', 'All displayed source values are zero; no heat intensity is drawn.'));
+        if (layer.source?.method === 'raster-window' && layer.source.caveat) container.append(element('small', layer.source.caveat, 'studio-legend-caveat'));
         if (legend.note || result.caveat) {
           const details = element('details');
           details.append(element('summary', 'Scale & source notes'), element('small', legend.note || result.caveat));
@@ -977,6 +987,16 @@ export class MeridianStudio {
       }
       const filters = [layer.filters.category !== '' && layer.filters.category != null ? `${layer.filters.categoryField} = ${layer.filters.category}` : '', layer.filters.min !== null ? `minimum ${layer.filters.min}` : '', layer.filters.max !== null ? `maximum ${layer.filters.max}` : '', layer.filters.viewport ? 'current viewport' : '', !layer.ignoreRegion && (this.workspace.region || layer.scopeBounds) ? 'selected geographic bounds' : '', this.contextFor(layer).time ? `time ${this.workspace.time}` : ''].filter(Boolean);
       provenance.append(element('h3', 'Provenance'), element('p', `${layer.source?.name || 'User-provided data'} > ${filters.join(', ') || 'all records'} > ${VISUALIZATIONS[layer.visualization]?.label || layer.visualization}`, 'studio-provenance-path'), element('p', layer.source?.caveat || 'Source accuracy is not independently verified.'));
+      const facts = provenanceFacts(layer.source);
+      if (facts.length) {
+        const list = element('dl', '', 'studio-source-facts');
+        for (const [label, value] of facts) {
+          const row = element('div');
+          row.append(element('dt', label), element('dd', String(value)));
+          list.append(row);
+        }
+        provenance.append(list);
+      }
       if (layer.source?.url) {
         try {
           const url = new URL(layer.source.url);
@@ -986,7 +1006,8 @@ export class MeridianStudio {
         } catch { /* Invalid source links are never rendered as executable content. */ }
       }
       if (layer.source?.attribution) provenance.append(element('p', `Attribution: ${layer.source.attribution}`));
-      if (layer.source?.retrievedAt) provenance.append(element('small', `Retrieved ${layer.source.retrievedAt}. Publication date is not the population reference year.`));
+      if (layer.source?.publishedDate) provenance.append(element('small', `Published: ${layer.source.publishedDate}. This is not the data reference year.`));
+      if (layer.source?.retrievedAt) provenance.append(element('small', `Retrieved: ${layer.source.retrievedAt}. Retrieval does not make historical data current.`));
       const rendered = this.renderedLayer(layer);
       const transformationNote = rendered.caveat?.replace(layer.source?.caveat || '', '').trim();
       if (transformationNote) provenance.append(element('p', transformationNote));
@@ -1181,8 +1202,8 @@ export class MeridianStudio {
     }, { record: false });
     if (!changed) throw new Error('The sourced dataset could not be added. The preceding valid workspace was retained.');
     this.setTab('layers');
-    if (scope.type === 'workspace') this.focusLayer(layer);
-    this.status(`Loaded ${rendered.inputCount.toLocaleString()} source observations. Check the source date, units, and partial-coverage caveats in Insights.`);
+    if (this.enabled) this.focusLayer(layer);
+    this.status(`Loaded ${rendered.inputCount.toLocaleString()} ${layer.source.method === 'raster-window' ? 'extracted raster cells' : 'source observations'}${layer.source.referenceYear ? ` / reference year ${layer.source.referenceYear}` : ''}. Check the source, units, and coverage caveats in Insights.`);
     return layer;
   }
 
