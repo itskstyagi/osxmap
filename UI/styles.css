@@ -443,14 +443,14 @@ svg { flex-shrink: 0; }
   :root[data-map-mode="route"] .manual-sidebar .workspace-metrics { display: block; }
   :root:not([data-workspace-view="workspace"]) .manual-sidebar .workspace-metrics { display: none; }
 }
-.info-drawer { position: absolute; z-index: 12; bottom: 0; left: 18px; right: 18px; color: #eeeef0; --ink: #eeeef0; --muted: #a3a3a8; --line: rgba(255,255,255,.1); --hud: #272729; --accent: #c4d798; }
+.info-drawer { position: absolute; z-index: 12; bottom: 0; left: 350px; right: 26px; color: #eeeef0; --ink: #eeeef0; --muted: #a3a3a8; --line: rgba(255,255,255,.075); --hud: rgba(28,33,31,.72); --accent: #c4d798; }
 .info-drawer-toggle { display: grid; place-items: center; width: 52px; height: 30px; margin: 0 auto; border: 1px solid var(--line); border-bottom: 0; border-radius: 10px 10px 0 0; background: #232325; }
 .info-drawer-toggle svg { width: 20px; height: 20px; }
 .info-drawer.is-open .info-drawer-toggle svg { transform: rotate(180deg); }
-.info-drawer-content { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 20px; padding: 22px; max-height: 40dvh; overflow-y: auto; border: 1px solid var(--line); border-bottom: 0; border-radius: 16px 16px 0 0; background: linear-gradient(150deg, #2c2c2e, #1c1c1e); box-shadow: 0 -12px 40px rgba(0,0,0,.18); }
+.info-drawer-content { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; padding: 0 0 18px; max-height: 40dvh; overflow-y: auto; border: 0; background: transparent; }
 .info-drawer .route-summary,
 .info-drawer .workspace-metrics,
-.info-drawer .agent-hud { position: static; width: auto; max-width: none; transform: none; margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+.info-drawer .agent-hud { position: static; width: auto; max-width: none; transform: none; margin: 0; padding: 18px; background: var(--hud); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.12); backdrop-filter: blur(28px); }
 :root .info-drawer .workspace-metrics { display: block; }
 .info-drawer .route-metrics { grid-template-columns: 1fr 1fr; gap: 14px; }
 .info-drawer .route-metrics > div { padding-left: 12px; }
@@ -458,13 +458,13 @@ svg { flex-shrink: 0; }
 .info-drawer .route-metrics strong { font-size: 20px; }
 .info-drawer .route-metrics .metric-unit { display: inline; font-size: 10px; letter-spacing: 0; }
 .info-drawer .route-metrics > div:last-child strong { font: 10px var(--mono); }
-.cache-info { display: grid; align-content: start; gap: 10px; }
+.cache-info { display: grid; align-content: start; gap: 10px; padding: 18px; background: var(--hud); border: 1px solid var(--line); border-radius: 14px; backdrop-filter: blur(28px); }
 .cache-info strong { font: 11px var(--mono); }
 .cache-info p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
 .cache-info button { justify-self: start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: transparent; font-size: 10px; }
 @media (max-width: 900px) {
   .info-drawer { left: 12px; right: 12px; }
-  .info-drawer-content { grid-template-columns: 1fr; max-height: 48dvh; padding: 18px; }
+  .info-drawer-content { grid-template-columns: 1fr; max-height: 48dvh; padding: 0 0 12px; }
   :root[data-map-mode="route"] .info-drawer .agent-hud,
   :root[data-map-mode="route"] .info-drawer .workspace-metrics { display: block; }
   .app-shell:has(.manual-sidebar.is-open) .info-drawer .agent-hud { visibility: visible; }
