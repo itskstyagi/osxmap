@@ -479,7 +479,7 @@ class Cache:
                     canonical_places.append(place)
         return canonical_places
 
-    def search_places(self, normalized_query: str, limit: int | None = None, provider: str = "", country_code: str = "") -> list[dict[str, Any]]:
+    def search_places(self, normalized_query: str, limit: int | None = None, provider: str = "", country_code: str = "", include_payload: bool = False) -> list[dict[str, Any]]:
         """Return stored places whose normalized name contains the query substring."""
         pattern = f"%{normalized_query}%"
         statement = (
@@ -499,7 +499,7 @@ class Cache:
             parameters.append(limit)
         with self.lock:
             rows = self.connection.execute(statement, parameters).fetchall()
-        return [self._place_from_row(row) for row in rows]
+        return [self._place_from_row(row, include_payload=include_payload) for row in rows]
 
     def list_places_in_bounds(self, west: float, south: float, east: float, north: float, limit: int = 1_000) -> tuple[list[dict[str, Any]], bool]:
         base = (
@@ -829,14 +829,23 @@ def resolve_location(query: str, country_code: str) -> dict[str, Any] | None:
     normalized = normalize_query(query)
     country = country_param(country_code)
     key = f"{normalized}|{country}"
+    place_name = normalized.split(",", 1)[0].strip()
+    exact = [place for place in saved_place_matches(query, country_code) if normalize_query(place["name"]) == place_name]
+    if len(exact) == 1:
+        result = map_location(exact[0], cached=True)
+        CACHE.put_geocode(key, result)
+        return result
     cached = CACHE.get_geocode(key)
     if cached:
         return {**cached, "cached": True}
     results = nominatim_search(query, country, 1)
     if not results:
-        return None
+        discovery = lookup_places(query, country_code, None, None)
+        results = [map_location(place, cached=discovery["stored"]) for place in discovery["results"]]
+        if not results:
+            return None
     CACHE.put_geocode(key, results[0])
-    return {**results[0], "cached": False}
+    return {**results[0], "cached": bool(results[0].get("cached"))}
 
 
 def suggest_locations(query: str, country_code: str) -> list[dict[str, Any]]:
@@ -961,6 +970,44 @@ def search_serp_places(query: str, lat: float | None, lon: float | None, country
 
 def public_place(place: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in place.items() if key != "providerPayload"}
+
+
+def saved_place_matches(query: str, country_code: str) -> list[dict[str, Any]]:
+    parts = [normalize_query(part) for part in query.split(",") if part.strip()]
+    if not parts or len(parts[0]) < 2:
+        return []
+    country = country_param(country_code).upper() if len(parts) == 1 else ""
+    matches = []
+    for place in CACHE.search_places(parts[0], limit=32, include_payload=True):
+        if country and place.get("countryCode") and place["countryCode"].upper() != country:
+            continue
+        payload = place.get("providerPayload") or {}
+        address = payload.get("address")
+        country_name = address.get("country", "") if isinstance(address, dict) else payload.get("country", "")
+        label = normalize_query(f"{place['name']} {place.get('address', '')} {country_name} {place.get('countryCode', '')}")
+        if all(part in label for part in parts[1:]):
+            matches.append(place)
+    return sorted(matches, key=lambda place: (
+        normalize_query(place["name"]) != parts[0],
+        bool(country) and place.get("countryCode", "").upper() != country,
+        place.get("provider") != "openstreetmap",
+    ))[:8]
+
+
+def map_location(place: dict[str, Any], cached: bool = False) -> dict[str, Any]:
+    short_name = place["name"]
+    address = str(place.get("address") or "")
+    name = address if normalize_query(address).startswith(normalize_query(short_name)) else ", ".join(part for part in (short_name, address) if part)
+    payload = place.get("providerPayload") or {}
+    details = payload.get("address")
+    country = details.get("country", "") if isinstance(details, dict) else payload.get("country", "")
+    return {**public_place(place), "name": name, "shortName": short_name, "country": country, "cached": cached}
+
+
+def suggest_map_locations(query: str, country_code: str) -> list[dict[str, Any]]:
+    # Saved landmarks must not be hidden by a previously cached empty city search.
+    saved = saved_place_matches(query, country_code)
+    return [map_location(place, cached=True) for place in saved] if saved else suggest_locations(query, country_code)
 
 
 PLACE_LOOKUP_POLICY_VERSION = "osm-first-v2"
@@ -1115,6 +1162,10 @@ def lookup_places(query: str, country_code: str, lat: float | None, lon: float |
         CACHE.put_place_lookup(lookup_key, context, results)
         return place_discovery(results, "openstreetmap", "nominatim-search")
     fallback_reason = "no-usable-osm-result"
+    saved_serp = [place for place in saved_place_matches(query, country_code) if place.get("provider") == "serpapi-google-maps"]
+    if saved_serp:
+        CACHE.put_place_lookup(lookup_key, context, saved_serp)
+        return place_discovery(saved_serp, "serpapi", "local-serp-cache", stored=True, fallback_reason=fallback_reason, serp_eligible=True)
     places = search_serp_places(query, lat, lon, country_code)
     CACHE.put_place_lookup(lookup_key, context, places)
     return place_discovery(places, "serpapi", "serp-fallback", fallback_reason=fallback_reason, serp_eligible=True)
@@ -2725,12 +2776,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/suggest":
                 value = query.get("q", [""])[0].strip()[:160]
-                self.send_json(200, {"results": suggest_locations(value, query.get("countryCode", [""])[0]) if len(value) >= 2 else []})
+                self.send_json(200, {"results": suggest_map_locations(value, query.get("countryCode", [""])[0]) if len(value) >= 2 else []})
                 return
             if parsed.path == "/api/geocode":
                 value = query.get("q", [""])[0].strip()[:160]
                 if not value:
-                    raise ServiceError("Enter a city name.", 400)
+                    raise ServiceError("Enter a city or place name.", 400)
                 result = resolve_location(value, query.get("countryCode", [""])[0])
                 if not result:
                     raise ServiceError("Location not found.", 404)

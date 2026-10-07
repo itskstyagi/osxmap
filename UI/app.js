@@ -1,7 +1,7 @@
 import { AGENT_SOCKET_URL, API_BASE_URL, apiPath } from './config.js';
 
 const TILE_ZOOM = 14;
-const ACCENT = '#c4d798';
+const ACCENT = '#ecad73';
 const PREVIEW_LAYER = 'local-buildings-preview';
 const TERRAIN_SOURCE = 'local-terrain-dem';
 const TERRAIN_TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
@@ -245,7 +245,7 @@ function applyMonochrome(map, theme, mode = 'route') {
   const satellite = mode === 'satellite';
   const terrain = mode === 'terrain';
   const colors = dark
-    ? { background: '#111113', land: '#18181b', park: '#202123', water: '#0b0c0e', line: '#3b3b40', text: '#c9c9c6', halo: '#111113' }
+    ? { background: '#141918', land: '#1d2320', park: '#283129', water: '#111e24', line: '#475048', text: '#d1d5c9', halo: '#141918' }
     : { background: '#e8e5dc', land: '#e8e5dc', park: '#deded1', water: '#d2d6d2', line: '#a39f93', text: '#57574e', halo: '#e8e5dc' };
   for (const layer of map.getStyle().layers || []) {
     if (layer.id.startsWith('local-') || layer.id.startsWith('geo-')) continue;
@@ -304,7 +304,7 @@ function applyMonochrome(map, theme, mode = 'route') {
   const routeColor = terrain && !dark ? '#343830' : '#ffffff';
   for (const [id, property, color] of [
     ['geo-route', 'line-color', routeColor], ['geo-route-casing', 'line-color', dark ? '#101310' : '#faf9f2'],
-    ['geo-route-search', 'line-color', '#9ba88a'], ['geo-route-search-casing', 'line-color', dark ? '#333a30' : '#f8f7ef'],
+    ['geo-route-search', 'line-color', ACCENT], ['geo-route-search-casing', 'line-color', dark ? '#333a30' : '#f8f7ef'],
     ['geo-pin-label', 'text-color', '#1a2117'], ['geo-route-stop-label', 'text-color', '#1a2117'],
     ['local-search-result-label', 'text-color', colors.text], ['local-search-result-label', 'text-halo-color', colors.halo],
   ]) if (map.getLayer(id)) map.setPaintProperty(id, property, color);
@@ -1018,7 +1018,7 @@ class CityExplorer {
       type: 'raster', tiles: ['https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 19,
       attribution: 'Imagery &copy; <a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9">Esri, Vantor, Earthstar Geographics, GIS User Community</a>',
     });
-    this.map.addLayer({ id: 'local-satellite', type: 'raster', source: 'local-imagery', layout: { visibility: this.mapMode === 'satellite' ? 'visible' : 'none' }, paint: { 'raster-saturation': -0.2, 'raster-brightness-max': 0.85, 'raster-contrast': 0.16, 'raster-fade-duration': 250 } }, firstLayer);
+    this.map.addLayer({ id: 'local-satellite', type: 'raster', source: 'local-imagery', layout: { visibility: this.mapMode === 'satellite' ? 'visible' : 'none' }, paint: { 'raster-saturation': -0.42, 'raster-brightness-max': 0.78, 'raster-contrast': 0.2, 'raster-fade-duration': 250 } }, firstLayer);
     this.map.addLayer({ id: 'local-hillshade', type: 'hillshade', source: TERRAIN_SOURCE, layout: { visibility: 'none' }, paint: { 'hillshade-exaggeration': 0.7, 'hillshade-illumination-direction': 315 } }, firstLine);
     if (!this.contourDem) return;
     this.map.addSource('local-contour-source', {
@@ -1169,7 +1169,7 @@ class CityExplorer {
   setTheme(theme) {
     this.theme = theme === 'light' ? 'light' : 'dark';
     document.documentElement.dataset.theme = this.theme;
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', this.theme === 'dark' ? '#111113' : '#ecece8');
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', this.theme === 'dark' ? '#181b1a' : '#ecece8');
     localStorage.setItem('theme', this.theme);
     const toggle = document.getElementById('theme-toggle');
     toggle?.setAttribute('aria-label', `Switch to ${this.theme === 'dark' ? 'light' : 'dark'} mode`);
