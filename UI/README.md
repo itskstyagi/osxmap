@@ -127,7 +127,9 @@ limitation rather than treating discovered places as population observations.
 
 Heatmaps are smoothed relative-intensity displays, not a literal cell-density
 map, population census, or real-time measurement. Population models retain their
-source date, resolution, and uncertainty. Darma Valley requires a deliberately
+source date, resolution, and uncertainty. Nonnegative numeric heatmap values are
+scaled by their displayed maximum; zero observations add no intensity. Signed
+fields use relative min-max weights. Darma Valley requires a deliberately
 chosen region: a geocoder may return a point or administrative bounds rather
 than the valley boundary. Use **Select region** or an independently sourced
 boundary; do not label an entire district total as the valley's population.

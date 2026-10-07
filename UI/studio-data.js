@@ -763,12 +763,15 @@ export function renderCollection(layer, context = {}) {
     const value = feature.properties.__value;
     const weight = fraction(value, metrics.min, metrics.max);
     feature.properties.__weight = weight;
+    if (visualization === 'heatmap') feature.properties.__heatWeight = metrics.min >= 0 ? metrics.max > 0 ? value / metrics.max : 0 : weight;
     feature.properties.__height = metricHeight ? Math.max(0, value) : weight * 1500;
   }
   if (visualization === 'surface' || visualization === 'extrusion') {
     notes.add(metricHeight ? 'Extrusion height uses the supplied meter field; negative heights are clamped to ground level, while original values are preserved.' : 'Height is a normalized 0-1500 visual index, not measured elevation or surveyed terrain.');
   }
-  if (visualization === 'heatmap') notes.add('Heatmap weights are relative min-max values, not absolute mass or area-normalized density.');
+  if (visualization === 'heatmap') notes.add(metrics.min >= 0
+    ? 'Nonnegative heatmap values are scaled by the displayed maximum; zero values add no intensity. The legend reports source values, not smoothed intensity, absolute mass, or area-normalized density.'
+    : 'Signed heatmap values use relative min-max weights, not absolute mass or area-normalized density. The legend reports source values, not smoothed intensity.');
   if (visualization === 'flow') notes.add('Only supplied line geometry is shown; no routes, movement, or direction are inferred.');
   if (!features.length) notes.add('No display geometry remains after filtering or interpolation; no observations were invented.');
   if (metrics.validCount && metrics.min === metrics.max) notes.add('Constant displayed values use the palette midpoint.');

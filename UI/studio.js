@@ -124,7 +124,7 @@ export function styleLayers(layer, rendered) {
   const types = new Set([rendered.geometryType, ...rendered.data.features.map((feature) => feature.geometry?.type)]);
   if (layer.visualization === 'heatmap') return [{
     ...base, id: `${prefix}-heat`, type: 'heatmap', paint: {
-      'heatmap-weight': ['coalesce', ['get', '__weight'], 1], 'heatmap-intensity': 1,
+      'heatmap-weight': ['coalesce', ['get', '__heatWeight'], 0], 'heatmap-intensity': 1,
       'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 5, 12, 15, 44], 'heatmap-opacity': opacity,
       'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'], 0, 'rgba(0,0,0,0)', .15, colors[0], .5, middle, 1, colors.at(-1)],
     },
@@ -879,6 +879,7 @@ export class MeridianStudio {
       const result = this.renderedLayer(layer);
       const legend = result.legend;
       container.append(element('strong', layer.name), element('span', `${legend.title || layer.field || 'Feature count'} / ${legend.unit || layer.units || 'features'}`));
+      if (layer.visualization === 'heatmap') container.append(element('small', 'Relative intensity. The range below describes source values, not population density.'));
       if (legend.categorical) {
         for (const category of legend.categorical.slice(0, 12)) {
           const row = element('div', '', 'studio-legend-category');
@@ -922,6 +923,7 @@ export class MeridianStudio {
             } else {
               const ramp = element('div', '', 'studio-legend-ramp'); ramp.style.background = `linear-gradient(90deg, ${scale.colors.join(', ')})`;
               row.append(element('small', `${scale.title} / ${scale.unit || 'unit not provided'}`), ramp, element('small', `${number(scale.min)} / ${number(scale.mid)} / ${number(scale.max)}`));
+              if (other.visualization === 'heatmap') row.append(element('small', 'Relative intensity; range shows source values.'));
             }
           } catch (error) { row.append(element('small', error.message)); }
           details.append(row);

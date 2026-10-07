@@ -198,6 +198,13 @@ test('empty display output retains the correct MapLibre layer family', () => {
   assert.equal(surface[0].type, 'fill-extrusion');
 });
 
+test('heatmap MapLibre styling uses explicit intensity weights instead of generic palette weights', () => {
+  const instance = controller();
+  instance.selectedLayer().visualization = 'heatmap';
+  const spec = studio.styleLayers(instance.selectedLayer(), instance.renderedLayer(instance.selectedLayer()))[0];
+  assert.deepEqual(spec.paint['heatmap-weight'], ['coalesce', ['get', '__heatWeight'], 0]);
+});
+
 test('map color stops encode the full palette used in its legend', () => {
   const instance = controller();
   const layer = instance.selectedLayer();

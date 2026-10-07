@@ -376,6 +376,19 @@ for (const visualization of ['points', 'heatmap', 'tactical']) {
   });
 }
 
+test('nonnegative population heatmap weights preserve ratios and zero observations add no intensity', () => {
+  for (const values of [[0, 0, 0], [10, 10], [10, 20, 40]]) {
+    const rendered = engine.renderCollection(engine.makeLayer(collection(...values.map((population, index) => point(index, index, { population }))), { visualization: 'heatmap', field: 'population', units: 'people per source cell' }));
+    const maximum = Math.max(...values);
+    assert.deepEqual(rendered.data.features.map((feature) => feature.properties.__heatWeight), values.map((value) => maximum ? value / maximum : 0));
+    assert.match(rendered.legend.note, /zero values add no intensity/);
+    assert.match(rendered.legend.note, /legend reports source values/);
+  }
+  const signed = engine.renderCollection(engine.makeLayer(collection(point(0, 0, { value: -3 }), point(1, 1, { value: 3 })), { visualization: 'heatmap', field: 'value' }));
+  assert.deepEqual(signed.data.features.map((feature) => feature.properties.__heatWeight), [0, 1]);
+  assert.match(signed.legend.note, /Signed heatmap values/);
+});
+
 test('missing values are omitted from scalar display and never turned into zero observations', () => {
   const rendered = engine.renderCollection(engine.makeLayer(collection(point(0, 0, { value: 0 }), point(1, 1, { value: null }), point(2, 2, { value: false }), point(3, 3, { value: '' })), { field: 'value' }));
   assertRenderable(rendered);
