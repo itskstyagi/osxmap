@@ -57,7 +57,7 @@ class Hub:
 
     def wait(self, run_id):
         def terminal():
-            return next((event for _, event in self.events if event["runId"] == run_id and event["type"] in {"agent.completed", "agent.question", "agent.failed", "agent.cancelled"}), None)
+            return next((event for _, event in self.events if event["runId"] == run_id and event["type"] in {"agent.completed", "agent.question", "agent.limitation", "agent.failed", "agent.cancelled"}), None)
 
         with self.condition:
             if not self.condition.wait_for(terminal, timeout=4):
@@ -274,6 +274,89 @@ class ContextAndStudioTests(BackendCase):
         result = json.loads(client.messages[1][-1]["content"])
         self.assertTrue(result["queued"])
         self.assertNotIn("mapUpdate", result)
+
+
+class CapabilityLimitationTests(BackendCase):
+    def test_limitation_is_validated_and_has_no_substitute_geography(self):
+        for reason in ("dataset_unavailable", "web_search_unavailable", "analysis_unavailable"):
+            with self.subTest(reason=reason):
+                result = self.tools.execute(self.tools.new_context({}), "report_limitation", {"reason": reason})
+                self.assertTrue(result["limitation"])
+                self.assertEqual(result["reason"], reason)
+                self.assertNotIn("mapUpdate", result)
+                self.assertIn("Studio", result["message"])
+        for arguments in ({}, {"reason": "make_something_up"}, {"reason": "dataset_unavailable", "message": "Heatmap created"}):
+            with self.subTest(arguments=arguments), self.assertRaises(server.ServiceError):
+                self.tools.execute(self.tools.new_context({}), "report_limitation", arguments)
+
+    def test_missing_population_returns_actionable_limitation_without_map_mutation(self):
+        before = self.cache.capture_workspace()
+        service, hub, client = self.service([tool_call("report_limitation", {"reason": "dataset_unavailable"})])
+        run_id = service.start_run(hub.session, "Create the heatmap of the population of Darma Valley", studio_context())
+        event = hub.wait(run_id)
+        self.assertEqual(event["type"], "agent.limitation")
+        self.assertEqual(event["reason"], "dataset_unavailable")
+        self.assertFalse(event["reversible"])
+        self.assertIn("numeric value field", event["message"])
+        self.assertEqual(self.cache.capture_workspace(), before)
+        self.assertFalse(any(item["type"] in {"agent.map", "agent.failed", "agent.completed"} for _, item in hub.events))
+        self.assertEqual(len(client.messages), 1)
+
+    def test_web_search_followup_after_location_lookup_can_explain_missing_dataset(self):
+        before = self.cache.capture_workspace()
+        service, hub, client = self.service([
+            tool_call("search_places", {"query": "Darma Valley"}),
+            {"content": "I found the place, but I cannot download population observations."},
+            tool_call("report_limitation", {"reason": "web_search_unavailable"}),
+        ])
+        run_id = service.start_run(hub.session, "Search the internet and create its population heatmap", {})
+        event = hub.wait(run_id)
+        self.assertEqual(event["type"], "agent.limitation")
+        self.assertIn("cannot browse arbitrary websites", event["message"])
+        self.assertFalse(any(item["type"] == "agent.map" for _, item in hub.events))
+        self.assertEqual(self.cache.capture_workspace(), before)
+        self.assertEqual(len(client.messages), 3)
+        self.assertIn("Do not substitute place-search points", client.messages[2][-1]["content"])
+
+    def test_geographic_omission_receives_one_bounded_recovery_before_finishing(self):
+        service, hub, client = self.service([
+            tool_call("find_city", {"query": "Test"}),
+            {"content": "The city is ready."},
+            tool_call("present_map", {"cityRef": "city:1"}),
+            {"content": "The city is shown on your map."},
+        ])
+        run_id = service.start_run(hub.session, "Show Test City", {})
+        event = hub.wait(run_id)
+        self.assertEqual(event["type"], "agent.completed")
+        self.assertEqual(len(client.messages), 4)
+        self.assertEqual(len([item for _, item in hub.events if item["type"] == "agent.map"]), 1)
+
+    def test_limitation_rolls_back_accidental_earlier_map_changes(self):
+        pin = self.cache.add_pin("Previous place", 2, 2)
+        before = self.cache.workspace_snapshot()
+        service, hub, _ = self.service([
+            tool_call("clear_map"),
+            tool_call("report_limitation", {"reason": "dataset_unavailable"}),
+        ])
+        run_id = service.start_run(hub.session, "Clear old results and show population heatmap", {})
+        event = hub.wait(run_id)
+        self.assertEqual(event["type"], "agent.limitation")
+        self.assertTrue(event["rolledBack"])
+        self.assertEqual(event["workspace"], before)
+        self.assertEqual(self.cache.workspace_snapshot()["pins"][0]["id"], pin["id"])
+        with self.assertRaises(server.ServiceError):
+            service.undo_run(hub.session, run_id)
+
+    def test_repeated_omissions_fail_without_an_unbounded_retry_loop(self):
+        service, hub, client = self.service([
+            tool_call("find_city", {"query": "Test"}), {"content": "Ready"}, {"content": "Ready again"},
+        ])
+        run_id = service.start_run(hub.session, "Show Test", {})
+        event = hub.wait(run_id)
+        self.assertEqual(event["type"], "agent.failed")
+        self.assertNotIn("found results but did not present", event["error"])
+        self.assertIn("previous map was retained", event["error"])
+        self.assertEqual(len(client.messages), 3)
 
 
 class GeographicScopeTests(BackendCase):

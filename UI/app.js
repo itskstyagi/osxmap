@@ -1238,6 +1238,14 @@ class CityExplorer {
       this.setAgentActivity({ request: 'Waiting for your choice', tool: 'Clarification requested' });
       return;
     }
+    if (event.type === 'agent.limitation') {
+      this.settleAgentAction(event);
+      this.finishAgentRun();
+      this.agentResultSummary = '';
+      this.showCommandResult('A sourced geographic dataset is required', event.message || 'This request needs data or tools that are not available in the current workspace.');
+      this.setAgentActivity({ request: 'Capability limitation explained', tool: 'No map substituted' });
+      return;
+    }
     if (event.type === 'agent.completed') {
       this.settleAgentAction(event);
       this.finishAgentRun();

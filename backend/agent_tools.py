@@ -181,6 +181,21 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "report_limitation",
+            "description": "Finish honestly when the requested statistical dataset, general web browsing, or analysis is unavailable. Geographic lookup results are not a population/risk dataset and must not be presented as a substitute. This leaves the preceding valid map unchanged.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "enum": ["dataset_unavailable", "web_search_unavailable", "analysis_unavailable"]},
+                },
+                "required": ["reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "clear_map",
             "description": "Clear the persisted workspace and all visible agent map state. Use only for an unambiguous clear request.",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -225,6 +240,7 @@ class AgentTools:
             "plan_route": self._plan_route,
             "present_map": self._present_map,
             "studio_operation": self._studio_operation,
+            "report_limitation": self._report_limitation,
             "clear_map": self._clear_map,
             "ask_user": self._ask_user,
         }
@@ -244,6 +260,7 @@ class AgentTools:
             "plan_route": "Planning a road route",
             "present_map": "Drawing the map",
             "studio_operation": "Queuing a scoped Studio operation",
+            "report_limitation": "Explaining the available data and tools",
             "clear_map": "Clearing the map",
             "ask_user": "Preparing a question",
         }.get(name, "Updating the map")
@@ -388,6 +405,18 @@ class AgentTools:
             "clear": False,
         }
         return {"presented": True, "mapUpdate": update}
+
+    @staticmethod
+    def _report_limitation(context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        messages = {
+            "dataset_unavailable": "No usable geographic dataset with the requested numeric values is loaded. Place-search results are not population or risk observations. Open Studio > Data, import a sourced GeoJSON dataset, then choose Heatmap and its numeric value field in Visualize.",
+            "web_search_unavailable": "The map agent can search map places, but it cannot browse arbitrary websites or download arbitrary statistical datasets. Import a vetted GeoJSON dataset in Studio > Data. Web snippets and place counts are not a population heatmap.",
+            "analysis_unavailable": "The requested analysis is not supported by the current map tools. Studio can visualize and filter supplied geographic data, compute summary statistics, and select high-value features; it cannot infer missing observations or perform an unsupported scientific analysis.",
+        }
+        reason = arguments.get("reason")
+        if not isinstance(reason, str) or reason not in messages:
+            raise ServiceError("A supported map capability limitation is required.", 400)
+        return {"limitation": True, "reason": reason, "message": messages[reason]}
 
     def _studio_operation(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
         studio = context.map_context.get("studio", {})

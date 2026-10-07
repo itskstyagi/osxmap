@@ -1324,3 +1324,33 @@ test('late Geo-IP results cannot move a Studio workspace after initial navigatio
   respond(requests[1], { data: { status: 'success', city: 'Test', country: 'Test', countryCode: 'US', lat: 50, lon: -3 } });
   await work;
 });
+
+test('missing population data is an actionable capability result, not a fake heatmap or retry failure', () => {
+  const { app } = setup();
+  app.agentRunId = 'population-run';
+  app.agentResultSummary = 'Previous place results';
+  app.handleAgentEvent({ type: 'agent.limitation', runId: 'population-run', reason: 'dataset_unavailable', message: 'Import sourced geographic population values in Studio > Data, then select Heatmap and the population field.' });
+  assert.equal(app.agentRunId, '');
+  assert.equal(app.agentSubmitting, false);
+  assert.equal(app.elements['agent-panel'].hidden, false);
+  assert.equal(app.elements['agent-feedback'].classList.contains('is-error'), false);
+  assert.equal(app.elements['agent-result-summary'].textContent, 'A sourced geographic dataset is required');
+  assert.equal(app.elements['agent-result-details'].hidden, false);
+  assert.equal(app.elements['agent-task-chip'].hidden, true);
+  assert.equal(app.searchResults.length, 0);
+  app.handleAgentEvent({ type: 'agent.map', runId: 'population-run', update: { clear: true } });
+  assert.equal(app.agentRunId, '');
+});
+
+test('a capability limitation restores earlier mutations in the same agent run when guarded rollback succeeds', () => {
+  const { app } = setup();
+  app.agentRunId = 'limitation-run';
+  app.agentSnapshot = app.captureMapAction();
+  app.agentDidMutate = true;
+  let restored;
+  app.restoreMapAction = (snapshot) => { restored = snapshot; };
+  app.handleAgentEvent({ type: 'agent.limitation', runId: 'limitation-run', reason: 'dataset_unavailable', message: 'No population data is loaded.', rolledBack: true });
+  assert.equal(restored.geo.pins.length, 0);
+  assert.equal(app.agentRunId, '');
+  assert.equal(app.mapActions?.length || 0, 0);
+});

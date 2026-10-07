@@ -583,7 +583,7 @@ class MapAgentServiceTests(unittest.TestCase):
 
         def publish(self, session_id: str, event: dict) -> bool:
             self.events.append((session_id, event))
-            if event["type"] in {"agent.completed", "agent.failed", "agent.cancelled"}:
+            if event["type"] in {"agent.completed", "agent.limitation", "agent.failed", "agent.cancelled"}:
                 self.completed.set()
             return True
 
