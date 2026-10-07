@@ -2756,6 +2756,9 @@ svg {
     max-height: 32dvh;
     padding: 10px;
   }
+  .manual-sidebar .agent-panel:has(.agent-response:not([hidden])) {
+    max-height: 46dvh;
+  }
   .manual-sidebar .assistant-heading {
     display: none;
   }
