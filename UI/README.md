@@ -107,9 +107,32 @@ insufficient samples are reported instead of manufacturing a result.
 
 A heatmap needs geographically distributed numeric observations. A location
 lookup, a valley-wide population total, a list of villages, and internet snippets
-cannot establish that distribution. The agent currently has no general web
-browsing or population-grid downloader. It explicitly reports a capability/data
-limitation rather than treating discovered places as population observations.
+cannot establish that distribution. Meridian can now research sources using the
+configured SerpApi Google Search, Google News, and Google Scholar engines. It can
+read bounded public HTML/text/CSV/GeoJSON, load actual geographic observations,
+or join actual numeric table rows to carefully verified settlements. Research
+citations appear as clickable source links in the result and layer provenance.
+
+For automatic research, use **Workspace** scope, or first center on Darma Valley
+and select the intended geographic region. **Selected layer** scope cannot create
+a new dataset. A supported source can become a heatmap without manual import:
+
+```text
+Research official population data for Darma Valley, Uttarakhand, India.
+Use real geographic observations or sourced village population rows.
+Create a heatmap, cite the source and reference year, and state coverage limits.
+```
+
+The agent must try available web research before declaring the data unavailable.
+Search snippets never become measurements. For a settlement table, exact place
+names, provider settlement types, and scoped geography or source administrative
+columns must agree; unknown POIs and ambiguous name matches are refused. Table
+values are copied from the read source, not supplied by the language model.
+
+Automatic reading supports GeoJSON and CSV with real latitude/longitude columns;
+the backend does not yet decode GeoTIFF, PDF, authenticated portals, or massive
+national datasets. If those are the only useful sources, the result cites them
+and explains the specific remaining extraction gap. Manual import remains useful:
 
 1. Obtain a sourced population dataset for the intended year and geographic
    extent, such as a modeled population-count grid from the WorldPop data portal
@@ -156,6 +179,15 @@ instructions such as `show heatmap`, `summarize`, and `show 3d` do not require a
 model request. Other instructions use the backend's validated tools. Studio
 exposes viewport, selected-region, active-layer, and workspace scopes. The agent
 receives a bounded inventory rather than raw imported feature collections.
+Web research has four search calls, five source reads, and two dataset loads per
+run. Public reading validates each URL/DNS/redirect, blocks private or credential
+addresses, pins public IP connections, and caps bytes/time. Source text is treated
+as untrusted evidence, never as system instructions. Searches and model prompts
+go to the configured providers; public-source reads contact their publishers.
+Serp search responses reuse the existing local credential-redacted cache, which
+may contain historical results. Source publication, dataset year, search receipt,
+and page-read date are kept distinct. The agent uses only reviewed engine tools,
+not arbitrary provider parameters or unrestricted "all APIs" access.
 If the model gathers places then stops without presenting an achievable map,
 the service gives it one bounded recovery turn. It can present known references
 or use `report_limitation` for missing data/tools. Limitations display visible

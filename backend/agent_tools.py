@@ -255,6 +255,7 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "sourceRef": {"type": "string"}, "tableIndex": {"type": "integer", "minimum": 0},
                     "nameColumn": {"type": "string"}, "valueColumn": {"type": "string"},
+                    "regionColumn": {"type": "string", "description": "Optional exact source-table administrative-region column; required in workspace scope. Its original row text must match the returned location address, not a model-invented region."},
                     "matches": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "object", "properties": {"rowIndex": {"type": "integer", "minimum": 0}, "placeRef": {"type": "string"}}, "required": ["rowIndex", "placeRef"], "additionalProperties": False}},
                     "name": {"type": "string", "maxLength": 120}, "units": {"type": "string", "maxLength": 60},
                     "visualization": {"type": "string", "enum": ["heatmap", "points"]},
@@ -508,6 +509,9 @@ class AgentTools:
             raise ServiceError("Choose a table index returned by read_web_source.", 400)
         table = tables[index]
         headers, rows = table.get("headers", []), table.get("rows", [])
+        region_column = arguments.get("regionColumn", "")
+        if region_column and (region_column not in headers or headers.count(region_column) != 1):
+            raise ServiceError("The region column must be a unique exact header returned by the source table.", 400)
         name_column, value_column = arguments.get("nameColumn"), arguments.get("valueColumn")
         if name_column not in headers or value_column not in headers or headers.count(name_column) != 1 or headers.count(value_column) != 1 or name_column == value_column:
             raise ServiceError("Choose two unique, exact source table columns for the place name and numeric measurement.", 400)
@@ -516,6 +520,8 @@ class AgentTools:
             raise ServiceError("Provide one to twenty exact source row/place matches.", 400)
         name_index, value_index = headers.index(name_column), headers.index(value_column)
         bounds = self._geographic_bounds(context)
+        if not bounds and not region_column:
+            raise ServiceError("An unscoped settlement table needs a source administrative-region column. Otherwise choose a viewport or selected valley region to disambiguate same-named settlements.", 400)
         features, used_rows, used_places = [], set(), set()
         for match in matches:
             if not isinstance(match, dict) or set(match) != {"rowIndex", "placeRef"}:
@@ -539,8 +545,16 @@ class AgentTools:
             assert place is not None
             known = re.sub(r"[^\w]+", " ", str(place.get("shortName") or place["name"]).casefold()).strip()
             expected = re.sub(r"[^\w]+", " ", name.casefold()).strip()
-            if not expected or not re.search(rf"(?<!\w){re.escape(expected)}(?!\w)", known):
+            if not expected or expected != known:
                 raise ServiceError("The source-row place name does not match the verified location. Search the exact settlement and disambiguate it before joining.", 400)
+            if place.get("placeType") not in {"city", "town", "village", "hamlet", "locality", "isolated_dwelling"}:
+                raise ServiceError("The provider has not identified this location as a settlement. A school, business, or unknown POI cannot stand in for a census settlement.", 400)
+            if region_column:
+                region_index = headers.index(region_column)
+                region = re.sub(r"[^\w]+", " ", str(row[region_index]).casefold()).strip() if region_index < len(row) else ""
+                address = re.sub(r"[^\w]+", " ", f"{place['name']} {place.get('address', '')}".casefold()).strip()
+                if not region or not re.search(rf"(?<!\w){re.escape(region)}(?!\w)", address):
+                    raise ServiceError("The source administrative region does not match the verified settlement address. Disambiguate before mapping population values.", 400)
             if match["placeRef"] in used_places or not self._inside(place, bounds):
                 raise ServiceError("The place match is duplicated or outside the selected geographic scope.", 400)
             used_rows.add(row_index); used_places.add(match["placeRef"])
@@ -837,6 +851,7 @@ class AgentTools:
             "country": _text(source.get("country"), 120),
             "countryCode": _text(source.get("countryCode"), 2).upper(),
             "provider": _text(source.get("provider"), 80),
+            "placeType": _text(source.get("placeType"), 80),
             "lat": lat,
             "lon": lon,
             "bbox": bbox,
@@ -844,7 +859,7 @@ class AgentTools:
 
     @staticmethod
     def _output_entity(entity: dict[str, Any]) -> dict[str, Any]:
-        return {key: copy.deepcopy(entity.get(key)) for key in ("ref", "id", "name", "shortName", "address", "country", "countryCode", "provider", "lat", "lon", "bbox")}
+        return {key: copy.deepcopy(entity.get(key)) for key in ("ref", "id", "name", "shortName", "address", "country", "countryCode", "provider", "placeType", "lat", "lon", "bbox")}
 
     @staticmethod
     def _coordinates_from_entity(entity: dict[str, Any]) -> tuple[float, float]:

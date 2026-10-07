@@ -214,8 +214,9 @@ class GroundedWebAgentTests(BackendCase):
     def test_html_table_join_takes_original_numeric_cells_at_verified_settlements(self):
         self.reader.return_value = {"url": "https://example.org/population", "title": "Settlement census 2011", "format": "html", "text": "Population, people, 2011", "tables": [{"headers": ["Village", "Population"], "rows": [["Chal", "1,200"], ["Sela", "0"], ["Total district", "99999"]]}], "links": []}
         context = self.source_context()
-        chal = self.tools._register_entity(context, {**self.place, "id": "chal", "name": "Chal, Darma Valley", "shortName": "Chal"}, "place")
-        sela = self.tools._register_entity(context, {**self.place, "id": "sela", "name": "Sela, Darma Valley", "shortName": "Sela"}, "place")
+        context.map_context["scope"] = {"type": "selection", "bounds": [0, 0, 10, 10]}
+        chal = self.tools._register_entity(context, {**self.place, "id": "chal", "name": "Chal, Darma Valley", "shortName": "Chal", "placeType": "village"}, "place")
+        sela = self.tools._register_entity(context, {**self.place, "id": "sela", "name": "Sela, Darma Valley", "shortName": "Sela", "placeType": "village"}, "place")
         result = self.tools.execute(context, "map_source_table", {"sourceRef": "source:1", "tableIndex": 0, "nameColumn": "Village", "valueColumn": "Population", "matches": [{"rowIndex": 0, "placeRef": chal["ref"]}, {"rowIndex": 1, "placeRef": sela["ref"]}], "units": "people in 2011", "visualization": "heatmap"})
         update = result["mapUpdate"]["dataset"]
         self.assertEqual([feature["properties"]["value"] for feature in update["data"]["features"]], [1200, 0])
@@ -224,3 +225,25 @@ class GroundedWebAgentTests(BackendCase):
         for match in ({"rowIndex": 2, "placeRef": chal["ref"]}, {"rowIndex": 0, "placeRef": sela["ref"]}, {"rowIndex": 0, "placeRef": chal["ref"], "value": 42}):
             with self.subTest(match=match), self.assertRaises(server.ServiceError):
                 self.tools.execute(context, "map_source_table", {"sourceRef": "source:1", "tableIndex": 0, "nameColumn": "Village", "valueColumn": "Population", "matches": [match]})
+
+    def test_table_join_rejects_substring_names_pois_and_unscoped_ambiguous_regions(self):
+        self.reader.return_value = {"url": "https://example.org/population", "title": "Census", "format": "html", "text": "", "tables": [{"headers": ["Village", "Population", "District"], "rows": [["York", "10", "Pithoragarh"]]}], "links": []}
+        context = self.source_context()
+        arguments = {"sourceRef": "source:1", "tableIndex": 0, "nameColumn": "Village", "valueColumn": "Population", "matches": [{"rowIndex": 0, "placeRef": "place:1"}]}
+        self.tools._register_entity(context, {**self.place, "name": "New York", "shortName": "New York", "placeType": "city"}, "place")
+        with self.assertRaisesRegex(server.ServiceError, "administrative-region column"):
+            self.tools.execute(context, "map_source_table", arguments)
+        context.map_context["scope"] = {"type": "selection", "bounds": [0, 0, 10, 10]}
+        with self.assertRaisesRegex(server.ServiceError, "does not match"):
+            self.tools.execute(context, "map_source_table", arguments)
+        context.entities["place:1"]["shortName"] = "York"
+        context.entities["place:1"]["placeType"] = "school"
+        with self.assertRaisesRegex(server.ServiceError, "not identified.*settlement"):
+            self.tools.execute(context, "map_source_table", arguments)
+        context.entities["place:1"]["placeType"] = "village"
+        context.map_context["scope"] = {"type": "workspace"}
+        with self.assertRaisesRegex(server.ServiceError, "administrative region does not match"):
+            self.tools.execute(context, "map_source_table", {**arguments, "regionColumn": "District"})
+        context.entities["place:1"]["address"] = "York, Pithoragarh, Uttarakhand, India"
+        result = self.tools.execute(context, "map_source_table", {**arguments, "regionColumn": "District"})
+        self.assertEqual(result["mapUpdate"]["dataset"]["data"]["features"][0]["properties"]["value"], 10)

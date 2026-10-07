@@ -67,12 +67,34 @@ queues a validated operation for browser-side computation; it does not claim to
 have measured statistics or supply missing datasets. Categorical filters retain
 JSON scalar types, including booleans.
 
-The fixed tool list does not include general internet browsing, a web-page
-reader, or a population-dataset downloader. `report_limitation` terminates a
-request honestly when its dataset, web access, or analysis is unavailable, even
-after a geographic lookup. It emits `agent.limitation` with a fixed factual
-message and reason, never an invented heatmap. Any earlier map mutation in the
-run is rolled back when safe; rollback/conflict metadata accompanies the event.
+Web research uses the existing configured SerpApi transport/cache through
+`search_web` (`google`, `google_news`, or `google_scholar`). Google Maps remains in
+the existing OSM-first place lookup. Search metadata is bounded and credential
+redacted; citation URLs and acquisition date are separate from publication/date
+of observations. Cached responses may be historical, not live/latest.
+
+`read_web_source` accepts only opaque sources returned by search or discovered
+page links. It reads bounded public HTML/text/GeoJSON/CSV, validates and pins
+public DNS addresses on each request and redirect, verifies TLS hostnames, and
+blocks credentials/private hosts/binary formats/oversize responses. Retrieved
+text and tables are untrusted evidence, never executable instructions. No
+cookies, authentication state, proxies, or arbitrary model-supplied URLs are used.
+
+`load_web_dataset` transfers actual parsed GeoJSON or coordinate CSV to Studio.
+`map_source_table` joins numeric source cells to exact provider settlement names
+inside geographic scope, or using an actual source administrative-region column.
+Schools/businesses/unknown POIs cannot represent a census settlement. Values
+cannot be supplied or overridden by model arguments. Source tables produce
+partial settlement-point heatmaps, not a continuous census population grid.
+Data is capped to 4 MB per agent transfer and validated again in the browser.
+Model context contains field/count metadata, not the transferred feature data.
+
+GeoTIFF/PDF decoding and arbitrary API engines are not implemented. The agent
+can cite those discovered sources and explain the remaining extraction gap.
+`report_limitation` is allowed only after research is attempted when the search
+provider is available. It emits `agent.limitation` with citations and a factual
+reason, never an invented heatmap. Any earlier map mutation in the run is rolled
+back when safe; rollback/conflict metadata accompanies the event.
 For omitted geographic presentation, the model gets one bounded recovery turn
 to present returned references or report a limitation, not an unbounded retry.
 
@@ -95,7 +117,9 @@ python -B -m backend.test_isolated
 ```
 
 This runner bypasses `.env` loading, uses temporary databases, and blocks outbound
-HTTP. It covers existing geographic services plus scoped tools, additive revision
+HTTP. It covers both `python backend/server.py` and module startup, public source
+reader fixtures, Serp cache/engine/error handling, sourced/table-matched dataset
+transfers, existing geographic services, scoped tools, additive revision
 migration, CORS metadata, cancellation, concurrent writes, and owned undo. Avoid
 importing `backend.server` directly merely to run tests against a real configured
 workspace: module initialization opens its configured SQLite cache.

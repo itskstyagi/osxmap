@@ -999,6 +999,7 @@ def location_result(item: dict[str, Any]) -> dict[str, Any] | None:
         "id": f"{item.get('osm_type') or 'place'}:{item.get('osm_id') or f'{lat},{lon}'}",
         "name": name,
         "shortName": short_name,
+        "placeType": str(item.get("type") or item.get("addresstype") or "")[:80],
         "country": address.get("country") or "",
         "countryCode": (address.get("country_code") or "").upper(),
         "lat": lat,
@@ -1164,7 +1165,21 @@ def search_serp_places(query: str, lat: float | None, lon: float | None, country
 
 
 def public_place(place: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in place.items() if key != "providerPayload"}
+    result = {key: value for key, value in place.items() if key != "providerPayload"}
+    payload = place.get("providerPayload")
+    if isinstance(payload, dict):
+        tags = payload.get("tags")
+        if isinstance(tags, dict) and tags.get("place"):
+            result["placeType"] = str(tags["place"])[:80]
+        elif place.get("provider") == "openstreetmap":
+            result["placeType"] = str(payload.get("type") or payload.get("addresstype") or "")[:80]
+        else:
+            types = payload.get("types")
+            if isinstance(types, list) and "locality" in types:
+                result["placeType"] = "locality"
+            elif payload.get("type") in {"City", "Town", "Village", "Locality"}:
+                result["placeType"] = str(payload["type"]).lower()
+    return result
 
 
 def saved_place_matches(query: str, country_code: str) -> list[dict[str, Any]]:

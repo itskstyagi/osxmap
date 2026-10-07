@@ -87,6 +87,7 @@ Load a real dataset found by read_web_source into Studio. field must exactly mat
 
 ### map_source_table(sourceRef, tableIndex, nameColumn, valueColumn, matches, name?, units?, visualization?)
 Map actual source-table values at carefully matched settlement locations. Each match is {rowIndex,placeRef}; rowIndex is zero-based, placeRef must come from search_places/find_city, source row name must match the verified location. All values are copied from the original numeric source column. Never pass a population value yourself. Explain source census/model year and incomplete match coverage. Up to twenty matches; no polygon/grid is synthesized.
+The matched provider placeType must identify a settlement, not a school/business/unknown POI. Name matching is exact after normalization, not substring matching. Choose a viewport/selection containing the intended valley, or supply regionColumn for an actual administrative column in the source whose row text matches the provider address. In workspace scope without source administrative evidence, ambiguous settlement joins are refused.
 
 ### plan_route(waypointRefs, profile?)
 Plan a driving route through 2-50 ordered waypoints that were returned by previous tool calls.

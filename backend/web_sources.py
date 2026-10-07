@@ -143,6 +143,8 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
 
 
 class _PinnedHTTPSConnection(_PinnedHTTPConnection):
+    default_port = 443
+
     def connect(self):
         super().connect()
         try:
@@ -190,6 +192,8 @@ def fetch_web_document(url: str) -> dict:
                 location = response.getheader("Location")
                 if redirects == 3 or not location:
                     raise ServiceError("Web source redirect limit exceeded or destination missing.", 502)
+                if len(location) > 2048 or any(c.isspace() or ord(c) < 32 or c in "\\\x7f" for c in location):
+                    raise ServiceError("Web source redirect URL is not allowed.", 400)
                 current = validate_web_url(urljoin(current, location))
                 continue
             if not 200 <= response.status < 300 or response.status == 206:
@@ -252,7 +256,7 @@ def _check_tree(value, max_depth=32, property_values=False):
             raise ServiceError("Web source JSON nesting or value limit exceeded.", 413)
         if isinstance(item, dict):
             for key, child in item.items():
-                if len(key) > 256 or key.casefold() in _UNSAFE_KEYS or any(ord(c) < 32 for c in key):
+                if len(key) > 256 or key.casefold() in _UNSAFE_KEYS or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in key):
                     raise ServiceError("Web source JSON contains unsafe properties.", 422)
                 stack.append((child, depth + 1))
         elif isinstance(item, list):
@@ -453,7 +457,8 @@ class _HTMLDocument(HTMLParser):
             if old in targets:
                 self._close(index)
                 break
-            if old == "table" or (tag in {"td", "th"} and old == "tr") or (tag == "li" and old in {"ul", "ol"}):
+            if (old == "table" or (tag in {"td", "th"} and old == "tr") or (tag == "li" and old in {"ul", "ol"})
+                    or (self.stack[index][1] and (index == 0 or not self.stack[index - 1][1]))):
                 break
         attrs = dict(attrs)
         skipped = (bool(self.stack and self.stack[-1][1]) or tag in self._skip or "hidden" in attrs
@@ -467,6 +472,7 @@ class _HTMLDocument(HTMLParser):
             return
         if tag in self._blocks:
             self._text("\n")
+            self.handle_data(" ")
         if tag == "table":
             table = None
             if len(self.tables) < 6:
@@ -499,6 +505,7 @@ class _HTMLDocument(HTMLParser):
                 break
         if tag in self._blocks and not skipped:
             self._text("\n")
+            self.handle_data(" ")
 
     def handle_data(self, data):
         if self.stack and self.stack[-1][1]:
@@ -511,9 +518,13 @@ class _HTMLDocument(HTMLParser):
         if self.active_tables and self.active_tables[-1] is not None:
             table = self.active_tables[-1]
             if table["cell"] is not None:
-                table["cell"] += text[:max(0, 500 - len(table["cell"]))]
+                table["cell"] = _bounded_cell(table["cell"] + text)
         if self.anchor is not None:
             self.anchor["title"] += text[:max(0, 160 - len(self.anchor["title"]))]
+
+
+def _bounded_cell(value):
+    return value if len(value) <= 500 else value[:497] + "..."
 
 
 def _scalar(value):
@@ -537,7 +548,7 @@ def _parse_csv(text, document):
         reader = csv.reader(io.StringIO(text, newline=""), dialect, strict=True)
         headers = next((row for row in reader if any(cell.strip() for cell in row)), [])
         headers = [header.strip() for header in headers]
-        if not headers or len(headers) > 80 or len(set(headers)) != len(headers):
+        if not headers or not all(headers) or len(headers) > 80 or len(set(headers)) != len(headers):
             raise ServiceError("Web source CSV headers are missing, duplicated, or exceed 80 columns.", 422)
         _check_tree(dict.fromkeys(headers))
         longitude = [i for i, header in enumerate(headers) if header.casefold() in {"lon", "lng", "longitude", "x"}]
@@ -555,7 +566,7 @@ def _parse_csv(text, document):
                 raise ServiceError("Web source CSV row or field limit exceeded.", 413)
             row += [""] * (len(headers) - len(row))
             if len(table["rows"]) < 100:
-                table["rows"].append([cell[:500] for cell in row[:30]])
+                table["rows"].append([_bounded_cell(cell) for cell in row[:30]])
             if has_coordinates:
                 values = [_scalar(cell) for cell in row]
                 lon, lat = values[longitude[0]], values[latitude[0]]
@@ -606,9 +617,12 @@ def parse_web_document(raw: bytes, content_type: str, url: str) -> dict:
     start = text.lstrip()[:100].lower()
     if media in {"text/html", "application/xhtml+xml"} or (media in {"", "text/plain"} and start.startswith(("<!doctype html", "<html", "<head", "<body", "<table"))):
         parser = _HTMLDocument(url)
-        parser.feed(text)
-        parser.close()
-        parser._close(0)
+        try:
+            parser.feed(text)
+            parser.close()
+            parser._close(0)
+        except (AssertionError, ValueError, RecursionError):
+            raise ServiceError("Web source HTML is invalid.", 422) from None
         document.update(format="html", title=parser.title.strip(), text="".join(parser.text).strip(),
                         tables=[table for table in parser.tables if table["headers"] or table["rows"]], links=parser.links)
     elif "json" in media or (media in {"", "text/plain"} and (extension in {"json", "geojson"} or start.startswith(("{", "[")))):

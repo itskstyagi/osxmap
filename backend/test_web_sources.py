@@ -137,6 +137,12 @@ class HTMLTests(OfflineCase):
         self.assertNotIn("Menus", document["text"])
         self.assertIn("Visible", document["text"])
 
+    def test_hidden_table_content_cannot_change_enclosing_cells(self):
+        document = self.parse("<table><tr><th>Name</th><th>Count</th></tr><tr><td>A<nav><td>secret</td></nav></td>"
+                              "<td>1<br>234</td></tr></table>")
+        self.assertEqual(document["tables"][0]["rows"], [["A", "1 234"]])
+        self.assertNotIn("secret", document["text"])
+
     def test_output_limits_still_retain_late_tables_and_links(self):
         table = "<table><tr>" + "<th>Header</th>" * 40 + "</tr>" + ("<tr>" + ("<td>" + "x" * 600 + "</td>") * 40 + "</tr>") * 110 + "</table>"
         # Keep the whole source below the raw cap while independently exercising every output cap.
@@ -148,6 +154,7 @@ class HTMLTests(OfflineCase):
         self.assertEqual(len(document["tables"][0]["headers"]), 30)
         self.assertEqual(len(document["tables"][0]["rows"]), 100)
         self.assertTrue(all(len(cell) <= 500 for row in document["tables"][0]["rows"] for cell in row))
+        self.assertTrue(document["tables"][0]["rows"][0][0].endswith("..."))
         self.assertEqual(len(document["links"]), 40)
         self.assertTrue(all(len(link["title"]) == 160 for link in document["links"]))
 
@@ -206,7 +213,7 @@ class GeoJSONTests(OfflineCase):
                 self.error(422, self.geo, feature("Polygon", [ring]))
 
     def test_unsafe_deep_nonfinite_properties_and_non_wgs84_fail(self):
-        for key in ["__proto__", "prototype", "constructor", "CONSTRUCTOR", "bad\x00key"]:
+        for key in ["__proto__", "prototype", "constructor", "CONSTRUCTOR", "bad\x00key", "\ud800"]:
             self.error(422, self.geo, feature(properties={"nested": {key: {"polluted": True}}}))
         for value in [float("inf"), float("nan")]:
             self.error(422, self.geo, feature(properties={"v": value}))
@@ -284,7 +291,7 @@ class CSVTests(OfflineCase):
     def test_quoted_multiline_cells_and_empty_header_failures(self):
         document = self.parse('lon,lat,name\n0,0,"Quoted ""name""\nsecond line"\n', "text/csv")
         self.assertEqual(document["dataset"]["features"][0]["properties"]["name"], 'Quoted "name"\nsecond line')
-        for text in ['lon,lat,name\n0,0,"unterminated', "lon,lat\n0,0,extra\n", "lon,lon\n1,2\n", "\n\n"]:
+        for text in ['lon,lat,name\n0,0,"unterminated', "lon,lat\n0,0,extra\n", "lon,lon\n1,2\n", "lon,lat,\n1,2,3\n", "\n\n"]:
             self.error(422, self.parse, text, "text/csv")
         self.error(422, self.parse, "__proto__,lon,lat\nx,0,0\n", "text/csv")
 
@@ -292,6 +299,7 @@ class CSVTests(OfflineCase):
         document = self.parse("lon,lat,name\n" + ("0,0," + "x" * 501 + "\n") * 101, "text/csv")
         self.assertEqual(len(document["tables"][0]["rows"]), 100)
         self.assertEqual(len(document["tables"][0]["rows"][0][2]), 500)
+        self.assertTrue(document["tables"][0]["rows"][0][2].endswith("..."))
         self.assertEqual(len(document["dataset"]["features"]), 101)
         self.assertLessEqual(len(document["text"]), 24000)
         self.error(413, self.parse, "lon,lat\n" + "0,0\n" * 10001, "text/csv")
@@ -354,7 +362,7 @@ class FakeSocket:
         self.closed = True
 
     def do_handshake(self):
-        pass
+        self.handshaken = True
 
     def close(self):
         self.closed = True
@@ -416,19 +424,22 @@ class FetchTests(OfflineCase):
         self.assertTrue(all(0 < timeout <= 10 for timeout in sock.timeouts))
 
     def test_https_pin_preserves_certificate_hostname_and_default_verification(self):
-        sock = FakeSocket()
+        sock = FakeSocket(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nreal")
         self.socket.side_effect = None
         self.socket.return_value = sock
         context = mock.Mock()
         context.wrap_socket.return_value = sock
+        self.dns.side_effect = None
+        self.dns.return_value = [address()]
         with mock.patch.object(web.ssl, "create_default_context", return_value=context) as create:
-            connection = web._PinnedHTTPSConnection("example.org", 443, address(), time.monotonic() + 10)
-            connection.connect()
-            connection.close()
+            document = web.fetch_web_document(URL)
         create.assert_called_once_with()
         context.wrap_socket.assert_called_once_with(sock, server_hostname="example.org", do_handshake_on_connect=False)
         self.assertEqual(sock.connected, ("8.8.8.8", 443))
-        # Fake TLS transport adds the handshake to the otherwise real connection subclass.
+        self.assertTrue(sock.handshaken)
+        self.assertEqual(document["text"], "real")
+        self.assertIn(b"Host: example.org\r\n", b"".join(sock.sent))
+        self.assertNotIn(b"Host: example.org:443", b"".join(sock.sent))
 
     def test_every_dns_address_must_be_public_and_no_socket_created_on_rejection(self):
         for ip in ["10.0.0.1", "127.0.0.1", "169.254.169.254", "::1", "fc00::1", "ff02::1", "2001:db8::1"]:
@@ -455,7 +466,7 @@ class FetchTests(OfflineCase):
         self.assertNotIn("Cookie", connections[1].request.call_args.kwargs["headers"])
 
     def test_redirects_reject_private_hosts_credentials_and_rebinding(self):
-        for location in ["http://127.0.0.1/", "https://machine.internal/", "https://user:fixture-secret@example.org/", "https://example.org/?token=fixture-secret", "file:///etc/passwd"]:
+        for location in ["http://127.0.0.1/", "https://machine.internal/", "https://user:fixture-secret@example.org/", "https://example.org/?token=fixture-secret", "file:///etc/passwd", "/" + "a" * 2048, "\nhttps://example.org/", "https://example.org/a b"]:
             with self.subTest(location=location):
                 self.transport([FakeResponse(status=302, headers={"Location": location})])
                 self.assertNotIn("fixture-secret", self.error(400, web.fetch_web_document, URL))
@@ -465,6 +476,8 @@ class FetchTests(OfflineCase):
         self.assertEqual(len(connections), 1)
 
     def test_redirect_limit_three_and_missing_location(self):
+        self.transport([FakeResponse(status=302, headers={"Location": "/next"}) for _ in range(3)] + [FakeResponse(b"done")])
+        self.assertEqual(web.fetch_web_document(URL)["text"], "done")
         responses = [FakeResponse(status=302, headers={"Location": f"/step{i}"}) for i in range(4)]
         connections = self.transport(responses)
         self.error(502, web.fetch_web_document, URL)
@@ -472,6 +485,17 @@ class FetchTests(OfflineCase):
         self.assertTrue(all(response.closed for response in responses))
         self.transport([FakeResponse(status=302)])
         self.error(502, web.fetch_web_document, URL)
+
+    def test_ipv6_socket_pin_and_dns_timeout_without_live_wait(self):
+        sock = FakeSocket(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nreal")
+        self.socket.side_effect = None
+        self.socket.return_value = sock
+        self.dns.side_effect = None
+        self.dns.return_value = [address("2606:4700:4700::1111", 80)]
+        self.assertEqual(web.fetch_web_document("http://[2606:4700:4700::1111]/")["text"], "real")
+        self.assertEqual(sock.connected, ("2606:4700:4700::1111", 80, 0, 0))
+        with mock.patch.object(web.threading, "Thread"):
+            self.error(504, web._resolve_public, "example.org", 443, time.monotonic() + .01)
 
     def test_size_caps_content_length_chunked_and_incomplete(self):
         oversized = FakeResponse(headers={"Content-Length": str(web.MAX_RAW_BYTES + 1)})
@@ -499,14 +523,15 @@ class FetchTests(OfflineCase):
             self.assertNotIn("fixture-secret", self.error(502, web.fetch_web_document, URL))
 
     def test_connection_timeout_certificate_failure_and_monotonic_deadline(self):
-        connections = self.transport([FakeResponse()])
-        self.https.side_effect = lambda *args: connections[0]
-        connections.append(mock.Mock(sock=None, _transport_socket=None))
+        self.transport([FakeResponse()])
+        connection = mock.Mock(sock=None, _transport_socket=None)
+        self.https.side_effect = None
+        self.https.return_value = connection
         for failure, status in [(TimeoutError("fixture-secret"), 504), (ssl.SSLError("fixture-secret"), 502),
                                 (ConnectionResetError("fixture-secret"), 502)]:
-            connections[0].request.side_effect = failure
+            connection.request.side_effect = failure
             self.assertNotIn("fixture-secret", self.error(status, web.fetch_web_document, URL))
-            connections[0].close.assert_called()
+            connection.close.assert_called()
         with mock.patch.object(web.time, "monotonic", return_value=20):
             self.error(504, web._time_left, 19)
         response = FakeResponse()
