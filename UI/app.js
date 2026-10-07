@@ -1008,6 +1008,8 @@ class CityExplorer {
     this.agentPanelDismissed = true;
     this.elements['agent-panel'].hidden = true;
     this.elements['search-input'].focus({ preventScroll: true });
+    this.searchFocused = false;
+    this.updateSearchDiscovery();
   }
 
   showCommandResult(summary, detail = '') {

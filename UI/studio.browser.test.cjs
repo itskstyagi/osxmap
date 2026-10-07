@@ -34,6 +34,8 @@ const fixture = {
   ].map(([lon, lat, value, category, observedAt], index) => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { name: `Test observation ${index + 1}`, value, category, observedAt } })),
 };
 
+const studyArea = { name: 'Noida', bounds: [77.3, 28.45, 77.5, 28.7], source: { name: 'Offline geocoder fixture', url: 'https://example.org/study-extent' }, caveat: 'Geocoded study extent, not an administrative boundary' };
+
 test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromium, timeout: 180000 }, async (t) => {
   const browser = await chromium.launch({ channel: process.env.MERIDIAN_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--enable-unsafe-swiftshader'] });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block', reducedMotion: 'reduce' });
@@ -208,26 +210,106 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
       assert.equal(await page.locator('.studio-layer').count(), before);
       await page.locator('#agent-dismiss-result').click();
     });
+    await t.test('Study extent renders before data, survives style reload and partial limitation, then undoes cleanly', async () => {
+      const before = await page.locator('.studio-layer').count();
+      await page.locator('#search-input').fill('Plot a population heatmap of Noida');
+      await page.locator('#search-submit').click();
+      await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { researchArea: studyArea, view: { bounds: studyArea.bounds } } }));
+      await page.waitForFunction(() => window.__testMaps[0].getLayer('local-research-area-outline'));
+      assert.equal(await page.locator('#studio-shell').isVisible(), false);
+      assert.equal(await page.locator('.studio-layer').count(), before);
+      assert.match(await page.locator('#research-area-label').innerText(), /Study area.*Noida[\s\S]*not an administrative boundary/);
+      assert.equal(await page.locator('#research-area-label').getAttribute('role'), 'status');
+      const preview = await page.evaluate(() => window.__testMaps[0].getStyle().sources['local-research-area'].data);
+      assert.equal(preview.features.length, 1);
+      assert.equal(preview.features[0].geometry.type, 'Polygon');
+      assert.equal(preview.features[0].properties.population, undefined);
+      await page.evaluate(() => window.__testMaps[0].setStyle({ version: 8, glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf', sources: {}, layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#1d2320' } }] }, { diff: false }));
+      await page.waitForFunction(() => window.__testMaps[0].getLayer('local-research-area-outline') && window.__testMaps[0].isStyleLoaded());
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.limitation', runId: agentRunId, reason: 'dataset_unavailable', contextOnly: true, message: 'The raster source could not be read. The geocoded study extent is retained; no population values were substituted.' }));
+      await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
+      assert.match(await page.locator('#agent-result-summary').innerText(), /Study area shown.*data unavailable/);
+      await page.addScriptTag({ path: require.resolve('axe-core/axe.min.js') });
+      const accessibility = await page.evaluate(() => axe.run(document.getElementById('research-area-label'), { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa'] } }));
+      assert.deepEqual(accessibility.violations.map((item) => item.id), []);
+      for (const width of [1440, 390, 320]) {
+        await page.setViewportSize({ width, height: 900 });
+        const box = await page.locator('#research-area-label').boundingBox();
+        assert(box && box.x >= 0 && box.x + box.width <= width + 1 && box.y >= 0 && box.y + box.height <= 901, `${width}px research label: ${JSON.stringify(box)}`);
+        assert(box.width <= 400, 'Study extent status stays compact on wide maps');
+        if (process.env.MERIDIAN_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.MERIDIAN_SCREENSHOT_DIR, `meridian-research-extent-${width}.png`) });
+      }
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.locator('#action-history-undo').click();
+      await page.waitForFunction(() => !window.__testMaps[0].getSource('local-research-area'));
+      assert.equal(await page.locator('#research-area-label').isVisible(), false);
+      await page.locator('#agent-dismiss-result').click();
+    });
+    await t.test('Stopping research removes its preview and preserves existing data', async () => {
+      const before = await page.locator('.studio-layer').count();
+      await page.locator('#search-input').fill('Generate a population heatmap of Noida');
+      await page.locator('#search-submit').click();
+      await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { researchArea: studyArea, view: { bounds: studyArea.bounds } } }));
+      await page.waitForFunction(() => window.__testMaps[0].getLayer('local-research-area-outline'));
+      await page.locator('#agent-task-stop').click();
+      await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
+      assert.equal(await page.evaluate(() => Boolean(window.__testMaps[0].getSource('local-research-area'))), false);
+      assert.equal(await page.locator('.studio-layer').count(), before);
+      await page.locator('#agent-dismiss-result').click();
+    });
     await t.test('Cited source observations become a real heatmap layer and are reversible', async () => {
       const before = await page.locator('.studio-layer').count();
       await page.locator('#search-input').fill('Research official population data and load its heatmap');
       await page.locator('#search-submit').click();
       await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { researchArea: studyArea, view: { bounds: studyArea.bounds } } }));
       sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { dataset: {
-        data: { ...fixture, features: fixture.features.map((feature) => ({ ...feature, properties: { ...feature.properties, observedAt: '2011-01-01' } })) }, name: 'Sourced population fixture', field: 'value', units: 'people per source cell', visualization: 'heatmap', scope: { type: 'workspace' },
-        source: { name: 'Offline source fixture, not real population', url: 'https://example.org/population.geojson', attribution: 'Regression source', caveat: 'Test-only observations. Not actual population.', retrievedAt: '2026-01-01' },
+        data: { ...fixture, features: fixture.features.map((feature) => ({ ...feature, geometry: { type: 'Point', coordinates: [feature.geometry.coordinates[0] + .15, feature.geometry.coordinates[1]] }, properties: { ...feature.properties, observedAt: '2011-01-01' } })) }, name: 'Sourced population fixture', field: 'value', units: 'people per source cell', visualization: 'heatmap', scope: { type: 'selection', bounds: studyArea.bounds },
+        source: { name: 'Offline source fixture, not real population', url: 'https://example.org/population.geojson', attribution: 'Regression source', caveat: 'Test-only historical modeled raster fixture. Not actual population or a current census.', retrievedAt: '2026-01-01', referenceYear: '2011', resolution: '~1 km test grid', method: 'raster-window', license: 'CC BY 4.0 fixture' },
       } } }));
       await page.waitForFunction((count) => document.querySelectorAll('.studio-layer').length === count + 1, before);
       assert.equal(await page.locator('#studio-shell').isVisible(), true);
       assert.match(await page.locator('#studio-provenance').innerText(), /Offline source fixture/);
+      assert((await layerType()).includes('heatmap'));
+      const heatmapColors = await page.evaluate(async () => {
+        const colors = (await import('/studio-data.js')).PALETTES.thermal.colors;
+        return { expected: [colors[0], colors.at(-1)], paints: window.__testMaps[0].getStyle().layers.filter((layer) => layer.id.startsWith('studio-') && layer.type === 'heatmap').map((layer) => layer.paint['heatmap-color']) };
+      });
+      assert(heatmapColors.expected.every((color) => JSON.stringify(heatmapColors.paints).includes(color)), 'The sourced heatmap uses the existing thermal palette');
+      assert.match(await page.locator('#studio-provenance').innerText(), /Method[\s\S]*raster-window[\s\S]*License[\s\S]*CC BY 4.0/);
+      assert.match(await page.locator('#studio-legend').innerText(), /Reference year: 2011[\s\S]*Resolution: ~1 km/);
+      assert.match(await page.locator('#studio-legend').innerText(), /historical modeled raster fixture/);
       sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.completed', runId: agentRunId, reversible: false, message: 'The sourced layer was queued for browser display.', sources: [{ title: 'Original population source', url: 'https://example.org/population.geojson', readAt: '2026-01-01' }, { title: 'Unsafe URL', url: 'javascript:alert(1)' }] }));
       await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
       assert.equal(await page.locator('#agent-sources a').count(), 1);
       assert.equal(await page.locator('#agent-sources a').getAttribute('href'), 'https://example.org/population.geojson');
+      await page.locator('#agent-dismiss-result').click();
+      assert.equal(await page.locator('#search-discovery').isVisible(), false);
+      const extentLabel = await page.locator('#research-area-label').boundingBox();
+      const insights = await page.locator('.studio-right').boundingBox();
+      assert(extentLabel.x + extentLabel.width <= insights.x, 'Study extent status does not overlap Insights');
+      if (process.env.MERIDIAN_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.MERIDIAN_SCREENSHOT_DIR, 'meridian-research-heatmap.png') });
       await page.locator('#action-history-undo').click();
       await page.waitForFunction((count) => document.querySelectorAll('.studio-layer').length === count, before);
-      await page.locator('#agent-dismiss-result').click();
+      assert.equal(await page.locator('#research-area-label').isVisible(), false);
       await page.locator('button[data-product-mode="explore"]').click();
+    });
+    await t.test('Browser rejection remains visible after a nominal service completion', async () => {
+      const before = await page.locator('.studio-layer').count();
+      await page.locator('#search-input').fill('Make a population heatmap of Noida');
+      await page.locator('#search-submit').click();
+      await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { dataset: { data: { type: 'FeatureCollection', features: [] }, visualization: 'heatmap', field: 'population' } } }));
+      await page.waitForFunction(() => document.getElementById('agent-task-label').textContent.includes('not applied'));
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.completed', runId: agentRunId, message: 'The heatmap was sent to the browser.' }));
+      await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
+      assert.match(await page.locator('#agent-result-summary').innerText(), /not applied.*no geographic observations/);
+      assert.match(await page.locator('#agent-response').innerText(), /not applied.*no geographic observations/);
+      assert.equal(await page.locator('.studio-layer').count(), before);
+      assert.equal(await page.locator('#studio-shell').isVisible(), false);
+      await page.locator('#agent-dismiss-result').click();
     });
     await t.test('Animated 3D commands can undo their own camera motion', async () => {
       await page.locator('button[data-product-mode="studio"]').click();

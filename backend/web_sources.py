@@ -180,10 +180,11 @@ def fetch_public_bytes(url: str, *, max_bytes=MAX_RAW_BYTES, timeout=20, allowed
     lookups are used. Redirects share the total timeout (at most 120 seconds); socket
     inactivity is limited to 10 seconds. The byte budget is at most 64 MiB. An explicit
     collection of MIME types enables binary responses; None retains the text allowlist.
+    The legacy Content-Encoding: none label is accepted as unencoded bytes, not decoded.
     Callers must decode the bounded bytes, never give the URL to another network reader.
     """
     if (type(max_bytes) is not int or not 0 < max_bytes <= 64 * 1024 * 1024
-            or type(timeout) not in {int, float} or not math.isfinite(timeout) or not 0 < timeout <= 120):
+            or type(timeout) not in {int, float} or not 0 < timeout <= 120):
         raise ServiceError("Web source byte or timeout limit is invalid.", 400)
     if allowed_media_types is not None:
         if (not isinstance(allowed_media_types, (tuple, list, set, frozenset)) or not 0 < len(allowed_media_types) <= 32
@@ -191,10 +192,10 @@ def fetch_public_bytes(url: str, *, max_bytes=MAX_RAW_BYTES, timeout=20, allowed
                     r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", media) for media in allowed_media_types)):
             raise ServiceError("Web source allowed media types are invalid.", 400)
         allowed_media_types = frozenset(allowed_media_types)
-    return _fetch_public_bytes(url, max_bytes, timeout, allowed_media_types, timeout)
+    return _fetch_public_bytes(url, max_bytes, timeout, allowed_media_types, timeout, ("", "identity", "none"))
 
 
-def _fetch_public_bytes(url, max_bytes, timeout, allowed_media_types, request_timeout):
+def _fetch_public_bytes(url, max_bytes, timeout, allowed_media_types, request_timeout, identity_encodings=("", "identity")):
     current, deadline = validate_web_url(url), time.monotonic() + timeout
     size_error = ("Web source exceeds the 4 MiB limit." if max_bytes == MAX_RAW_BYTES
                   else f"Web source exceeds the {max_bytes} byte limit.")
@@ -227,7 +228,7 @@ def _fetch_public_bytes(url, max_bytes, timeout, allowed_media_types, request_ti
                 continue
             if not 200 <= response.status < 300 or response.status == 206:
                 raise ServiceError(f"Web source request failed (HTTP {response.status}).", 502)
-            if response.getheader("Content-Encoding", "").strip().lower() not in {"", "identity"}:
+            if response.getheader("Content-Encoding", "").strip().lower() not in identity_encodings:
                 raise ServiceError("Web source compression is unsupported; identity encoding is required.", 415)
             content_type = response.getheader("Content-Type", "")
             if allowed_media_types is None:

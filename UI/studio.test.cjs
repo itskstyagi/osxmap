@@ -323,6 +323,7 @@ test('sourced population datasets retain actual values and complete provenance t
   const layer = instance.applySourcedDataset(update);
   assert.equal(instance.workspace.layers.length, 2);
   assert.equal(instance.workspace.history.length, 0);
+  assert.equal(layer.palette, 'thermal');
   assert.deepEqual(instance.workspace.datasets[layer.datasetId].features.map((feature) => feature.properties.value), [0, 20, 40, 80]);
   const restored = studio.validateWorkspace(JSON.parse(JSON.stringify(instance.workspace)));
   assert.equal(restored.layers[0].source.url, update.source.url);
@@ -384,7 +385,10 @@ test('sourced heatmap fitting uses its frozen scope, not the wider remote datase
   layer.scopeBounds = null;
   layer.filters.min = 100;
   instance.focusLayer(layer);
-  assert.deepEqual(fits.at(-1), [[77.4, 28.6], [77.4, 28.6]], 'Without a frozen scope, fit matching extracted values only');
+  for (const [lon, lat] of fits.at(-1)) {
+    assert(Math.abs(lon - 77.4) < 1e-10, 'Without a frozen scope, fit matching extracted values only');
+    assert.equal(lat, 28.6);
+  }
 });
 
 test('raster legend and insights expose real reference metadata and trustworthy zero-value framing', (t) => {

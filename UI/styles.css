@@ -510,11 +510,14 @@ svg { flex-shrink: 0; width: 20px; height: 20px; }
 :root[data-product-mode="studio"][data-studio-legacy="true"] .manual-sidebar { top: calc(var(--rail-top) + 48px); max-height: calc(100dvh - var(--rail-top) - 124px - var(--attribution-height, 24px) - env(safe-area-inset-bottom)); }
 :root[data-product-mode="studio"] .view-heading { max-width: calc(100vw - var(--sidebar-width) - var(--studio-right-width) - var(--gutter) * 4); }
 .map-feedback-stack { position: absolute; z-index: 19; bottom: calc(12px + var(--attribution-height, 24px) + env(safe-area-inset-bottom)); left: calc(var(--sidebar-width) + var(--gutter) * 2); display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; max-width: calc(100vw - var(--sidebar-width) - var(--gutter) * 4 - 140px); pointer-events: none; }
+@media (min-width: 901px) {
+  :root[data-product-mode="studio"]:has(.studio-right:not([hidden])) .map-feedback-stack { right: calc(var(--studio-right-width) + var(--gutter) * 2); max-width: none; }
+}
 .map-task-chip { display: flex; align-items: center; gap: 12px; min-height: 48px; max-width: 100%; padding: 3px 4px 3px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); pointer-events: auto; }
 .map-task-chip span { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .map-task-chip button { flex-shrink: 0; min-width: 44px; min-height: 40px; padding: 0 10px; border-radius: 7px; background: var(--surface-elevated); color: var(--accent); font-size: 11px; }
 .map-task-chip button:hover { background: var(--control); }
-.research-area-label { display: flex; align-items: center; gap: 10px; flex-basis: 100%; max-width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-left: 2px solid #c7a270; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); pointer-events: auto; }
+.research-area-label { display: flex; align-items: center; gap: 10px; flex-basis: 100%; max-width: min(400px, 100%); padding: 9px 12px; border: 1px solid var(--line); border-left: 2px solid #c7a270; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); pointer-events: auto; }
 .research-area-swatch { flex-shrink: 0; width: 16px; height: 16px; border: 1px dashed #c7a270; background: rgba(199, 162, 112, .06); }
 .research-area-label > div { flex: 1; min-width: 0; }
 .research-area-label strong { display: block; color: var(--ink); font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

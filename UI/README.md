@@ -107,10 +107,16 @@ insufficient samples are reported instead of manufacturing a result.
 
 A heatmap needs geographically distributed numeric observations. A location
 lookup, a valley-wide population total, a list of villages, and internet snippets
-cannot establish that distribution. Meridian can now research sources using the
-configured SerpApi Google Search, Google News, and Google Scholar engines. It can
-read bounded public HTML/text/CSV/GeoJSON, load actual geographic observations,
-or join actual numeric table rows to carefully verified settlements. Research
+cannot establish that distribution. From Explore, `Create a heatmap of population
+of Noida` resolves and outlines the study extent, loads an actual WorldPop grid,
+and opens the sourced visualization in Studio without manual import. The direct
+population reader does not require SerpApi. The 1 km archive covers 2000-2020;
+its default is explicitly historical modeled population, not a current census.
+The layer and legend expose the reference year, resolution, units, and source.
+
+Meridian can also research alternatives using configured SerpApi Google Search,
+Google News, and Google Scholar. It reads bounded public HTML/text/CSV/GeoJSON
+and supported numeric GeoTIFFs, or joins actual table rows to verified settlements. Research
 citations appear as clickable source links in the result and layer provenance.
 
 For automatic research, use **Workspace** scope, or first center on Darma Valley
@@ -123,7 +129,10 @@ Use real geographic observations or sourced village population rows.
 Create a heatmap, cite the source and reference year, and state coverage limits.
 ```
 
-The agent must try available web research before declaring the data unavailable.
+The agent must try relevant acquisition tools before declaring data unavailable.
+If retrieval fails, a labeled study extent remains as geographic context only;
+no population values are substituted. Stop and guarded rollback restore the
+previous state. Study extents are not authoritative administrative boundaries.
 Search snippets never become measurements. For a settlement table, exact place
 names, provider settlement types, and scoped geography or source administrative
 columns must agree; unknown POIs and ambiguous name matches are refused. Table
@@ -135,10 +144,12 @@ layer. Original table headers, selected cells, source context, and observation
 year are retained as provenance. Missing numeric values in the selected scope
 are rejected rather than displayed as invented or zero observations.
 
-Automatic reading supports GeoJSON and CSV with real latitude/longitude columns;
-the backend does not yet decode GeoTIFF, PDF, authenticated portals, or massive
-national datasets. If those are the only useful sources, the result cites them
-and explains the specific remaining extraction gap. Manual import remains useful:
+Automatic raster reading validates georeferencing, retains actual pixel values,
+and masks NoData. Downloads are limited to 64 MiB, crops to 10,000 source-window
+cells, and agent transfers to 4 MiB. It does not silently sample oversized grids.
+PDF, authenticated portals, unsupported grids, or larger extractions still need
+another supported source or a reviewed GIS extraction. Manual import remains useful
+for these cases:
 
 1. Obtain a sourced population dataset for the intended year and geographic
    extent, such as a modeled population-count grid from the WorldPop data portal

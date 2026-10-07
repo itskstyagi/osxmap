@@ -321,7 +321,7 @@ class MapAgentService:
                 content = str(assistant.get("content") or "").strip()
                 if not isinstance(tool_calls, list) or not tool_calls:
                     if (context.population_requested and self.tools.dependencies.load_population
-                            and not context.loaded_datasets and not context.population_attempts
+                            and not context.studio_presented and not context.loaded_datasets and not context.population_attempts
                             and context.map_context.get("scope", {}).get("type") != "layer"):
                         if acquisition_reminders < 1:
                             acquisition_reminders += 1
@@ -428,7 +428,7 @@ class MapAgentService:
                 return self.tools.execute(context, name, arguments)
 
             result, run.expected = self.tools.dependencies.mutate_workspace(run.expected, mutation)
-            run.mapped = run.mapped or "mapUpdate" in result
+            run.mapped = run.mapped or "mapUpdate" in result and not result.get("contextOnly")
             return result
         return self.tools.execute(context, name, arguments)
 

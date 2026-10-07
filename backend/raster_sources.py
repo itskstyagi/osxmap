@@ -14,7 +14,7 @@ except ImportError:  # Supports direct execution through `python backend/server.
     from errors import ServiceError
     from web_sources import MAX_RAW_BYTES, _load_json, fetch_public_bytes, fetch_web_document, validate_web_url
 
-MAX_RASTER_BYTES = 32 * 1024 * 1024
+MAX_RASTER_BYTES = 64 * 1024 * 1024
 MAX_RASTER_PIXELS = 100_000_000
 MAX_BLOCK_BYTES = 16 * 1024 * 1024
 MAX_FEATURES = 10000
@@ -25,7 +25,7 @@ _DATA_ROOT = "https://data.worldpop.org/GIS/Population/"
 
 def _bounds(bounds):
     if (not isinstance(bounds, (list, tuple)) or len(bounds) != 4
-            or any(type(value) not in {int, float} or not math.isfinite(value) for value in bounds)):
+            or any(type(value) not in {int, float} or not -180 <= value <= 180 for value in bounds)):
         raise ServiceError("Raster bounds must be four finite WGS84 numbers [west, south, east, north].", 400)
     west, south, east, north = bounds
     if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
@@ -57,7 +57,7 @@ def decode_geotiff(raw: bytes, bounds, *, field="value", band=1, nonnegative=Fal
     if not isinstance(raw, bytes) or not raw:
         raise ServiceError("Raster document is empty or invalid.", 422)
     if len(raw) > MAX_RASTER_BYTES:
-        raise ServiceError("Raster document exceeds the 32 MiB byte limit.", 413)
+        raise ServiceError("Raster document exceeds the 64 MiB byte limit.", 413)
     if not raw.startswith((b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")):
         raise ServiceError("Raster format is unsupported; only in-memory GeoTIFF is accepted.", 415)
     try:
@@ -98,15 +98,16 @@ def decode_geotiff(raw: bytes, bounds, *, field="value", band=1, nonnegative=Fal
                         and -90.000001 <= extent.bottom < extent.top <= 90.000001))):
                     raise ServiceError("Raster georeference is inconsistent with its CRS.", 422)
                 dtype = np.dtype(source.dtypes[band - 1])
+                units = source.units[band - 1] or ""
                 if (dtype.kind not in "iuf" or source.colorinterp[band - 1] not in {
                         rasterio.enums.ColorInterp.undefined, rasterio.enums.ColorInterp.gray}
-                        or source.scales[band - 1] != 1 or source.offsets[band - 1] != 0):
+                        or source.scales[band - 1] != 1 or source.offsets[band - 1] != 0 or len(units) > 60):
                     raise ServiceError("Raster band is unsupported; unscaled numerical measurements are required.", 415)
                 block_height, block_width = source.block_shapes[band - 1]
                 if block_height * block_width * sum(np.dtype(value).itemsize for value in source.dtypes) > MAX_BLOCK_BYTES:
                     raise ServiceError("Raster storage block exceeds the bounded decode byte limit.", 413)
 
-                crop = bounds if epsg == 4326 else transform_bounds("EPSG:4326", source.crs, *bounds, densify_pts=21)
+                crop = bounds if epsg == 4326 else transform_bounds("EPSG:4326", f"EPSG:{epsg}", *bounds, densify_pts=21)
                 if not all(math.isfinite(value) for value in crop):
                     raise ServiceError("Raster bounds cannot be transformed into the source CRS.", 422)
                 left, bottom = max(crop[0], extent.left), max(crop[1], extent.bottom)
@@ -127,7 +128,7 @@ def decode_geotiff(raw: bytes, bounds, *, field="value", band=1, nonnegative=Fal
                 xs = affine.c + (cols + col0 + 0.5) * affine.a
                 ys = affine.f + (rows + row0 + 0.5) * affine.e
                 if epsg != 4326 and len(xs):
-                    xs, ys = transform_coordinates(source.crs, "EPSG:4326", xs.tolist(), ys.tolist())
+                    xs, ys = transform_coordinates(f"EPSG:{epsg}", "EPSG:4326", xs.tolist(), ys.tolist())
                 features = []
                 for row, col, x, y in zip(rows, cols, xs, ys):
                     if not math.isfinite(x) or not math.isfinite(y) or not -180 <= x <= 180 or not -90 <= y <= 90:
@@ -144,7 +145,8 @@ def decode_geotiff(raw: bytes, bounds, *, field="value", band=1, nonnegative=Fal
                 unit = "degrees" if epsg == 4326 else "metres"
                 return _bounded_document({
                     "format": "geotiff", "dataset": {"type": "FeatureCollection", "features": features},
-                    "field": field, "fields": [field], "resolution": f"{affine.a:.9g} x {-affine.e:.9g} {unit} (EPSG:{epsg})",
+                    "field": field, "fields": [field], "units": units,
+                    "resolution": f"{affine.a:.9g} x {-affine.e:.9g} {unit} (EPSG:{epsg})",
                     "method": "Original raster cell values at georeferenced cell centers; bounding-box extraction without resampling or aggregation.",
                     "caveat": "Cell centers within the extraction bounding box only, not an administrative polygon or complete administrative total. NoData and non-finite cells are excluded; zero is retained."
                               + (" Negative population cells are excluded." if nonnegative else ""),
@@ -155,6 +157,22 @@ def decode_geotiff(raw: bytes, bounds, *, field="value", band=1, nonnegative=Fal
                 })
     except (rasterio.errors.RasterioError, ValueError, OverflowError):
         raise ServiceError("Raster GeoTIFF is invalid or its georeference cannot be decoded safely.", 422) from None
+
+
+def load_raster_grid(url, bounds, band=1) -> dict:
+    """Fetch a discovered numerical GTiff and return its signed, finite cell values.
+
+    Units come only from the selected band's embedded metadata. Reference year,
+    measurement meaning, citation and license are not inferred from a filename.
+    """
+    bounds = _bounds(bounds)
+    if type(band) is not int or band < 1:
+        raise ServiceError("Raster band must be a positive integer.", 400)
+    fetched = fetch_public_bytes(url, max_bytes=MAX_RASTER_BYTES, timeout=60, allowed_media_types=_TIFF_TYPES)
+    document = decode_geotiff(fetched["raw"], bounds, band=band)
+    document.update(url=fetched["final_url"], title=urlsplit(fetched["final_url"]).path.rsplit("/", 1)[-1][:160],
+                    caveat="Measurement meaning, license and reference year must be checked against the original source. " + document["caveat"])
+    return _bounded_document(document)
 
 
 def _official_url(url, expected):
@@ -196,8 +214,10 @@ def load_population_grid(country_code, bounds, year=None) -> dict:
     metadata_url = f"https://www.worldpop.org/rest/data/pop/wpgp?iso3={iso3}"
     fetched = fetch_public_bytes(metadata_url, max_bytes=MAX_RAW_BYTES, timeout=20,
                                  allowed_media_types={"application/json", "text/plain"})
-    if not _official_url(fetched["final_url"], metadata_url):
+    if not any(_official_url(fetched["final_url"], expected) for expected in (
+            metadata_url, f"https://hub.worldpop.org/rest/data/pop/wpgp?iso3={iso3}")):
         raise ServiceError("WorldPop metadata redirected outside the verified country resource.", 422)
+    metadata_url = fetched["final_url"]
     try:
         metadata = _load_json(fetched["raw"].decode("utf-8-sig"))
     except UnicodeError:
@@ -251,7 +271,7 @@ def load_population_grid(country_code, bounds, year=None) -> dict:
         url=fetched["final_url"], title=f"WorldPop {country.name} population {reference_year} (historical modeled 1 km grid)",
         units="people per grid cell", referenceYear=reference_year,
         attribution=entry.get("source", "WorldPop") if isinstance(entry.get("source", "WorldPop"), str) else "WorldPop",
-        citation=citation, license=license_value, metadataUrl=fetched_url if (fetched_url := _official_url(metadata_url, metadata_url)) else metadata_url,
+        citation=citation, license=license_value, metadataUrl=metadata_url,
         directoryUrl=directory["url"], publishedDate=entry.get("date", "") if isinstance(entry.get("date", ""), str) else "",
         resolution="1 km nominal (30 arc-seconds); " + document["resolution"],
         method="WorldPop historical modeled population counts; official 1 km aggregated grid. " + document["method"],

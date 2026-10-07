@@ -1561,3 +1561,16 @@ test('browser dataset rejection is not announced as an applied map update or suc
   assert.equal(app.agentActivity.tool, 'Map not fully applied');
   assert.equal(app.mapActions?.length || 0, 0);
 });
+
+test('dismissing a completed map result keeps idle suggestions out of the map', () => {
+  const { app } = setup();
+  app.searchFocused = true;
+  app.elements['search-input'].value = '';
+  app.agentResultSummary = 'Sourced heatmap applied';
+  app.agentHasReply = true;
+  app.dismissAgentResult();
+  assert.equal(app.elements['search-input'].focused, true);
+  assert.equal(app.elements['search-discovery'].hidden, true);
+  app.renderAgentActivity();
+  assert.equal(app.elements['search-discovery'].hidden, true);
+});

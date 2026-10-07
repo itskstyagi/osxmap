@@ -1,7 +1,8 @@
 # Meridian Python Backend
 
 This is a Python 3.11+ local API server. Its map/cache HTTP layer uses the
-standard library, while the agent WebSocket bridge uses one pinned dependency.
+standard library. WebSockets provides the agent bridge; Rasterio and pycountry
+support bounded population/raster extraction and verified country-code lookup.
 It replaces the original Express/Mongo service while retaining its user-visible
 behavior:
 
@@ -72,6 +73,9 @@ Web research uses the existing configured SerpApi transport/cache through
 the existing OSM-first place lookup. Search metadata is bounded and credential
 redacted; citation URLs and acquisition date are separate from publication/date
 of observations. Cached responses may be historical, not live/latest.
+Research localization follows a resolved target city/`nearRef`, not an unrelated
+map or Geo-IP country. Relevant readable sources are ranked before the result cap;
+challenge-only pages and duplicate citations are excluded.
 
 `read_web_source` accepts only opaque sources returned by search or discovered
 page links. It reads bounded public HTML/text/GeoJSON/CSV, validates and pins
@@ -86,7 +90,8 @@ inside geographic scope, or using an actual source administrative-region column.
 Schools/businesses/unknown POIs cannot represent a census settlement. Values
 cannot be supplied or overridden by model arguments. Source tables produce
 partial settlement-point heatmaps, not a continuous census population grid.
-Quantitative heatmaps require original Point observations; regional polygon or
+Quantitative heatmaps require original Point observations or extracted raster
+cell centers; regional polygon or
 shared MultiPoint totals are not redistributed. Datasets containing several
 census years/dates require an actual source `timeField`/`timeValue` selection;
 table joins can use `timeColumn`/`timeValue`. Source row/header/context provenance
@@ -95,12 +100,27 @@ across years. No valid numeric observations in scope is an explicit rejection.
 Data is capped to 4 MB per agent transfer and validated again in the browser.
 Model context contains field/count metadata, not the transferred feature data.
 
-GeoTIFF/PDF decoding and arbitrary API engines are not implemented. The agent
-can cite those discovered sources and explain the remaining extraction gap.
-`report_limitation` is allowed only after research is attempted when the search
-provider is available. It emits `agent.limitation` with citations and a factual
-reason, never an invented heatmap. Any earlier map mutation in the run is rolled
-back when safe; rollback/conflict metadata accompanies the event.
+`load_population(cityRef, year?)` discovers official WorldPop country metadata
+and 1 km population-count GeoTIFFs, then extracts genuine cell-center values for
+the verified city extent or frozen geographic scope. It does not need SerpApi.
+The available collection covers 2000-2020: the default is its latest available
+year, not a claim of current population. Explicit years are never silently
+substituted. Observation year, resolution, units, license, and attribution travel
+with the layer. A bounding-box crop is not an administrative population total.
+
+`load_raster_dataset(sourceRef, cityRef?, band?)` also extracts numeric observations
+from discovered public GeoTIFFs. Downloads are DNS-pinned and limited to 64 MiB;
+decoding uses memory-only GTiff input, supported verified CRS, and at most 10,000
+cells in the cropped window. NoData is masked and zero retained. Oversized crops
+are rejected rather than silently sampled. PDF, authenticated portals, and
+arbitrary API engines still need another supported source or reviewed extraction.
+
+For statistical research, a unique `find_city` result immediately emits a labeled
+study-extent preview. `report_limitation` requires relevant available acquisition
+paths to be tried and emits citations plus the specific source issue. A
+`contextOnly` limitation retains that truthful preview, never an invented heatmap.
+Other earlier map mutations are rolled back when safe; rollback/conflict metadata
+accompanies the event. Cancellation still restores the guarded prior state.
 For omitted geographic presentation, the model gets one bounded recovery turn
 to present returned references or report a limitation, not an unbounded retry.
 

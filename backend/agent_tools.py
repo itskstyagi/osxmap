@@ -94,6 +94,7 @@ class AgentRunContext:
     next_ref: int = 1
     requires_presentation: bool = False
     presented: bool = False
+    studio_presented: bool = False
     sources: dict[str, dict[str, Any]] = field(default_factory=dict)
     documents: dict[str, dict[str, Any]] = field(default_factory=dict)
     web_searches: int = 0
@@ -414,14 +415,18 @@ class AgentTools:
             city = locations[0]
             context.research_city_ref = city["ref"]
             if context.research_intent:
-                extent = bounds or city["bbox"]
-                if extent[0] != extent[2] and extent[1] < extent[3]:
-                    area = {"name": city["shortName"], "bounds": copy.deepcopy(extent),
-                            "source": {"name": city.get("provider") or "Geocoded place"},
-                            "caveat": "Geocoded study extent, not an administrative boundary or a statistical observation."}
-                    context.research_area = area
-                    result["mapUpdate"] = {"researchArea": copy.deepcopy(area), "view": {"bounds": copy.deepcopy(extent)}}
+                result["mapUpdate"] = self._study_preview(context, city)
         return result
+
+    def _study_preview(self, context: AgentRunContext, city: dict[str, Any]) -> dict[str, Any]:
+        extent = self._geographic_bounds(context) or city["bbox"]
+        if extent[0] == extent[2] or extent[1] >= extent[3]:
+            return {"view": {"center": [city["lon"], city["lat"]], "zoom": 13}}
+        area = {"name": city["shortName"], "bounds": copy.deepcopy(extent),
+                "source": {"name": city.get("provider") or "Geocoded place"},
+                "caveat": "Geocoded study extent, not an administrative boundary or a statistical observation."}
+        context.research_area = area
+        return {"researchArea": copy.deepcopy(area), "view": {"bounds": copy.deepcopy(extent)}}
 
     @staticmethod
     def _register_source(context: AgentRunContext, item: dict[str, Any], parent: str = "") -> dict[str, Any] | None:
@@ -588,6 +593,10 @@ class AgentTools:
             raise ServiceError("Source units must be a string of at most 60 characters.", 400)
         notes = f"{caveat} Source: {source['url']}. Read {source.get('readAt', '')}. Partial coverage is not a complete regional census."
         reference_time = arguments.get("timeValue", "")
+        if context.requested_population_year is not None:
+            source_time = (source_metadata or {}).get("referenceYear") or reference_time
+            if str(source_time)[:4] != str(context.requested_population_year):
+                raise ServiceError("The source observation year is missing or does not match the requested population year. No unknown-year or different-year fallback was substituted.", 422)
         provenance = {"name": source["title"], "url": source["url"], "attribution": source.get("publisher") or source["title"], "caveat": notes, "retrievedAt": source.get("readAt", ""), "publishedDate": source.get("date", ""), "referenceYear": reference_time, "method": "coordinate-source" if "Matched table" not in caveat else "source-table-place-join"}
         if source_metadata:
             for key in ("attribution", "publishedDate", "referenceYear", "method", "license", "resolution", "citation"):
@@ -876,6 +885,10 @@ class AgentTools:
         known_place_refs = {entity["ref"] for entity in places}
         if not persistent_refs.issubset(known_place_refs):
             raise ServiceError("The map agent tried to save a place that was not selected for the map.", 400)
+        if context.research_intent and not places and not route_entry and not persistent_refs:
+            preview_city = city or context.entities.get(context.research_city_ref)
+            return {"contextOnly": True, "message": "Only geographic context can be shown here; acquire real observations before claiming a statistical visualization.",
+                    **({"mapUpdate": self._study_preview(context, preview_city)} if preview_city else {})}
         for entity in places:
             if entity["ref"] not in persistent_refs:
                 continue
@@ -975,6 +988,8 @@ class AgentTools:
         if operation.get("visualization") in {"contours", "surface"} and "field" not in operation:
             raise ServiceError("Contours and surfaces require an explicit known numeric field; elevation data is not assumed to be loaded.", 400)
         context.presented = True
+        context.studio_presented = True
+        context.requires_presentation = False
         return {
             "queued": True,
             "message": "Queued a browser operation on an existing loaded layer. The browser must validate geometry and compute scoped results from actual data; the backend has not computed any measurements.",
