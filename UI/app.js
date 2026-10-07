@@ -1123,7 +1123,8 @@ class CityExplorer {
     if (coordinates.length < 2) return;
     const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
     const desktop = window.innerWidth > 900;
-    this.map.fitBounds(bounds, { padding: desktop ? { top: 70, left: 360, right: 70, bottom: document.querySelector('.info-drawer').classList.contains('is-open') ? 260 : 70 } : { top: 220, right: 30, bottom: 100, left: 30 }, pitch: 0, maxZoom: 16, duration: 800 });
+    const sidebarRight = document.querySelector('.manual-sidebar').getBoundingClientRect().right;
+    this.map.fitBounds(bounds, { padding: desktop ? { top: 70, left: sidebarRight + 24, right: 70, bottom: document.querySelector('.info-drawer').classList.contains('is-open') ? 260 : 70 } : { top: 220, right: 30, bottom: 100, left: 30 }, pitch: 0, maxZoom: 16, duration: 800 });
   }
 
   addTerrainSource() {
