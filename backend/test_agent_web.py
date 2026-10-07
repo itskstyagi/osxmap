@@ -2,14 +2,59 @@
 
 import copy
 import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
 import urllib.error
 from dataclasses import replace
 from unittest import mock
+from pathlib import Path
 
 from backend import server
 from backend.agent import MapAgentService
 from backend.agent_tools import AgentTools
 from backend.test_agent_studio import BackendCase, Client as ControlledClient, Hub as FakeHub, studio_context, tool_call
+
+
+class StartupInvocationTests(unittest.TestCase):
+    def test_direct_script_and_package_startup_use_the_same_import_contract(self):
+        root = Path(__file__).resolve().parent.parent
+        code = r'''
+import pathlib, runpy, sys
+from unittest import mock
+
+exists = pathlib.Path.exists
+read = pathlib.Path.read_text
+def safe_read(path, *args, **kwargs):
+    if path.name == ".env":
+        raise AssertionError("Startup tests must not read local credentials")
+    return read(path, *args, **kwargs)
+
+with mock.patch.object(pathlib.Path, "exists", lambda path: False if path.name == ".env" else exists(path)), mock.patch.object(pathlib.Path, "read_text", safe_read), mock.patch("urllib.request.urlopen", side_effect=AssertionError("Startup tests cannot use providers")), mock.patch("http.server.ThreadingHTTPServer") as http, mock.patch("signal.signal"):
+    if sys.argv[1] == "script":
+        import realtime
+    else:
+        from backend import realtime
+    with mock.patch.object(realtime.RealtimeHub, "start") as start, mock.patch.object(realtime.RealtimeHub, "stop") as stop:
+        if sys.argv[1] == "script":
+            runpy.run_path("server.py", run_name="__main__")
+        else:
+            runpy.run_module("backend.server", run_name="__main__")
+        start.assert_called_once()
+        stop.assert_called_once()
+        assert http.call_args.args[0] == ("127.0.0.1", 8787)
+        http.return_value.serve_forever.assert_called_once()
+        http.return_value.server_close.assert_called_once()
+'''
+        for mode in ("script", "module"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="meridian-startup-test-") as directory:
+                environment = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP") if key in os.environ}
+                environment.update({"PYTHONDONTWRITEBYTECODE": "1", "DATABASE_PATH": str(Path(directory) / "startup.db"), "HOST": "127.0.0.1", "PORT": "8787", "SERP_API_KEY": "", "OPENAI_API_KEY": "", "OPENAI_BASE_URL": "", "MODEL_NAME": ""})
+                result = subprocess.run([sys.executable, "-B", "-c", code, mode], cwd=root / "backend" if mode == "script" else root, env=environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("API listening", result.stdout)
 
 
 class SerpWebProviderTests(BackendCase):
