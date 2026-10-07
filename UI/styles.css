@@ -282,6 +282,7 @@ svg { flex-shrink: 0; width: 20px; height: 20px; }
 :root[data-workspace-view="workspace"] .route-form,
 :root:not([data-workspace-view="workspace"]) .utility-tools,
 :root:not([data-workspace-view="workspace"]) .workspace-metrics { display: none; }
+:root:not([data-workspace-view="explore"]) .manual-sidebar.is-open :is(.map-mode-panel, .map-controls) { display: none; }
 .geo-content { display: grid; gap: 12px; }
 .geo-toggle { background: transparent; }
 .route-form { display: grid; gap: 12px; }
@@ -530,9 +531,8 @@ svg { flex-shrink: 0; width: 20px; height: 20px; }
   .view-heading { display: none; }
   .manual-sidebar { max-height: calc(100dvh - var(--rail-top) - 40px); }
   .agent-panel, .search-discovery { max-height: calc(100dvh - var(--search-top) - 80px); }
-  .info-drawer-content { max-height: calc(100dvh - 105px); }
-  .route-summary { bottom: 36px; left: calc(var(--sidebar-width) + 40px); width: calc(100vw - var(--sidebar-width) - 56px); }
-  .info-drawer:has(.info-drawer-content:not([hidden])) { bottom: 28px; }
+  .info-drawer-content { max-height: calc(100dvh - var(--search-top) - var(--attribution-height, 24px) - 128px); }
+  .route-summary { bottom: calc(62px + var(--attribution-height, 24px)); left: calc(var(--sidebar-width) + 40px); width: calc(100vw - var(--sidebar-width) - 56px); }
 }
 @media (prefers-reduced-transparency: reduce) {
   :root { --surface: var(--surface-solid); --hud: var(--surface-solid); }

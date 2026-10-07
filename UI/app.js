@@ -1488,6 +1488,7 @@ class CityExplorer {
   setWorkspaceView(view) {
     if (!['explore', 'routes', 'workspace'].includes(view)) return;
     this.workspaceView = view;
+    if (!this.elements['geo-status'].classList.contains('is-error')) this.setGeoStatus('');
     this.searchFocused = false;
     this.updateSearchDiscovery();
     this.terrainPointPopup?.remove();
@@ -1516,7 +1517,9 @@ class CityExplorer {
     document.documentElement.dataset.workspaceView = this.workspaceView;
     document.documentElement.dataset.hasRoute = String(Boolean(this.geo.route));
     document.documentElement.dataset.hasWorkspace = String(Boolean(this.geo.pins.length || this.geo.areas.length));
-    set('context-place', this.selected?.shortName || this.selected?.name || 'San Francisco Bay Area');
+    const center = this.map?.getCenter();
+    const anchored = center && this.selected && Math.abs(center.lat - this.selected.lat) < .005 && Math.abs(((center.lng - this.selected.lon + 540) % 360) - 180) < .005;
+    set('context-place', anchored ? this.selected.shortName || this.selected.name : center ? 'Map center' : 'San Francisco Bay Area');
     set('context-mode', this.mapMode === 'satellite' ? this.regionalImageryActive ? 'Regional satellite / Sentinel-2 scene' : 'Satellite / Aerial composite' : this.mapMode === 'route' ? 'Street map' : 'Topographic / Elevation contours');
     set('context-zoom', this.map ? `${this.map.getZoom().toFixed(1)} / ${this.terrainEnabled ? '3D terrain' : 'Plan view'}` : '--');
     set('context-guidance', this.regionalImageryActive
@@ -1550,7 +1553,6 @@ class CityExplorer {
     set('view-location', this.selected?.name || 'San Francisco Bay Area');
     set('view-title', this.workspaceView === 'routes' ? 'Route Planner' : this.workspaceView === 'workspace' ? 'Your Workspace' : this.mapMode === 'terrain' ? 'Terrain Explorer' : 'City Explorer');
     set('view-mode-label', this.mapMode === 'satellite' ? 'Satellite imagery' : this.mapMode === 'route' ? 'Monochrome / Streets' : 'Topographic / Contours in meters');
-    const center = this.map?.getCenter();
     if (center) set('map-coordinates', `${Math.abs(center.lat).toFixed(4)} ${center.lat < 0 ? 'S' : 'N'} / ${Math.abs(center.lng).toFixed(4)} ${center.lng < 0 ? 'W' : 'E'}`);
     if (center) set('context-coordinates', `${Math.abs(center.lat).toFixed(4)}\u00b0 ${center.lat < 0 ? 'S' : 'N'}\n${Math.abs(center.lng).toFixed(4)}\u00b0 ${center.lng < 0 ? 'W' : 'E'}`);
     const terrainControls = document.getElementById('terrain-controls');
@@ -1653,7 +1655,7 @@ class CityExplorer {
     try {
       const detected = await ipLocation();
       this.applyIpLocation(detected, { immediate: true });
-      this.setGeoStatus(`Opened your approximate Geo-IP location: ${detected.location.name}.`);
+      this.setGeoStatus('');
     } catch {
       this.detectCountry();
       this.setGeoStatus('Geo-IP location is unavailable. Search for a place to set the map anchor.', true);

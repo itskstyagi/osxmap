@@ -1210,3 +1210,38 @@ test('socket disconnect releases unified search and preserves interruption feedb
   assert.equal(app.agentSocketReady, true);
   assert.match(app.elements['agent-feedback'].textContent, /Connection interrupted/);
 });
+
+test('map details do not reuse the searched place name after the camera leaves its coordinate', () => {
+  const { app, document, move } = metadataSetup();
+  app.selected = { name: 'San Francisco', shortName: 'San Francisco', lat: 37.7749, lon: -122.4194 };
+  app.updateDashboard = Object.getPrototypeOf(app).updateDashboard;
+  app.updateDashboard();
+  assert.equal(document.getElementById('context-place').textContent, 'San Francisco');
+  move({ lat: 37.8044, lng: -122.2712 });
+  app.updateDashboard();
+  assert.equal(document.getElementById('context-place').textContent, 'Map center');
+  assert.match(document.getElementById('context-coordinates').textContent, /37.8044/);
+});
+
+test('unified instructions submit grounded map context and render a compact map-native completion', async () => {
+  const { app, requests } = setup();
+  app.agentSessionId = 'session-1';
+  app.elements['search-input'].value = 'Find parks near Golden Gate Bridge';
+  app.map = { getCenter: () => ({ lng: -122.4783, lat: 37.8199 }), getZoom: () => 12, getBounds: () => ({ getWest: () => -122.6, getSouth: () => 37.7, getEast: () => -122.3, getNorth: () => 38 }) };
+  const work = app.submitSearch(event());
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, '/api/agent/runs');
+  const payload = JSON.parse(requests[0].options.body);
+  assert.equal(payload.sessionId, 'session-1');
+  assert.equal(payload.message, 'Find parks near Golden Gate Bridge');
+  assert.equal(payload.mapContext.center[0], -122.4783);
+  assert.equal(app.elements['agent-panel'].hidden, false);
+  assert.equal(app.elements['search-input'].disabled, true);
+  requests[0].resolve({ ok: true, json: async () => ({ accepted: true, runId: 'run-1' }) });
+  await work;
+  assert.equal(app.agentRunId, 'run-1');
+  app.handleAgentEvent({ type: 'agent.completed', runId: 'run-1', message: 'The map is ready.' });
+  assert.equal(app.elements['search-input'].disabled, false);
+  assert.equal(app.elements['agent-result-summary'].textContent, 'The map is ready.');
+  assert.equal(app.elements['agent-result-details'].open, false);
+});
