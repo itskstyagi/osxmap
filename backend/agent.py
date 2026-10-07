@@ -320,17 +320,24 @@ class MapAgentService:
                 tool_calls = assistant.get("tool_calls")
                 content = str(assistant.get("content") or "").strip()
                 if not isinstance(tool_calls, list) or not tool_calls:
-                    if (context.population_requested and self.tools.dependencies.load_population
-                            and not context.studio_presented and not context.loaded_datasets and not context.population_attempts
-                            and context.map_context.get("scope", {}).get("type") != "layer"):
+                    if context.population_requested and not context.studio_presented and not context.loaded_datasets:
                         if acquisition_reminders < 1:
                             acquisition_reminders += 1
+                            if context.map_context.get("scope", {}).get("type") == "layer":
+                                reminder = "The requested population visualization has not been queued. Use studio_operation on the selected loaded layer and a real numeric field. If the operation is unsupported, call report_limitation rather than claiming a map was created."
+                            elif self.tools.dependencies.load_population and not context.population_attempts:
+                                reminder = "The requested population map has not been acquired. Resolve the requested city with find_city, then call the available load_population tool with its verified cityRef and the explicitly requested year, if any. It reads real WorldPop GeoTIFF cells automatically; do not stop at source links or manual-import instructions. If this source cannot meet the request, try a relevant alternative and report the specific issue honestly."
+                            else:
+                                reminder = "No population dataset or valid Studio visualization has been queued. A failed download, place search, or geographic presentation is not a population heatmap. Try a relevant alternative source within the remaining budget, or call report_limitation to report the actual source issue. Do not substitute place-search points for the requested observations or claim that the statistical map exists."
                             messages.extend([
                                 {"role": "assistant", "content": content or ""},
-                                {"role": "user", "content": "The requested population map has not been acquired. Resolve the requested city with find_city, then call the available load_population tool with its verified cityRef and the explicitly requested year, if any. It reads real WorldPop GeoTIFF cells automatically; do not stop at source links or manual-import instructions. If this source cannot meet the request, try a relevant alternative and report the specific issue honestly."},
+                                {"role": "user", "content": reminder},
                             ])
                             continue
-                        raise ServiceError("The population reader was not used, so no population layer was created.", 503)
+                        if context.research_area and not run.mapped:
+                            self._finish_context_only(run, context, prompt, f"Located {context.research_area['name']}; its study extent remains as geographic context only. No usable population observations were obtained, so no population heatmap was created.")
+                            return
+                        raise ServiceError("No population dataset or valid Studio visualization was obtained; geographic places were not substituted for population observations.", 503)
                     if context.requires_presentation:
                         if presentation_reminders < 1:
                             presentation_reminders += 1
@@ -373,17 +380,15 @@ class MapAgentService:
                         "tool_call_id": str(call.get("id") or "tool-call") if isinstance(call, dict) else "tool-call",
                         "content": json.dumps(self._model_tool_result(result), separators=(",", ":")),
                     })
-            if context.presented and not context.requires_presentation:
+            population_missing = context.population_requested and not context.loaded_datasets and not context.studio_presented
+            if context.presented and not context.requires_presentation and not population_missing:
                 final_message = "Queued the sourced map layer for browser validation and display. Source and coverage details are attached." if context.loaded_datasets else "The requested map updates are ready."
                 reversible = self._finish(run, prompt, final_message)
                 self._emit(run, "agent.completed", message=final_message, sources=self._source_citations(context), reversible=reversible)
                 return
             if context.research_area and not run.mapped:
                 final_message = f"Located {context.research_area['name']} and retained its study extent as geographic context. The research budget ended before usable numeric observations were obtained; no statistical layer was invented."
-                if context.research_errors:
-                    final_message += " Last source issue: " + context.research_errors[-1]
-                self._finish(run, prompt, final_message)
-                self._emit(run, "agent.limitation", reason="dataset_unavailable", message=final_message, contextOnly=True, sources=self._source_citations(context), reversible=False)
+                self._finish_context_only(run, context, prompt, final_message)
                 return
             raise ServiceError("The map agent reached its tool limit. Please make the request more specific.", 503)
         except AgentCancelled:
@@ -399,6 +404,13 @@ class MapAgentService:
             with self._lock:
                 self._runs.pop(run.run_id, None)
             self._gate.release()
+
+    def _finish_context_only(self, run: AgentRun, context: AgentRunContext, prompt: str, message: str) -> None:
+        if context.research_errors:
+            message += " Last source issue: " + context.research_errors[-1]
+        self._finish(run, prompt, message)
+        self._emit(run, "agent.limitation", reason="dataset_unavailable", message=message, contextOnly=True,
+                   sources=self._source_citations(context), reversible=False)
 
     def _execute_tool(self, run: AgentRun, context: AgentRunContext, call: Any) -> dict[str, Any]:
         if not isinstance(call, dict) or not isinstance(call.get("function"), dict):

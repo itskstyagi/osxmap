@@ -244,6 +244,36 @@ class PopulationAgentTests(BackendCase):
         self.assertEqual(len(client.messages), 3)
         self.population.assert_not_called()
 
+    def test_failed_download_and_places_cannot_be_claimed_as_population_heatmap(self):
+        self.population.side_effect = ServiceError("Population source unavailable.", 503)
+        self.search.return_value = {"results": [{**self.noida, "id": "sector-15", "name": "Sector 15", "placeType": "suburb"}]}
+        service, hub, client = self.service([tool_call("find_city", {"query": "Noida"}), tool_call("load_population", {"cityRef": "city:1"}), tool_call("search_places", {"query": "neighborhoods", "nearRef": "city:1"}), tool_call("present_map", {"placeRefs": ["place:2"]}), {"content": "The population heatmap is ready."}, tool_call("report_limitation", {"reason": "dataset_unavailable"})])
+        terminal = hub.wait(service.start_run(hub.session, "Create a population heatmap of Noida", {}))
+        self.assertEqual(terminal["type"], "agent.limitation")
+        self.assertEqual(len(client.messages), 6)
+        self.assertFalse(any(event["type"] == "agent.completed" or "dataset" in event.get("update", {}) for _, event in hub.events))
+
+    def test_round_limit_does_not_treat_place_presentation_as_population(self):
+        self.search.return_value = {"results": [{**self.noida, "id": "sector-15", "name": "Sector 15", "placeType": "suburb"}]}
+        responses = [tool_call("find_city", {"query": "Noida"}), tool_call("search_places", {"query": "neighborhoods", "nearRef": "city:1"})]
+        responses += [tool_call("find_city", {"query": "Noida"}) for _ in range(5)]
+        responses += [tool_call("present_map", {"placeRefs": ["place:2"]})]
+        service, hub, _ = self.service(responses)
+        terminal = hub.wait(service.start_run(hub.session, "Create a population heatmap of Noida", {}))
+        self.assertEqual(terminal["type"], "agent.failed")
+        self.assertTrue(terminal["rolledBack"])
+        self.assertFalse(any(event["type"] == "agent.completed" for _, event in hub.events))
+        self.population.assert_not_called()
+
+    def test_repeated_prose_after_failed_acquisition_retains_only_study_extent(self):
+        self.population.side_effect = ServiceError("Population source unavailable.", 503)
+        service, hub, _ = self.service([tool_call("find_city", {"query": "Noida"}), tool_call("load_population", {"cityRef": "city:1"}), {"content": "The population heatmap is ready."}, {"content": "The map is complete."}])
+        terminal = hub.wait(service.start_run(hub.session, "Create a population heatmap of Noida", {}))
+        self.assertEqual(terminal["type"], "agent.limitation")
+        self.assertTrue(terminal["contextOnly"])
+        self.assertNotIn("rolledBack", terminal)
+        self.assertIn("no population heatmap was created", terminal["message"])
+
     def test_cancellation_during_download_never_publishes_late_raster(self):
         entered, release = threading.Event(), threading.Event()
 
