@@ -146,6 +146,7 @@ function setup({ mobile = false } = {}) {
   const app = Object.create(context.CityExplorer.prototype);
   app.elements = Object.fromEntries(document.querySelectorAll('[id]').map((element) => [element.id, element]));
   Object.assign(app, {
+    theme: 'dark', mapMode: 'satellite', terrainEnabled: false,
     worker: {}, country: { countryCode: 'US' }, selected: null,
     suggestionIndex: -1, suggestionController: null, searchController: null,
     geo: { pins: [], areas: [], routeStops: [], route: null, routeAnimation: null, state: {}, context: {} },
@@ -1082,4 +1083,82 @@ test('rendering uses MapLibre antialiasing and preserves explicit flat Satellite
   app.terrainEnabled = true;
   app.setMapMode('terrain');
   assert.equal(app.terrainEnabled, true);
+});
+
+test('regional imagery is gated by the entire viewport, native zoom, pitch, and explicit preference', () => {
+  const { app } = setup();
+  let zoom = 11;
+  let pitch = 0;
+  let west = -122.7;
+  const visibility = new Map();
+  app.regionalImageryEnabled = true;
+  app.regionalImageryActive = false;
+  app.map = {
+    getLayer: () => ({}), getZoom: () => zoom, getPitch: () => pitch,
+    getBounds: () => ({ getWest: () => west, getSouth: () => 37.65, getEast: () => -122.2, getNorth: () => 38 }),
+    setLayoutProperty: (id, property, value) => { visibility.set(id, value); },
+  };
+  app.updateSatelliteImagery();
+  assert.equal(app.regionalImageryActive, true);
+  assert.equal(visibility.get('local-regional-satellite'), 'visible');
+  assert.match(app.elements['context-imagery'].textContent, /NASA.*30 m/);
+  assert.match(app.elements['context-imagery-date'].textContent, /2026-09-30/);
+  assert.match(app.elements['regional-imagery-note'].textContent, /Clouds.*gaps/);
+  zoom = 13;
+  app.updateSatelliteImagery();
+  assert.equal(app.regionalImageryActive, false);
+  zoom = 11;
+  pitch = 45;
+  app.updateSatelliteImagery();
+  assert.equal(app.regionalImageryActive, false);
+  pitch = 0;
+  west = -123;
+  app.updateSatelliteImagery();
+  assert.equal(app.regionalImageryActive, false);
+  west = -122.7;
+  app.regionalImageryEnabled = false;
+  app.updateSatelliteImagery();
+  assert.equal(app.regionalImageryActive, false);
+  app.regionalImageryEnabled = true;
+  app.regionalImageryUnavailable = true;
+  app.updateSatelliteImagery();
+  assert.equal(app.regionalImageryActive, false);
+  assert.match(app.elements['regional-imagery-note'].textContent, /unavailable/);
+});
+
+test('regional imagery metadata does not attach aerial citations to Sentinel pixels', async () => {
+  const { app, document, requests } = metadataSetup();
+  app.regionalImageryActive = true;
+  assert.equal(await app.refreshImageryMetadata(app.mapMetadataSnapshot(), 1), true);
+  assert.match(document.getElementById('context-imagery').textContent, /NASA.*Sentinel-2.*30 m/);
+  assert.match(document.getElementById('context-imagery-date').textContent, /2026-09-30/);
+  assert.equal(requests.length, 0);
+  app.mapMode = 'terrain';
+  assert.equal(await app.refreshImageryMetadata(app.mapMetadataSnapshot(), 1), true);
+  assert.match(document.getElementById('context-imagery').textContent, /Not shown/);
+  assert.equal(document.getElementById('context-imagery-date').textContent, 'Not applicable');
+  assert.equal(requests.length, 0);
+});
+
+test('dated NASA scene is deliberately excluded from persistent map cache', async () => {
+  const cache = cacheSetup();
+  assert.equal(await cache.dispatch('https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/HLS_S30_Nadir_BRDF_Adjusted_Reflectance/default/2026-09-30/GoogleMapsCompatible_Level12/12/1582/654.png'), null);
+  assert.equal(cache.network.length, 0);
+});
+
+test('Geo-IP opens at regional overview zoom while explicit searches retain close-up framing', () => {
+  const { app } = setup();
+  app.features = new Map(); app.tileFeatures = new Map(); app.tileMetadata = new Map(); app.loaded = new Set(); app.failed = new Set();
+  app.selected = { name: 'San Francisco', lat: 37.7749, lon: -122.4194 };
+  app.worker = { postMessage() {} };
+  app.applyTerrain = () => {};
+  app.setPreviewVisible = () => {};
+  const cameras = [];
+  app.map = { getSource: () => null, getLayer: () => null, jumpTo: (camera) => { cameras.push(camera); } };
+  app.resetMapForLocation = Object.getPrototypeOf(app).resetMapForLocation;
+  app.resetMapForLocation({ immediate: true, overview: true });
+  assert.equal(cameras[0].zoom, 11);
+  assert.equal(cameras[0].bearing, 0);
+  app.resetMapForLocation({ immediate: true });
+  assert.equal(cameras[1].zoom, 14);
 });

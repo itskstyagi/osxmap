@@ -1518,7 +1518,9 @@ class CityExplorer {
     set('context-place', this.selected?.shortName || this.selected?.name || 'San Francisco Bay Area');
     set('context-mode', this.mapMode === 'satellite' ? 'Satellite imagery' : this.mapMode === 'route' ? 'Street map' : 'Topographic / Elevation contours');
     set('context-zoom', this.map ? `${this.map.getZoom().toFixed(1)} / ${this.terrainEnabled ? '3D terrain' : 'Plan view'}` : '--');
-    set('context-guidance', 'Imagery is a composite, not a live or single-date capture. Elevations are sampled from a DEM, not survey measurements.');
+    set('context-guidance', this.regionalImageryActive
+      ? `Sentinel-2 scene from ${REGIONAL_IMAGERY.date} at 30 m. Clouds and small gaps remain; elevations are sampled, not survey measurements.`
+      : 'Aerial imagery is a composite, not a live or single-date capture. Elevations are sampled from a DEM, not survey measurements.');
     set('metric-pins', this.geo.pins.length);
     set('metric-areas', this.geo.areas.filter((area) => !area.summary?.invalid).length);
     set('metric-buildings', (this.buildings || 0).toLocaleString());
@@ -1852,11 +1854,11 @@ class CityExplorer {
     this.renderSuggestions([]);
     this.renderRegion();
     this.setStream({ loaded: 0, total: 9, buildings: 0, inferred: 0, active: true, preview: true, source: '', degraded: false });
-    this.resetMapForLocation({ immediate });
+    this.resetMapForLocation({ immediate, overview: source === 'geoip' });
     this.updateDashboard();
   }
 
-  resetMapForLocation({ immediate = false } = {}) {
+  resetMapForLocation({ immediate = false, overview = false } = {}) {
     const location = this.selected;
     this.features.clear(); this.tileFeatures.clear(); this.tileMetadata.clear(); this.loaded.clear(); this.failed.clear();
     this.buildings = 0; this.inferred = 0; this.total = 9; this.previewVisible = true; this.generation += 1;
@@ -1865,7 +1867,7 @@ class CityExplorer {
     if (this.map.getLayer('local-selection')) this.map.setFilter('local-selection', ['==', ['get', 'sourceId'], '__none__']);
     this.map.getSource(FOCUS_SOURCE)?.setData(this.focusFeature(location));
     this.applyTerrain();
-    const camera = { center: [location.lon, location.lat], zoom: this.mapMode === 'terrain' ? 12 : 14, pitch: this.terrainEnabled ? 45 : 0, bearing: this.mapMode === 'route' ? 0 : -12 };
+    const camera = { center: [location.lon, location.lat], zoom: overview ? 11 : this.mapMode === 'terrain' ? 12 : 14, pitch: this.terrainEnabled ? 45 : 0, bearing: overview || this.mapMode === 'route' ? 0 : -12 };
     if (immediate) this.map.jumpTo(camera);
     else this.map.flyTo({ ...camera, duration: 1800 });
     this.worker.postMessage({ type: 'reset', apiBaseUrl: API_BASE_URL, context: { region: location.id, lat: location.lat, lon: location.lon }, tiles: spiralTiles(location.lon, location.lat, 1) });
@@ -2086,6 +2088,11 @@ class CityExplorer {
   async refreshImageryMetadata(snapshot = this.mapMetadataSnapshot(), sequence = this.mapMetadataSequence) {
     if (!snapshot?.detailsOpen || !this.isMapMetadataCurrent(snapshot, sequence)) return false;
     this.imageryMetadataController?.abort();
+    if (snapshot.mapMode !== 'satellite') {
+      this.elements['context-imagery'].textContent = 'Not shown / OpenFreeMap topographic base';
+      this.elements['context-imagery-date'].textContent = 'Not applicable';
+      return true;
+    }
     if (snapshot.regionalImagery) {
       this.elements['context-imagery'].textContent = 'NASA GIBS / HLS Sentinel-2 / 30 m';
       this.elements['context-imagery-date'].textContent = `${REGIONAL_IMAGERY.date} / regional scene`;
@@ -2207,6 +2214,7 @@ class CityExplorer {
     const popup = new window.maplibregl.Popup({ closeButton: true, className: 'mono-popup', offset: 12, maxWidth: '300px' })
       .setLngLat([point.lon, point.lat]).setDOMContent(content).addTo(map);
     this.terrainPointPopup = popup;
+    document.documentElement.dataset.terrainPoint = 'true';
     const active = () => this.terrainPointSequence === sequence && this.terrainPointPopup === popup &&
       this.map === map && !this.viewMode && this.workspaceView === 'explore' && this.mapMode === 'terrain';
     const current = () => active() && !controller.signal.aborted && this.contourDem === dem;
@@ -2216,6 +2224,7 @@ class CityExplorer {
       this.terrainPointSequence = (this.terrainPointSequence || 0) + 1;
       controller.abort();
       if (this.terrainPointController === controller) this.terrainPointController = null;
+      document.documentElement.dataset.terrainPoint = 'false';
     });
     action.addEventListener('click', () => {
       if (!active()) return;
@@ -2275,6 +2284,7 @@ class CityExplorer {
       return {
         map, dem: this.contourDem, center: { lon: center.lon, lat: center.lat }, width, height, zoom, pitch, bearing, detailsOpen, imageryLod,
         regionalImagery: this.regionalImageryActive === true,
+        mapMode: this.mapMode,
         demZoom: Math.min(13, imageryLod), elevationVisible: detailsOpen || (this.workspaceView === 'explore' && this.mapMode === 'terrain'),
         key: [center.lon, center.lat, width, height, zoom, pitch, bearing, padding.top, padding.right, padding.bottom, padding.left,
           terrain?.source, terrain?.exaggeration, detailsOpen, this.workspaceView, this.mapMode, this.regionalImageryActive].join('|'),
