@@ -1355,3 +1355,34 @@ test('a capability limitation restores earlier mutations in the same agent run w
   assert.equal(app.agentRunId, '');
   assert.equal(app.mapActions?.length || 0, 0);
 });
+
+test('web source citations render safe external links and reject executable or credential URLs', () => {
+  const { app } = setup();
+  app.renderAgentSources([
+    { title: '<img src=x onerror=alert(1)>', url: 'https://example.org/census', publisher: 'Census office', date: '2011', readAt: '2026-01-01' },
+    { title: 'Unsafe', url: 'javascript:alert(1)' }, { title: 'Private credential', url: 'https://name:password@example.org/data' },
+  ]);
+  assert.equal(app.elements['agent-sources'].hidden, false);
+  const links = descendants(app.elements['agent-sources']).filter((node) => node.tagName === 'A');
+  assert.equal(links.length, 1);
+  assert.equal(links[0].href, 'https://example.org/census');
+  assert.equal(links[0].textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(links[0].rel, 'noopener noreferrer');
+  assert.equal(descendants(app.elements['agent-sources']).some((node) => node.tagName === 'IMG'), false);
+});
+
+test('a sourced dataset can open Studio and browser rejection remains visible after completion', () => {
+  const { app } = setup();
+  const layer = { name: 'Population 2011', visualization: 'heatmap' };
+  let focused = false;
+  app.studio = { applySourcedDataset: () => layer, focusLayer: () => { focused = true; }, lastAction: () => null };
+  app.setProductMode = (mode) => { app.productMode = mode; };
+  app.applyAgentMapUpdate({ dataset: { data: {} } });
+  assert.equal(app.productMode, 'studio');
+  assert.equal(focused, true);
+  assert.equal(app.agentResultSummary, 'Population 2011 / sourced heatmap');
+  app.studio.applySourcedDataset = () => { throw new Error('No features in scope'); };
+  app.applyAgentMapUpdate({ dataset: { data: {} } });
+  app.showCommandResult(app.agentResultSummary, 'Dataset queued.');
+  assert.match(allText(app.elements['agent-response']), /not applied.*No features in scope/);
+});

@@ -312,3 +312,27 @@ test('aggregate workspace limits reject oversized mutations without retaining or
   assert.deepEqual(Object.keys(instance.workspace.datasets), ['observations']);
   assert.equal(instance.workspace.history.length, 0);
 });
+
+test('sourced population datasets retain actual values and complete provenance through reload', () => {
+  const instance = controller();
+  instance.setTab = () => {};
+  instance.focusLayer = () => {};
+  const update = { name: 'Sourced observations', data: collection(), field: 'value', units: 'people per settlement', visualization: 'heatmap', source: { name: 'Census 2011', url: 'https://example.org/census', attribution: 'Data office', retrievedAt: '2026-01-01', publishedDate: '2012', referenceYear: '2011', license: 'CC BY 4.0', resolution: 'settlement', caveat: 'Partial settlement coverage, not a continuous grid.' }, scope: { type: 'workspace' } };
+  const layer = instance.applySourcedDataset(update);
+  assert.equal(instance.workspace.layers.length, 2);
+  assert.equal(instance.workspace.history.length, 0);
+  assert.deepEqual(instance.workspace.datasets[layer.datasetId].features.map((feature) => feature.properties.value), [0, 20, 40, 80]);
+  const restored = studio.validateWorkspace(JSON.parse(JSON.stringify(instance.workspace)));
+  assert.equal(restored.layers[0].source.url, update.source.url);
+  assert.equal(restored.layers[0].source.attribution, 'Data office');
+  assert.equal(restored.layers[0].source.referenceYear, '2011');
+  assert.equal(restored.layers[0].source.license, 'CC BY 4.0');
+});
+
+test('sourced dataset import respects frozen extent instead of widening an empty scope', () => {
+  const instance = controller();
+  const before = instance.workspace.layers.length;
+  assert.throws(() => instance.applySourcedDataset({ data: collection(), field: 'value', visualization: 'heatmap', scope: { type: 'selection', bounds: [10, 10, 11, 11] } }), /No source observations/);
+  assert.equal(instance.workspace.layers.length, before);
+  assert.throws(() => instance.applySourcedDataset({ data: collection(), field: 'value', visualization: 'heatmap', workspaceId: 'wrong', scope: { type: 'workspace' } }), /different workspace/);
+});
