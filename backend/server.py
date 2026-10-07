@@ -25,11 +25,12 @@ import urllib.parse
 import urllib.request
 import uuid
 import zlib
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 try:
     from .agent import MapAgentService
@@ -237,6 +238,19 @@ class Cache:
                     """
                 )
                 self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (3, int(time.time())))
+            if 4 not in applied:
+                self.connection.executescript(
+                    "CREATE TABLE workspace_revision (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL);"
+                    "INSERT INTO workspace_revision(id, version) VALUES (1, 0);"
+                )
+                # Track even same-value/ABA edits, including edits through another SQLite connection.
+                for table in ("workspace_pins", "workspace_areas", "workspace_state"):
+                    for operation in ("INSERT", "UPDATE", "DELETE"):
+                        self.connection.execute(
+                            f"CREATE TRIGGER {table}_{operation.lower()}_revision AFTER {operation} ON {table} "
+                            "BEGIN UPDATE workspace_revision SET version = version + 1 WHERE id = 1; END"
+                        )
+                self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (4, int(time.time())))
             self._deduplicate_places()
 
     @staticmethod
@@ -527,7 +541,7 @@ class Cache:
         return [{"id": row["pin_id"], "label": row["label"], "name": row["name"], "placeId": row["place_id"], "lat": row["latitude"], "lon": row["longitude"], "source": row["source"], "createdAt": row["created_at"]} for row in rows]
 
     def add_pin(self, name: str, lat: float, lon: float, place_id: str | None, source: str) -> dict[str, Any]:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             count = self.connection.execute("SELECT COUNT(*) AS count FROM workspace_pins").fetchone()["count"]
             label = pin_label(count)
             pin_id = f"pin-{uuid.uuid4().hex}"
@@ -539,7 +553,7 @@ class Cache:
         return {"id": pin_id, "label": label, "name": name[:160], "placeId": place_id, "lat": lat, "lon": lon, "source": source, "createdAt": created_at}
 
     def delete_pin(self, pin_id: str) -> bool:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             deleted = self.connection.execute("DELETE FROM workspace_pins WHERE pin_id = ?", (pin_id,)).rowcount > 0
             if not deleted:
                 return False
@@ -567,7 +581,7 @@ class Cache:
     def add_area(self, label: str, geometry: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
         area_id = f"area-{uuid.uuid4().hex}"
         created_at = int(time.time())
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             self.connection.execute(
                 "INSERT INTO workspace_areas(area_id, label, geometry_json, summary_json, created_at) VALUES (?, ?, ?, ?, ?)",
                 (area_id, label[:160], json.dumps(geometry, separators=(",", ":")), json.dumps(summary, separators=(",", ":")), created_at),
@@ -575,7 +589,7 @@ class Cache:
         return {"id": area_id, "label": label[:160], "geometry": geometry, "summary": summary, "createdAt": created_at}
 
     def update_area(self, area_id: str, label: str, geometry: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any] | None:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             row = self.connection.execute("SELECT created_at FROM workspace_areas WHERE area_id = ?", (area_id,)).fetchone()
             if not row:
                 return None
@@ -586,7 +600,7 @@ class Cache:
         return {"id": area_id, "label": label[:160], "geometry": geometry, "summary": summary, "createdAt": row["created_at"]}
 
     def delete_area(self, area_id: str) -> bool:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             return self.connection.execute("DELETE FROM workspace_areas WHERE area_id = ?", (area_id,)).rowcount > 0
 
     def get_route(self, request_key: str) -> dict[str, Any] | None:
@@ -627,7 +641,7 @@ class Cache:
         return json.loads(row["value_json"]) if row else {}
 
     def put_workspace_state(self, value: dict[str, Any]) -> None:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             self.connection.execute(
                 "INSERT INTO workspace_state(state_key, value_json, updated_at) VALUES ('active', ?, ?) "
                 "ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
@@ -635,10 +649,69 @@ class Cache:
             )
 
     def clear_workspace(self) -> None:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             self.connection.execute("DELETE FROM workspace_pins")
             self.connection.execute("DELETE FROM workspace_areas")
             self.connection.execute("DELETE FROM workspace_state")
+
+    @contextmanager
+    def _workspace_transaction(self, write: bool = True) -> Iterator[None]:
+        """Keep checkpoint checks and local writes atomic, without locking during provider calls."""
+        with self.lock:
+            if self.connection.in_transaction:
+                yield
+            else:
+                with self.connection:
+                    self.connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                    yield
+
+    def workspace_snapshot(self) -> dict[str, Any]:
+        with self._workspace_transaction(write=False):
+            return {"pins": self.list_pins(), "areas": self.list_areas(), "state": self.get_workspace_state()}
+
+    def capture_workspace(self) -> dict[str, Any]:
+        with self._workspace_transaction(write=False):
+            workspace = self.workspace_snapshot()
+            version = self.connection.execute("SELECT version FROM workspace_revision WHERE id = 1").fetchone()["version"]
+            return {"workspace": workspace, "version": version, "fingerprint": request_hash(workspace)}
+
+    def _check_workspace(self, expected: dict[str, Any]) -> dict[str, Any]:
+        current = self.capture_workspace()
+        if any(current[key] != expected.get(key) for key in ("version", "fingerprint")):
+            raise ServiceError("The workspace changed after the agent snapshot. Later edits were preserved; automatic restore is unsafe.", 409)
+        return current
+
+    def mutate_workspace(self, expected: dict[str, Any], mutation: Callable[[], Any]) -> tuple[Any, dict[str, Any]]:
+        with self._workspace_transaction():
+            self._check_workspace(expected)
+            result = mutation()
+            return result, self.capture_workspace()
+
+    def restore_workspace(self, before: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
+        """Restore an in-process checkpoint, never provider caches, places, or reusable routes."""
+        try:
+            with self._workspace_transaction():
+                current = self._check_workspace(expected)
+                workspace = before["workspace"]
+                if current["workspace"] == workspace:
+                    return current
+                self.connection.execute("DELETE FROM workspace_pins")
+                self.connection.execute("DELETE FROM workspace_areas")
+                self.connection.execute("DELETE FROM workspace_state WHERE state_key = 'active'")
+                for pin in workspace["pins"]:
+                    self.connection.execute(
+                        "INSERT INTO workspace_pins(pin_id, label, name, place_id, latitude, longitude, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (pin["id"], pin["label"], pin["name"], pin["placeId"], pin["lat"], pin["lon"], pin["source"], pin["createdAt"]),
+                    )
+                for area in workspace["areas"]:
+                    self.connection.execute(
+                        "INSERT INTO workspace_areas(area_id, label, geometry_json, summary_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                        (area["id"], area["label"], json.dumps(area["geometry"], separators=(",", ":")), json.dumps(area["summary"], separators=(",", ":")), area["createdAt"]),
+                    )
+                self.put_workspace_state(workspace["state"])
+                return self.capture_workspace()
+        except (KeyError, TypeError, sqlite3.IntegrityError) as error:
+            raise ServiceError("The saved workspace can no longer be restored safely. No restore was applied.", 409) from error
 
     def close(self) -> None:
         with self.lock:
@@ -1603,7 +1676,7 @@ def get_route(waypoints: list[list[float]], profile: str) -> dict[str, Any]:
 
 
 def workspace_snapshot() -> dict[str, Any]:
-    return {"pins": CACHE.list_pins(), "areas": CACHE.list_areas(), "state": CACHE.get_workspace_state()}
+    return CACHE.workspace_snapshot()
 
 
 def safe_workspace_state(state: Any) -> dict[str, Any]:
@@ -1658,6 +1731,9 @@ AGENT_TOOLS = AgentTools(AgentDependencies(
     clear_workspace=CACHE.clear_workspace,
     add_pin=CACHE.add_pin,
     save_workspace_state=save_workspace_state,
+    capture_workspace=CACHE.capture_workspace,
+    mutate_workspace=CACHE.mutate_workspace,
+    restore_workspace=CACHE.restore_workspace,
 ))
 AGENT = MapAgentService(OpenAIChatClient(CONFIG), AGENT_TOOLS, REALTIME)
 
@@ -2731,6 +2807,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", self.cors_origin())
             self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Expose-Headers", "X-Cache, X-Data-Source, X-Data-Stale, X-Height-Prediction, X-Feature-Count, X-Building-Count, X-Place-Count, X-Inferred-Building-Count, X-Height-Model-Sample-Size, Retry-After")
             self.send_header("Vary", "Origin")
             if body is not None:
                 self.send_header("Content-Type", "application/geo+json" if response_headers.pop("geojson", None) else "application/json; charset=utf-8")
@@ -2871,6 +2948,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/agent/runs":
                 run_id = AGENT.start_run(str(body.get("sessionId") or ""), body.get("message"), body.get("mapContext"))
                 self.send_json(202, {"accepted": True, "runId": run_id})
+                return
+            if parsed.path == "/api/agent/undo":
+                self.send_json(200, AGENT.undo_run(body.get("sessionId"), body.get("runId")))
                 return
             if parsed.path == "/api/pins":
                 point = valid_coordinate(body.get("lon"), body.get("lat"))

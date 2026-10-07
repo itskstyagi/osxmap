@@ -141,13 +141,13 @@ function setup({ mobile = false } = {}) {
     fetch: (url, options) => new Promise((resolve, reject) => requests.push({ url, options, resolve, reject })),
   });
   const source = readFileSync(join(__dirname, 'app.js'), 'utf8')
-    .replace(/^import[^\n]*\n/, '')
+    .replace(/^import[^\n]*\n/gm, '')
     .replaceAll('import.meta.url', JSON.stringify('file:///UI/app.js'));
   vm.runInContext(`${source}\nglobalThis.CityExplorer = CityExplorer; globalThis.applyMonochrome = applyMonochrome; globalThis.renderAgentReply = renderAgentReply; globalThis.coordinateQuery = coordinateQuery; globalThis.mapInstruction = mapInstruction;`, context, { filename: 'app.js' });
   const app = Object.create(context.CityExplorer.prototype);
   app.elements = Object.fromEntries(document.querySelectorAll('[id]').map((element) => [element.id, element]));
   Object.assign(app, {
-    theme: 'dark', mapMode: 'satellite', terrainEnabled: false,
+    theme: 'dark', mapMode: 'satellite', terrainEnabled: false, productMode: 'explore',
     worker: {}, country: { countryCode: 'US' }, selected: null,
     suggestionIndex: -1, suggestionController: null, searchController: null,
     geo: { pins: [], areas: [], routeStops: [], route: null, routeAnimation: null, state: {}, context: {} },
@@ -1244,4 +1244,83 @@ test('unified instructions submit grounded map context and render a compact map-
   assert.equal(app.elements['search-input'].disabled, false);
   assert.equal(app.elements['agent-result-summary'].textContent, 'The map is ready.');
   assert.equal(app.elements['agent-result-details'].open, false);
+});
+
+test('server undo blocks new commands and preserves edits that arrive while awaiting its response', async () => {
+  const { app, requests } = setup();
+  const before = app.captureMapAction();
+  app.geo.pins.push({ id: 'agent-pin', name: 'Agent pin', lat: 50, lon: -3 });
+  app.recordMapAction('Add agent pin', before, { serverUndo: true, runId: 'finished-run' });
+  let restored = false;
+  app.restoreMapAction = () => { restored = true; };
+  const work = app.undoMapAction();
+  assert.equal(app.undoing, true);
+  assert.equal(requests[0].url, '/api/agent/undo');
+  await app.startAgentRequest('Another request');
+  assert.equal(requests.length, 1);
+  app.geo.pins.push({ id: 'later-pin', name: 'Late manual response', lat: 51, lon: -2 });
+  respond(requests[0], { undone: true, workspace: { pins: [], areas: [], state: {} } });
+  await work;
+  assert.equal(restored, false);
+  assert.equal(app.geo.pins.length, 2);
+  assert.equal(app.mapActions.length, 0);
+  assert.equal(app.undoing, false);
+  assert.match(app.elements['geo-status'].textContent, /Newer local map changes were kept/);
+});
+
+test('normal-motion terrain commands synchronize Studio appearance before recording their undo guard', async () => {
+  const { app, window } = setup();
+  window.matchMedia = () => ({ matches: false });
+  app.productMode = 'studio';
+  app.map = { getSource: () => ({}), setTerrain() {}, easeTo() {} };
+  app.studio = {
+    workspace: { id: 'project', terrainEnabled: false },
+    snapshot() { return { ...this.workspace }; },
+    onMapAppearanceChange() { this.workspace.terrainEnabled = app.terrainEnabled; },
+    discardRedo() {}, lastAction() { return null; }, setAgentBusy() {},
+  };
+  const before = app.captureMapAction();
+  app.setTerrainView(true);
+  assert.equal(app.studio.workspace.terrainEnabled, true);
+  app.recordMapAction('Show 3D', before);
+  app.studio.onMapAppearanceChange();
+  let restored;
+  app.restoreMapAction = (value) => { restored = value; };
+  await app.undoMapAction();
+  assert.equal(restored.terrainEnabled, false);
+  assert.equal(app.mapActions.length, 0);
+});
+
+test('a new outer map action invalidates stale Studio redo snapshots', () => {
+  const { app } = setup();
+  let cleared = 0;
+  app.studio = { workspace: { id: 'project' }, snapshot: () => ({ id: 'project' }), discardRedo: () => { cleared++; }, lastAction: () => null, setAgentBusy() {} };
+  app.recordMapAction('Agent created a layer', app.captureMapAction());
+  assert.equal(cleared, 1);
+});
+
+test('late startup workspace restoration cannot replace a user-selected Studio camera', async () => {
+  const { app } = setup();
+  let finish;
+  app.loadWorkspace = () => new Promise((resolve) => { finish = resolve; });
+  app.initializeLocationFromUrl = () => assert.fail('Automatic location restore must not run after entering Studio');
+  const work = app.bootstrap();
+  app.productMode = 'studio';
+  app.locationRevision = 1;
+  finish();
+  await work;
+  assert.equal(app.workspaceReady, true);
+});
+
+test('late Geo-IP results cannot move a Studio workspace after initial navigation', async () => {
+  const { app, requests } = setup();
+  app.initializeLocationFromUrl = () => false;
+  app.applyIpLocation = () => assert.fail('Late Geo-IP must not replace the active workspace');
+  const work = app.initializeLocation();
+  respond(requests[0], { ip: '192.0.2.1' });
+  await new Promise(setImmediate);
+  app.productMode = 'studio';
+  app.locationRevision = 1;
+  respond(requests[1], { data: { status: 'success', city: 'Test', country: 'Test', countryCode: 'US', lat: 50, lon: -3 } });
+  await work;
 });

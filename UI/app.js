@@ -1,4 +1,5 @@
 import { AGENT_SOCKET_URL, API_BASE_URL, apiPath } from './config.js';
+import { MeridianStudio } from './studio.js';
 
 const TILE_ZOOM = 14;
 const ACCENT = '#d0dac5';
@@ -15,6 +16,19 @@ const GEOGRAPHY_SOURCE = 'local-geography';
 const SEARCH_RESULTS_SOURCE = 'local-search-results';
 const EMPTY_COLLECTION = { type: 'FeatureCollection', features: [] };
 const MAX_ROUTE_STOPS = 50;
+const originalFillOpacity = new WeakMap();
+
+function preference(key, fallback = '') {
+  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+}
+
+function savePreference(key, value) {
+  try { localStorage.setItem(key, value); return true; } catch { return false; }
+}
+
+function motionDuration(duration) {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 0 : duration;
+}
 
 function coordinateQuery(query) {
   const decimal = query.match(/^\s*([+-]?\d{1,3}(?:\.\d+)?)\s*[,;]\s*([+-]?\d{1,3}(?:\.\d+)?)\s*$/);
@@ -30,7 +44,7 @@ function coordinateQuery(query) {
 }
 
 function mapInstruction(query) {
-  return /^(?:find|show|hide|what|where|which|how|tell|take|plan|create|draw|go|zoom|clear|save|pin|add|remove|turn|enable|disable|switch|search|route|navigate|locate)\b/i.test(query) ||
+  return /^(?:find|show|hide|what|where|which|how|tell|take|plan|create|draw|go|zoom|clear|save|pin|add|remove|turn|enable|disable|switch|search|route|navigate|locate|analy[sz]e|summari[sz]e|compare|filter|visuali[sz]e|undo|redo|duplicate|open)\b/i.test(query) ||
     /\S\s+to\s+\S|\b(?:near|nearby|around|above|below)\b|\?$|\b(?:on|off)\s*$/i.test(query);
 }
 
@@ -356,26 +370,38 @@ function applyMonochrome(map, theme, mode = 'route') {
   const colors = dark
     ? { background: '#141918', land: '#1d2320', park: '#283129', water: '#111e24', line: '#475048', text: '#d1d5c9', halo: '#141918' }
     : { background: '#e8e5dc', land: '#e8e5dc', park: '#deded1', water: '#d2d6d2', line: '#a39f93', text: '#57574e', halo: '#e8e5dc' };
+  if (!originalFillOpacity.has(map)) originalFillOpacity.set(map, new Map());
+  const fillOpacity = originalFillOpacity.get(map);
   for (const layer of map.getStyle().layers || []) {
-    if (layer.id.startsWith('local-') || layer.id.startsWith('geo-')) continue;
+    if (/^(?:local-|geo-|studio-)/.test(layer.id)) continue;
     const id = layer.id.toLowerCase();
     try {
-      map.setLayoutProperty(layer.id, 'visibility', satellite && ['fill', 'fill-extrusion'].includes(layer.type) ? 'none' : 'visible');
+      map.setLayoutProperty(layer.id, 'visibility', satellite && layer.type === 'fill-extrusion' ? 'none' : 'visible');
       if (id.includes('building')) map.setLayoutProperty(layer.id, 'visibility', satellite ? 'none' : 'visible');
       if (layer.type === 'background') map.setPaintProperty(layer.id, 'background-color', colors.background);
       if (layer.type === 'fill') {
+        if (!fillOpacity.has(layer.id)) fillOpacity.set(layer.id, layer.paint?.['fill-opacity'] ?? 1);
         const color = id.includes('water') ? colors.water : /park|wood|grass|landcover/.test(id) ? colors.park : colors.land;
+        map.setPaintProperty(layer.id, 'fill-opacity-transition', { duration: motionDuration(360) });
+        map.setPaintProperty(layer.id, 'fill-opacity', satellite ? 0 : fillOpacity.get(layer.id));
         map.setPaintProperty(layer.id, 'fill-color', color);
         map.setPaintProperty(layer.id, 'fill-outline-color', color);
       }
       if (layer.type === 'line') {
         map.setPaintProperty(layer.id, 'line-color', satellite ? '#d3d5c6' : colors.line);
-        map.setPaintProperty(layer.id, 'line-opacity', satellite ? 0.08 : terrain ? 0.45 : 0.85);
+        const opacity = satellite ? 0.12 : terrain ? 0.45 : 0.85;
+        map.setPaintProperty(layer.id, 'line-opacity-transition', { duration: motionDuration(240) });
+        map.setPaintProperty(layer.id, 'line-opacity', /minor|service|path|track|residential/.test(id)
+          ? ['interpolate', ['linear'], ['zoom'], 9, 0, 12, opacity * .35, 15, opacity] : opacity);
       }
       if (layer.type === 'symbol') {
         map.setPaintProperty(layer.id, 'text-color', satellite ? '#d6d9cd' : colors.text);
         map.setPaintProperty(layer.id, 'text-halo-color', satellite ? '#151d1b' : colors.halo);
-        map.setPaintProperty(layer.id, 'text-opacity', satellite ? 0.65 : 1);
+        const opacity = satellite ? 0.8 : 1;
+        const minor = /poi|housenumber|address|road.*label|transportation.*name/.test(id);
+        map.setPaintProperty(layer.id, 'text-opacity-transition', { duration: motionDuration(160) });
+        map.setPaintProperty(layer.id, 'text-opacity', minor ? ['interpolate', ['linear'], ['zoom'], 11, 0, 13, opacity * .45, 15, opacity] : opacity);
+        if (minor) map.setPaintProperty(layer.id, 'icon-opacity', ['interpolate', ['linear'], ['zoom'], 11, 0, 14, opacity]);
       }
       if (layer.type === 'circle') map.setPaintProperty(layer.id, 'circle-color', colors.text);
     } catch {
@@ -396,7 +422,11 @@ function applyMonochrome(map, theme, mode = 'route') {
   for (const id of ['local-water', 'local-park', 'local-road']) {
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', satellite ? 'none' : 'visible');
   }
-  if (map.getLayer('local-satellite')) map.setLayoutProperty('local-satellite', 'visibility', satellite ? 'visible' : 'none');
+  if (map.getLayer('local-satellite')) {
+    map.setLayoutProperty('local-satellite', 'visibility', 'visible');
+    map.setPaintProperty('local-satellite', 'raster-opacity-transition', { duration: motionDuration(400) });
+    map.setPaintProperty('local-satellite', 'raster-opacity', satellite ? 1 : 0);
+  }
   for (const id of ['local-hillshade', 'local-contours', 'local-contour-labels']) {
     if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', terrain ? 'visible' : 'none');
   }
@@ -491,8 +521,9 @@ function addLocalLayers(map, theme) {
 class CityExplorer {
   constructor() {
     this.elements = Object.fromEntries([...document.querySelectorAll('[id]')].map((element) => [element.id, element]));
-    this.theme = localStorage.getItem('theme') || 'dark';
-    this.mapMode = ['satellite', 'route', 'terrain'].includes(localStorage.getItem('mapMode')) ? localStorage.getItem('mapMode') : 'satellite';
+    this.theme = preference('theme', 'dark');
+    this.mapMode = ['satellite', 'route', 'terrain'].includes(preference('mapMode')) ? preference('mapMode') : 'satellite';
+    this.productMode = 'explore';
     this.workspaceView = 'explore';
     this.viewMode = false;
     this.country = { country: '', countryCode: '', method: 'detecting' };
@@ -510,7 +541,7 @@ class CityExplorer {
     this.terrainEnabled = false;
     this.layerPreferences = { labels: true, buildings: true, roads: true, places: true, boundaries: true, contours: true, hillshade: true };
     this.contourStrength = 0.55;
-    this.regionalImageryEnabled = localStorage.getItem('regionalImagery') !== 'off';
+    this.regionalImageryEnabled = preference('regionalImagery') !== 'off';
     this.regionalImageryActive = false;
     this.commandMode = false;
     this.searchFocused = false;
@@ -544,11 +575,14 @@ class CityExplorer {
     this.agentResultSummary = '';
     this.agentLastMessage = '';
     this.agentPanelDismissed = false;
+    this.mapActions = [];
+    this.agentSnapshot = null;
     this.agentActivity = { connection: 'CONNECTING', request: 'Waiting for connection', tool: 'No active tool' };
     this.worker = new Worker(new URL('./tile-worker.js', import.meta.url), { type: 'module' });
     this.setTheme(this.theme);
     this.bindUi();
     this.createMap();
+    this.studio = new MeridianStudio(this);
     this.bootstrap();
     this.connectAgentSocket();
     this.updateDashboard();
@@ -593,6 +627,9 @@ class CityExplorer {
     });
     el['add-route-stop'].addEventListener('click', () => this.addRouteStop());
     el['agent-cancel'].addEventListener('click', () => this.cancelAgentRequest());
+    el['agent-task-stop']?.addEventListener('click', () => this.cancelAgentRequest());
+    el['action-history-undo']?.addEventListener('click', () => this.undoMapAction());
+    el['copy-coordinates']?.addEventListener('click', () => this.copyCoordinates());
     el['agent-dismiss-result'].addEventListener('click', () => this.dismissAgentResult());
     document.getElementById('agent-dismiss-question').addEventListener('click', () => this.cancelAgentRequest());
     document.getElementById('replay-route').addEventListener('click', () => {
@@ -623,11 +660,17 @@ class CityExplorer {
       this.refreshMapMetadata();
     }));
     document.querySelectorAll('button[data-workspace-view]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView(button.dataset.workspaceView)));
+    document.querySelectorAll('button[data-product-mode]').forEach((button) => button.addEventListener('click', () => this.setProductMode(button.dataset.productMode)));
     document.querySelectorAll('[data-open-routes]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView('routes')));
     document.querySelectorAll('[data-layer-toggle]').forEach((button) => button.addEventListener('click', () => this.toggleMapLayer(button.dataset.layerToggle)));
     el['contour-strength'].addEventListener('input', () => {
       this.contourStrength = Number(el['contour-strength'].value) / 100;
-      this.applyLayerPreferences();
+      if (this.contourFrame) return;
+      this.contourFrame = window.requestAnimationFrame(() => {
+        this.contourFrame = null;
+        this.applyLayerPreferences();
+        this.saveExploreState();
+      });
     });
     el['regional-overview-toggle'].addEventListener('click', () => {
       this.regionalImageryEnabled = !this.regionalImageryEnabled;
@@ -635,7 +678,7 @@ class CityExplorer {
         this.regionalImageryUnavailable = false;
         this.map.getSource('local-regional-imagery')?.setTiles([REGIONAL_IMAGERY.tiles]);
       }
-      localStorage.setItem('regionalImagery', this.regionalImageryEnabled ? 'on' : 'off');
+      savePreference('regionalImagery', this.regionalImageryEnabled ? 'on' : 'off');
       this.updateSatelliteImagery();
       this.refreshMapMetadata();
     });
@@ -677,6 +720,9 @@ class CityExplorer {
       this.elevationController?.abort();
       this.imageryMetadataController?.abort();
       this.terrainPointController?.abort();
+      this.studio?.destroy();
+      this.saveExploreState();
+      window.cancelAnimationFrame(this.contourFrame);
       clearTimeout(this.mapMetadataTimer);
       this.attributionObserver?.disconnect();
       this.agentSocket?.close();
@@ -702,6 +748,7 @@ class CityExplorer {
     document.documentElement.dataset.sidebar = open ? 'open' : 'closed';
     toggle.setAttribute('aria-expanded', String(open));
     this.elements['manual-controls-content'].hidden = !open;
+    if (open && this.productMode === 'studio') this.studio?.setPane('left');
   }
 
   setInfoDrawerOpen(open) {
@@ -712,7 +759,8 @@ class CityExplorer {
     document.documentElement.dataset.mapDetails = String(open);
     toggle.setAttribute('aria-expanded', String(open));
     toggle.setAttribute('aria-label', `${open ? 'Collapse' : 'Expand'} map details`);
-    if (open && window.innerWidth <= 700) this.setManualControlsOpen(false);
+    if (open && window.innerWidth <= 900) this.setManualControlsOpen(false);
+    if (open && window.innerWidth <= 1100) this.studio?.closePanels();
     if (open) navigator.serviceWorker?.controller?.postMessage({ type: 'map-cache-stats' });
     if (open) {
       this.updateDashboard();
@@ -728,6 +776,187 @@ class CityExplorer {
     this.elements['geo-content'].hidden = !open;
     toggle.setAttribute('aria-expanded', String(open));
     toggle.querySelector('b').textContent = open ? 'CLOSE' : 'OPEN';
+  }
+
+  captureMapAction() {
+    const center = this.map?.getCenter?.();
+    return JSON.parse(JSON.stringify({
+      camera: center ? { center: [center.lng, center.lat], zoom: this.map.getZoom?.(), bearing: this.map.getBearing?.(), pitch: this.map.getPitch?.() } : null,
+      selected: this.selected, mapMode: this.mapMode, theme: this.theme, terrainEnabled: this.terrainEnabled,
+      layerPreferences: this.layerPreferences, contourStrength: this.contourStrength,
+      geo: { ...this.geo, routeAnimation: null, routeStops: this.routePlan().map((stop) => ({ ...stop, suggestions: [] })) },
+      searchResults: this.searchResults, studio: this.studio?.snapshot(), comparing: Boolean(this.studio?.compareMap),
+    }));
+  }
+
+  recordMapAction(label, before, options = {}) {
+    if (!before) return;
+    if (before.studio?.id === this.studio?.workspace.id) this.studio?.discardRedo();
+    this.mapActions ||= [];
+    this.mapActions.push({ label: String(label).slice(0, 120), before, guard: this.mapActionGuard(), cameraRevision: this.cameraInteractionRevision || 0, time: Date.now(), ...options });
+    if (this.mapActions.length > 20) this.mapActions.shift();
+    this.updateActionChip();
+  }
+
+  mapActionGuard() {
+    const studio = this.studio?.snapshot();
+    if (studio) { delete studio.camera; delete studio.updatedAt; delete studio.selectedLayerId; delete studio.scope; }
+    return JSON.stringify({
+      selected: this.selected, pins: this.geo.pins, areas: this.geo.areas, route: this.geo.route,
+      stops: this.routePlan().map((stop) => ({ query: stop.query, place: stop.place })), searchResults: this.searchResults,
+      mapMode: this.mapMode, terrainEnabled: this.terrainEnabled, preferences: this.layerPreferences, studio,
+    });
+  }
+
+  updateActionChip() {
+    const action = this.mapActions?.at(-1);
+    const studioAction = this.studio?.lastAction();
+    const latest = studioAction && (!action || studioAction.time > action.time) ? studioAction : action;
+    const chip = this.elements['action-history-chip'];
+    if (!chip) return;
+    chip.hidden = !latest;
+    this.elements['action-history-label'].textContent = latest?.label || '';
+    this.elements['action-history-undo'].disabled = Boolean(this.agentSubmitting || this.agentRunId || this.undoing);
+    this.studio?.setAgentBusy(Boolean(this.agentSubmitting || this.agentRunId || this.undoing));
+  }
+
+  async undoMapAction() {
+    if (this.agentSubmitting || this.agentRunId || this.undoing) return;
+    const action = this.mapActions?.at(-1);
+    const studioAction = this.studio?.lastAction();
+    if (studioAction && (!action || studioAction.time > action.time)) return this.studio.undo();
+    if (!action) return this.setGeoStatus('There is no map action to undo.');
+    if (action.guard && action.guard !== this.mapActionGuard()) return this.setGeoStatus('This action cannot overwrite more recent manual map changes. Undo those changes first or keep the current state.', true);
+    this.undoing = true;
+    this.updateActionChip();
+    try {
+      if (action.serverUndo) {
+        const result = await postJson('/api/agent/undo', { sessionId: this.agentSessionId, runId: action.runId });
+        if (!result.undone) throw new Error('The service could not undo this action.');
+        if (action.guard && action.guard !== this.mapActionGuard()) {
+          this.mapActions.pop();
+          this.setGeoStatus('The server operation was undone. Newer local map changes were kept instead of being overwritten.', true);
+          return;
+        }
+      }
+      const currentCamera = this.captureMapAction().camera;
+      const moved = (this.cameraInteractionRevision || 0) !== (action.cameraRevision || 0);
+      this.restoreMapAction(moved ? { ...action.before, camera: currentCamera } : action.before);
+      this.mapActions.pop();
+      this.setGeoStatus(`Undid: ${action.label}`);
+    } catch (error) {
+      this.setGeoStatus(`Undo was not applied: ${error.message}`, true);
+    } finally {
+      this.undoing = false;
+      this.updateActionChip();
+    }
+  }
+
+  restoreMapAction(snapshot) {
+    this.restoringAction = true;
+    try {
+      this.stopRouteAnimation(false);
+      this.geo = JSON.parse(JSON.stringify(snapshot.geo));
+      this.searchResults = snapshot.searchResults || [];
+      this.selected = snapshot.selected;
+      this.layerPreferences = { ...snapshot.layerPreferences };
+      this.contourStrength = snapshot.contourStrength ?? .55;
+      this.mapMode = snapshot.mapMode;
+      this.terrainEnabled = snapshot.terrainEnabled;
+      if (this.map) {
+        if (this.selected && this.features) this.resetMapForLocation({ immediate: true });
+        else if (this.features) this.clearCityData();
+        this.applyTerrain();
+        this.applyMapMode();
+        if (snapshot.camera) this.map.jumpTo(snapshot.camera);
+      }
+      if (snapshot.studio) this.studio?.restoreSnapshot(snapshot.studio, { restoreCamera: false });
+      if (!snapshot.comparing) this.studio?.stopCompare();
+      this.renderWorkspace();
+      this.renderGeography();
+      this.renderSearchResults();
+      this.updateDashboard();
+    } finally {
+      this.restoringAction = false;
+      this.saveExploreState();
+    }
+  }
+
+  settleAgentAction(event) {
+    const before = this.agentSnapshot;
+    this.agentSnapshot = null;
+    if (!before || !this.agentDidMutate) return;
+    if (this.agentLocalConflict) {
+      if (event.rolledBack === true && event.workspace) {
+        this.applyWorkspaceSnapshot(event.workspace);
+        this.renderWorkspace();
+        this.renderGeography();
+      }
+      this.setGeoStatus('Manual changes occurred during the operation. They were not overwritten; automatic map undo is unavailable for this run.', true);
+      this.agentDidMutate = false;
+      return;
+    }
+    if (event.rolledBack === true && !this.agentLocalConflict) {
+      const camera = this.agentUserCamera ? this.captureMapAction().camera : before.camera;
+      this.restoreMapAction({ ...before, camera });
+    }
+    else if (event.type === 'agent.completed' || event.type === 'agent.question') {
+      this.recordMapAction(this.agentLastMessage || 'Meridian map operation', before, { runId: event.runId, serverUndo: event.reversible === true });
+    } else if (event.rolledBack === false || this.agentLocalConflict) {
+      this.setGeoStatus('The workspace changed during this operation. Existing changes were kept rather than overwritten.', true);
+    }
+    this.agentDidMutate = false;
+  }
+
+  markManualChange() {
+    if (this.undoing && !this.restoringAction) {
+      this.setGeoStatus('Wait for the pending undo before changing map data.', true);
+      return true;
+    }
+    if ((this.agentSubmitting || this.agentRunId) && !this.applyingAgentMap) this.agentLocalConflict = true;
+    return false;
+  }
+
+  saveExploreState() {
+    if (!this.workspaceReady || this.productMode === 'studio' || !this.map?.getCenter) return;
+    const center = this.map.getCenter();
+    const saved = savePreference('meridian.explore.v1', JSON.stringify({
+      camera: { center: [center.lng, center.lat], zoom: this.map.getZoom(), pitch: this.map.getPitch(), bearing: this.map.getBearing() },
+      selected: this.selected, mapMode: this.mapMode, terrainEnabled: this.terrainEnabled,
+      layerPreferences: this.layerPreferences, contourStrength: this.contourStrength,
+      routeStops: this.routePlan().map((stop) => ({ query: stop.query, place: stop.place, suggestions: [] })),
+    }));
+    if (!saved && !this.exploreStorageUnavailable) {
+      this.exploreStorageUnavailable = true;
+      this.setGeoStatus('Browser storage is unavailable. This map view will not be restored after reload.', true);
+    }
+  }
+
+  persistWorkspaceState() {
+    if (!this.workspaceReady || this.agentSubmitting || this.agentRunId || this.restoringAction) return;
+    const state = { routeId: this.geo.route?.id || '', routePinIds: [], context: { selectedCity: this.selected } };
+    const key = JSON.stringify(state);
+    if (key === this.workspaceSaveKey) return;
+    this.workspaceSaveKey = key;
+    this.workspaceSave = (this.workspaceSave || Promise.resolve()).then(async () => {
+      try { await postJson('/api/workspace/state', { state }); }
+      catch {
+        if (this.workspaceSaveKey === key) this.workspaceSaveKey = '';
+        this.setGeoStatus('Map service could not save the active route. Your current map remains usable; Studio exports are available locally.', true);
+      }
+    });
+  }
+
+  async copyCoordinates() {
+    const coordinate = this.inspectedCoordinate || this.map?.getCenter?.();
+    if (!coordinate) return;
+    const text = `${coordinate.lat.toFixed(5)}, ${(coordinate.lng ?? coordinate.lon).toFixed(5)}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      this.setGeoStatus('Coordinates copied as latitude, longitude.');
+    } catch {
+      this.setGeoStatus(`Clipboard unavailable. Coordinates: ${text}`, true);
+    }
   }
 
   dismissIntro() {
@@ -788,6 +1017,13 @@ class CityExplorer {
 
   applyLocalInstruction(query) {
     const normalized = query.toLowerCase().trim().replace(/[.!]$/, '');
+    if (normalized === 'open studio' || normalized === 'switch to studio') {
+      this.setProductMode('studio');
+      this.showCommandResult('Studio workspace opened', 'The camera and existing map tools are preserved. Import a dataset or capture loaded map data to begin.');
+      return true;
+    }
+    if (normalized === 'undo') { this.undoMapAction(); return true; }
+    if (normalized === 'redo' && this.productMode === 'studio') { this.studio?.redo(); return true; }
     if (/\b(?:slope|aspect|viewshed|elevation profile|elevation gain|roads above|roads below)\b/.test(normalized)) {
       this.showCommandResult('Terrain analysis is not available yet', 'Meridian can show relief, contours, and sampled point elevations. Slope, aspect, elevation profiles, and elevation-filtered roads require terrain analysis that this map service does not currently provide.');
       return true;
@@ -798,15 +1034,18 @@ class CityExplorer {
     }
     const mode = normalized.match(/^(?:show|switch to|open)(?: the)? (satellite|streets?|terrain)(?: (?:map|view|mode))?$/);
     if (mode) {
+      const before = this.captureMapAction();
       this.setWorkspaceView('explore');
       this.setMapMode(mode[1].startsWith('street') ? 'route' : mode[1]);
       if (mode[1] === 'terrain') this.setManualControlsOpen(true);
       this.refreshMapMetadata();
       this.showCommandResult(mode[1] === 'terrain' ? 'Topographic view / contours in meters' : mode[1] === 'satellite' ? 'Satellite imagery / plan view' : 'Streets / road network');
+      this.recordMapAction(query, before);
       return true;
     }
     const layer = normalized.match(/^(show|hide|enable|disable)(?: the)? (labels|buildings|roads|places|boundaries|contours|hillshade)$/) || normalized.match(/^(labels|buildings|roads|places|boundaries|contours|hillshade) (on|off)$/);
     if (layer) {
+      const before = this.captureMapAction();
       const name = layer[1] === 'show' || layer[1] === 'hide' || layer[1] === 'enable' || layer[1] === 'disable' ? layer[2] : layer[1];
       const enabled = ['show', 'enable', 'on'].includes(layer[1]) || layer[2] === 'on';
       if (['contours', 'hillshade'].includes(name) && this.mapMode !== 'terrain') {
@@ -815,18 +1054,22 @@ class CityExplorer {
       }
       this.toggleMapLayer(name, enabled);
       this.showCommandResult(`${readable(name)} ${enabled ? 'on' : 'off'}`);
+      this.recordMapAction(query, before);
       return true;
     }
     if (/^(?:show|enable|turn on) 3d$|^3d on$/.test(normalized) || /^(?:hide|disable|turn off) 3d$|^3d off$/.test(normalized)) {
+      const before = this.captureMapAction();
       const enabled = /^(?:show|enable|turn on)|on$/.test(normalized);
       this.setTerrainView(enabled);
       this.showCommandResult(enabled ? '3D relief enabled' : 'Plan view / 3D relief off');
+      this.recordMapAction(query, before);
       return true;
     }
     return false;
   }
 
   toggleMapLayer(name, enabled = !this.layerPreferences?.[name]) {
+    if (this.markManualChange()) return;
     this.layerPreferences = { labels: true, buildings: true, roads: true, places: true, boundaries: true, contours: true, hillshade: true, ...this.layerPreferences };
     if (!Object.hasOwn(this.layerPreferences, name)) return;
     this.layerPreferences[name] = enabled;
@@ -838,11 +1081,12 @@ class CityExplorer {
       this.map.setLayoutProperty(layer.id, 'visibility', enabled && inMode ? 'visible' : 'none');
     }
     this.applyMapMode();
+    this.saveExploreState();
   }
 
   layerMatchesPreference(layer, name) {
     const id = layer.id.toLowerCase();
-    if (/^(?:geo-|local-search-result|local-city-focus)/.test(id)) return false;
+    if (/^(?:geo-|studio-|local-search-result|local-city-focus)/.test(id)) return false;
     return name === 'labels' ? layer.type === 'symbol'
       : name === 'buildings' ? /building|local-selection|local-hover/.test(id)
       : name === 'roads' ? /road|highway|bridge|tunnel|transportation/.test(id)
@@ -863,7 +1107,10 @@ class CityExplorer {
     for (const layer of this.map.getStyle()?.layers || []) {
       if (Object.entries(preferences).some(([name, enabled]) => !enabled && this.layerMatchesPreference(layer, name))) this.map.setLayoutProperty(layer.id, 'visibility', 'none');
     }
-    if (this.map.getLayer('local-contours')) this.map.setPaintProperty('local-contours', 'line-opacity', this.contourStrength ?? 0.55);
+    if (this.map.getLayer('local-contours')) {
+      this.map.setPaintProperty('local-contours', 'line-opacity-transition', { duration: motionDuration(200) });
+      this.map.setPaintProperty('local-contours', 'line-opacity', this.contourStrength ?? 0.55);
+    }
   }
 
   setAgentActivity(activity) {
@@ -877,6 +1124,8 @@ class CityExplorer {
     el['agent-request'].textContent = this.agentActivity.request;
     el['agent-tool'].textContent = this.agentActivity.tool;
     const active = this.agentSubmitting || Boolean(this.agentRunId);
+    if (el['agent-task-chip']) el['agent-task-chip'].hidden = !active;
+    if (el['agent-task-label']) el['agent-task-label'].textContent = this.agentActivity.tool === 'No active tool' ? this.agentActivity.request : this.agentActivity.tool;
     const activityPanel = document.getElementById('agent-hud');
     if (active && activityPanel) activityPanel.open = true;
     const feedback = document.getElementById('agent-feedback');
@@ -892,6 +1141,7 @@ class CityExplorer {
     document.querySelector('.floating-search').setAttribute('aria-busy', String(active));
     this.setLoading(Boolean(this.searchLoading));
     this.updateSearchDiscovery();
+    this.studio?.setAgentBusy(active);
   }
 
   connectAgentSocket() {
@@ -974,17 +1224,22 @@ class CityExplorer {
       return;
     }
     if (event.type === 'agent.map') {
-      this.applyAgentMapUpdate(event.update);
+      this.agentDidMutate = true;
+      this.applyingAgentMap = true;
+      try { this.applyAgentMapUpdate(event.update); }
+      finally { this.applyingAgentMap = false; }
       this.setAgentActivity({ request: 'Map updated', tool: 'Map changes applied' });
       return;
     }
     if (event.type === 'agent.question') {
+      this.settleAgentAction(event);
       this.finishAgentRun();
       this.showAgentQuestion(event.question, event.choices);
       this.setAgentActivity({ request: 'Waiting for your choice', tool: 'Clarification requested' });
       return;
     }
     if (event.type === 'agent.completed') {
+      this.settleAgentAction(event);
       this.finishAgentRun();
       const message = event.message || 'Your map is ready.';
       const summary = this.agentResultSummary || String(message).replace(/[#*_`]/g, '').split('\n').find((line) => line.trim())?.slice(0, 180) || 'Map updated';
@@ -993,11 +1248,13 @@ class CityExplorer {
       return;
     }
     if (event.type === 'agent.failed') {
+      this.settleAgentAction(event);
       this.finishAgentRun();
       this.setAgentActivity({ request: String(event.error || 'Map request failed').slice(0, 160), tool: 'Failed' });
       return;
     }
     if (event.type === 'agent.cancelled') {
+      this.settleAgentAction(event);
       this.finishAgentRun();
       this.setAgentActivity({ request: 'Request cancelled', tool: 'Cancelled' });
     }
@@ -1014,6 +1271,7 @@ class CityExplorer {
     this.agentRunId = '';
     this.agentPostSerial = 0;
     this.renderAgentActivity();
+    this.updateActionChip();
   }
 
   async submitAgentRequest(event) {
@@ -1024,6 +1282,7 @@ class CityExplorer {
   }
 
   async startAgentRequest(message) {
+    if (this.undoing) return this.setSearchStatus('Wait for the pending undo before starting another map operation.', true);
     if (this.agentSubmitting || this.agentRunId) return;
     if (!this.agentSocketReady) {
       this.agentPanelDismissed = false;
@@ -1035,6 +1294,10 @@ class CityExplorer {
     this.agentQuestionOpen = false;
     this.elements['agent-question'].classList.add('is-hidden');
     this.agentSubmitting = true;
+    this.agentSnapshot = this.captureMapAction();
+    this.agentDidMutate = false;
+    this.agentLocalConflict = false;
+    this.agentUserCamera = false;
     this.agentLastMessage = message;
     this.agentResultSummary = '';
     this.agentPanelDismissed = false;
@@ -1139,6 +1402,7 @@ class CityExplorer {
       routeStops: this.routePlan().filter((stop) => stop.place).slice(0, 12).map((stop) => point(stop.place)).filter(Boolean),
       pins: this.geo.pins.slice(0, 20).map((pin) => point(pin)).filter(Boolean),
       areas: this.geo.areas.slice(0, 8).map((area) => ({ id: String(area.id || '').slice(0, 80), label: String(area.label || '').slice(0, 160), areaSquareMeters: numeric(area.summary?.areaSquareMeters), bounds: areaBounds(area) })).filter((area) => area.bounds),
+      ...(this.productMode === 'studio' ? this.studio?.agentContext() : {}),
     };
   }
 
@@ -1258,18 +1522,28 @@ class CityExplorer {
     if (Array.isArray(view.bounds) && view.bounds.length === 4 && view.bounds.every((value) => numeric(value) !== null)) {
       const [west, south, east, north] = view.bounds.map(Number);
       if (west >= -180 && east <= 180 && south >= -90 && north <= 90 && west < east && south < north) {
-        this.map.fitBounds([[west, south], [east, north]], { padding: 90, maxZoom: 16, duration: 800 });
+        this.map.fitBounds([[west, south], [east, north]], { padding: 90, maxZoom: 16, duration: motionDuration(450) });
         return;
       }
     }
     if (Array.isArray(view.center) && view.center.length >= 2 && numeric(view.center[0]) !== null && numeric(view.center[1]) !== null) {
       const zoom = numeric(view.zoom);
-      this.map.flyTo({ center: [Number(view.center[0]), Number(view.center[1])], zoom: zoom === null ? Math.max(12, this.map.getZoom()) : Math.max(1, Math.min(20, zoom)), duration: 700 });
+      this.map.flyTo({ center: [Number(view.center[0]), Number(view.center[1])], zoom: zoom === null ? Math.max(12, this.map.getZoom()) : Math.max(1, Math.min(20, zoom)), duration: motionDuration(450) });
     }
   }
 
   applyAgentMapUpdate(update) {
     if (!update || typeof update !== 'object') return;
+    if (update.studio) {
+      try {
+        this.studio?.applyOperation(update.studio, { fromAgent: true });
+        this.agentResultSummary = 'Studio updated from the loaded dataset';
+      } catch (error) {
+        this.agentResultSummary = `Studio operation was not applied: ${error.message}`;
+        this.setGeoStatus(this.agentResultSummary, true);
+      }
+      return;
+    }
     if (update.clear === true) {
       this.clearWorkspaceLocal(false);
       this.setGeoStatus('The map agent cleared the workspace.');
@@ -1294,6 +1568,7 @@ class CityExplorer {
     this.renderWorkspace();
     this.renderGeography();
     this.renderSearchResults();
+    if (this.productMode === 'studio') this.studio?.captureAgentArtifacts(update);
     this.updateIntroCard();
     this.applyAgentView(update.view);
     const route = this.geo.route;
@@ -1322,6 +1597,7 @@ class CityExplorer {
       this.map.getSource(FOCUS_SOURCE)?.setData(this.selected ? this.focusFeature(this.selected) : EMPTY_COLLECTION);
       this.renderGeography();
       this.renderSearchResults();
+      this.studio?.renderMap();
       this.refreshMapMetadata();
       if (this.map.getLayer(PREVIEW_LAYER) && !this.previewBuildingEventsBound) {
         this.map.on('click', PREVIEW_LAYER, (event) => this.showBuilding(event));
@@ -1343,6 +1619,10 @@ class CityExplorer {
     this.map.on('mouseenter', 'local-search-result', () => { this.map.getCanvas().style.cursor = 'pointer'; });
     this.map.on('mouseleave', 'local-search-result', () => { this.map.getCanvas().style.cursor = ''; });
     this.map.on('movestart', (event) => {
+      document.documentElement.dataset.mapMoving = 'true';
+      if (event.originalEvent) this.locationRevision = (this.locationRevision || 0) + 1;
+      if (event.originalEvent) this.cameraInteractionRevision = (this.cameraInteractionRevision || 0) + 1;
+      if (event.originalEvent && (this.agentSubmitting || this.agentRunId)) this.agentUserCamera = true;
       if (event.originalEvent) this.dismissIntro();
       this.elevationController?.abort();
       this.imageryMetadataController?.abort();
@@ -1352,10 +1632,15 @@ class CityExplorer {
       if (this.selected && this.map.getZoom() >= 13) this.setPreviewVisible(true);
     });
     this.map.on('moveend', () => {
+      document.documentElement.dataset.mapMoving = 'false';
       this.updateSatelliteImagery();
       this.updateDashboard();
       this.refreshMapMetadata();
+      this.saveExploreState();
       if (this.selected && this.map.getZoom() >= 13) this.worker.postMessage({ type: 'append', tiles: visibleTiles(this.map) });
+    });
+    this.map.on('move', () => {
+      if (this.regionalImageryActive) this.updateSatelliteImagery();
     });
     this.map.on('error', (event) => {
       const source = event.sourceId || event.error?.sourceId;
@@ -1376,6 +1661,7 @@ class CityExplorer {
       this.operate('reset');
     });
     this.map.on('click', (event) => {
+      if (this.studio?.handleMapClick(event)) return;
       if (this.viewMode || (!this.pinMode && (this.mapMode !== 'terrain' || this.workspaceView !== 'explore'))) return;
       const interactiveLayers = [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred', 'local-poi-marker', 'local-search-result', 'geo-pin', 'geo-route-stop', 'geo-area-fill']
         .filter((layer) => this.map.getLayer(layer));
@@ -1402,12 +1688,12 @@ class CityExplorer {
       type: 'raster', tiles: [IMAGERY_TILE_URL], tileSize: 256, maxzoom: 19,
       attribution: 'Imagery &copy; <a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9">Esri, Vantor, Earthstar Geographics, GIS User Community</a>',
     });
-    this.map.addLayer({ id: 'local-satellite', type: 'raster', source: 'local-imagery', layout: { visibility: this.mapMode === 'satellite' ? 'visible' : 'none' }, paint: { 'raster-saturation': 0, 'raster-brightness-max': 1, 'raster-contrast': 0, 'raster-fade-duration': 0 } }, firstLayer);
+    this.map.addLayer({ id: 'local-satellite', type: 'raster', source: 'local-imagery', paint: { 'raster-opacity': this.mapMode === 'satellite' ? 1 : 0, 'raster-opacity-transition': { duration: motionDuration(400) }, 'raster-saturation': 0, 'raster-brightness-max': 1, 'raster-contrast': 0, 'raster-resampling': 'linear', 'raster-fade-duration': motionDuration(300) } }, firstLayer);
     this.map.addSource('local-regional-imagery', {
       type: 'raster', tiles: [REGIONAL_IMAGERY.tiles], tileSize: 256, maxzoom: 12, bounds: REGIONAL_IMAGERY.bounds,
       attribution: '<a href="https://www.earthdata.nasa.gov/centers/gibs" target="_blank" rel="noopener">NASA GIBS / HLS</a>; Contains modified Copernicus Sentinel data (2026)',
     });
-    this.map.addLayer({ id: 'local-regional-satellite', type: 'raster', source: 'local-regional-imagery', layout: { visibility: 'none' }, paint: { 'raster-saturation': 0, 'raster-brightness-max': 1, 'raster-contrast': 0, 'raster-resampling': 'linear', 'raster-fade-duration': 0 } }, firstLayer);
+    this.map.addLayer({ id: 'local-regional-satellite', type: 'raster', source: 'local-regional-imagery', layout: { visibility: 'none' }, paint: { 'raster-saturation': 0, 'raster-brightness-max': 1, 'raster-contrast': 0, 'raster-resampling': 'linear', 'raster-fade-duration': motionDuration(300) } }, firstLayer);
     this.map.addLayer({ id: 'local-hillshade', type: 'hillshade', source: TERRAIN_SOURCE, layout: { visibility: 'none' }, paint: { 'hillshade-exaggeration': 0.7, 'hillshade-illumination-direction': 315 } }, firstLine);
     if (!this.contourDem) return;
     this.map.addSource('local-contour-source', {
@@ -1436,6 +1722,7 @@ class CityExplorer {
     this.updateDashboard();
     this.applyLayerPreferences();
     this.refreshMapMetadata();
+    this.studio?.onMapAppearanceChange();
   }
 
   updateSatelliteImagery() {
@@ -1469,6 +1756,7 @@ class CityExplorer {
 
   setMapMode(mode) {
     if (!['satellite', 'route', 'terrain'].includes(mode)) return;
+    if (this.markManualChange()) return;
     if (mode === 'satellite' && this.imageryUnavailable) {
       this.imageryUnavailable = false;
       this.map?.getSource('local-imagery')?.setTiles([IMAGERY_TILE_URL]);
@@ -1478,11 +1766,24 @@ class CityExplorer {
       this.map?.getSource('local-regional-imagery')?.setTiles([REGIONAL_IMAGERY.tiles]);
     }
     this.mapMode = mode;
-    localStorage.setItem('mapMode', mode);
+    savePreference('mapMode', mode);
     document.getElementById('map-notice')?.classList.add('is-hidden');
     this.applyMapMode();
     if (mode === 'terrain' && !this.contourDem) this.showMapNotice('Contour library unavailable. Showing shaded terrain only.');
     this.terrainPointPopup?.remove();
+    this.saveExploreState();
+  }
+
+  setProductMode(mode) {
+    if (!['explore', 'studio'].includes(mode) || mode === this.productMode) return;
+    this.locationRevision = (this.locationRevision || 0) + 1;
+    if (this.productMode === 'explore') this.saveExploreState();
+    this.productMode = mode;
+    document.documentElement.dataset.productMode = mode;
+    document.querySelectorAll('button[data-product-mode]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.productMode === mode)));
+    this.setWorkspaceView('explore');
+    this.studio?.activate(mode === 'studio');
+    this.updateActionChip();
   }
 
   setWorkspaceView(view) {
@@ -1500,9 +1801,10 @@ class CityExplorer {
     const utility = document.querySelector('.utility-tools');
     if (utility) utility.open = view === 'workspace';
     if (view === 'routes') this.setMapMode('route');
-    if (view === 'explore') this.elements['search-input'].focus();
     document.getElementById('controls-label').textContent = view === 'routes' ? 'Plan a route' : view === 'workspace' ? 'Your workspace' : 'Map controls';
     document.documentElement.dataset.workspaceView = view;
+    document.documentElement.dataset.studioLegacy = String(this.productMode === 'studio' && view !== 'explore');
+    if (this.productMode === 'studio') this.studio?.setPane('left');
     this.updateDashboard();
   }
 
@@ -1551,10 +1853,14 @@ class CityExplorer {
     replay.hidden = !this.geo.route || !this.routeSearchEdges(this.geo.route).length;
     replay.textContent = this.geo.routeAnimation ? 'Stop replay' : 'Replay calculation';
     set('view-location', this.selected?.name || 'San Francisco Bay Area');
-    set('view-title', this.workspaceView === 'routes' ? 'Route Planner' : this.workspaceView === 'workspace' ? 'Your Workspace' : this.mapMode === 'terrain' ? 'Terrain Explorer' : 'City Explorer');
+    set('view-title', this.workspaceView === 'routes' ? 'Route Planner' : this.workspaceView === 'workspace' ? 'Saved Places' : this.productMode === 'studio' ? this.studio?.workspace.name || 'Studio workspace' : this.mapMode === 'terrain' ? 'Terrain Explorer' : 'City Explorer');
     set('view-mode-label', this.mapMode === 'satellite' ? 'Satellite imagery' : this.mapMode === 'route' ? 'Monochrome / Streets' : 'Topographic / Contours in meters');
     if (center) set('map-coordinates', `${Math.abs(center.lat).toFixed(4)} ${center.lat < 0 ? 'S' : 'N'} / ${Math.abs(center.lng).toFixed(4)} ${center.lng < 0 ? 'W' : 'E'}`);
-    if (center) set('context-coordinates', `${Math.abs(center.lat).toFixed(4)}\u00b0 ${center.lat < 0 ? 'S' : 'N'}\n${Math.abs(center.lng).toFixed(4)}\u00b0 ${center.lng < 0 ? 'W' : 'E'}`);
+    const inspected = this.inspectedCoordinate || center;
+    if (inspected) {
+      const lon = inspected.lng ?? inspected.lon;
+      set('context-coordinates', `${Math.abs(inspected.lat).toFixed(5)}\u00b0 ${inspected.lat < 0 ? 'S' : 'N'}\n${Math.abs(lon).toFixed(5)}\u00b0 ${lon < 0 ? 'W' : 'E'}${this.inspectedCoordinate ? '\nSelected point' : ''}`);
+    }
     const terrainControls = document.getElementById('terrain-controls');
     terrainControls.hidden = this.mapMode !== 'terrain' || this.workspaceView !== 'explore';
     if (this.map?.unproject && this.map?.getCanvas) {
@@ -1584,7 +1890,7 @@ class CityExplorer {
     const desktop = window.innerWidth > 700;
     const sidebarRight = document.querySelector('.manual-sidebar').getBoundingClientRect().right;
     const top = desktop ? (window.innerWidth <= 1280 ? 160 : 96) : 180;
-    this.map.fitBounds(bounds, { padding: desktop ? { top, left: sidebarRight + 24, right: 40, bottom: 260 } : { top, right: 24, bottom: Math.min(280, window.innerHeight * .35), left: 24 }, pitch: 0, maxZoom: 16, duration: 800 });
+    this.map.fitBounds(bounds, { padding: desktop ? { top, left: sidebarRight + 24, right: this.productMode === 'studio' ? 350 : 40, bottom: 260 } : { top, right: 24, bottom: Math.min(280, window.innerHeight * .35), left: 24 }, pitch: 0, maxZoom: 16, duration: motionDuration(450) });
   }
 
   addTerrainSource() {
@@ -1614,17 +1920,20 @@ class CityExplorer {
     button?.setAttribute('aria-label', this.terrainEnabled ? 'Disable 3D terrain view' : 'Enable 3D terrain view');
   }
 
-  setTerrainView(enabled, duration = 500) {
+  setTerrainView(enabled, duration = 420) {
+    if (this.markManualChange()) return;
     this.terrainEnabled = enabled;
     this.applyTerrain();
-    this.map.easeTo({ pitch: this.terrainEnabled ? 60 : 0, duration });
+    this.studio?.onMapAppearanceChange();
+    this.map.easeTo({ pitch: this.terrainEnabled ? 60 : 0, duration: motionDuration(duration) });
+    this.saveExploreState();
   }
 
   setTheme(theme) {
     this.theme = theme === 'light' ? 'light' : 'dark';
     document.documentElement.dataset.theme = this.theme;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', this.theme === 'dark' ? '#181b1a' : '#ecece8');
-    localStorage.setItem('theme', this.theme);
+    savePreference('theme', this.theme);
     const toggle = document.getElementById('theme-toggle');
     toggle?.setAttribute('aria-label', `Switch to ${this.theme === 'dark' ? 'light' : 'dark'} mode`);
     toggle?.setAttribute('aria-pressed', String(this.theme === 'light'));
@@ -1632,9 +1941,36 @@ class CityExplorer {
   }
 
   async bootstrap() {
-    // Restore additions without allowing an old city to override the user's current map anchor.
+    const revision = this.locationRevision || 0;
     await this.loadWorkspace(false);
-    await this.initializeLocation();
+    if (this.productMode !== 'explore' || (this.locationRevision || 0) !== revision) {
+      this.workspaceReady = true;
+      return;
+    }
+    let saved;
+    try { saved = JSON.parse(preference('meridian.explore.v1', 'null')); } catch { /* Invalid saved state is ignored. */ }
+    const camera = saved?.camera;
+    const validCamera = Array.isArray(camera?.center) && camera.center.length === 2 && camera.center.every(Number.isFinite) &&
+      Math.abs(camera.center[0]) <= 180 && Math.abs(camera.center[1]) <= 85.05113 && Number.isFinite(camera.zoom) && camera.zoom >= 0 && camera.zoom <= 22;
+    if (this.initializeLocationFromUrl()) {
+      // Explicit shared locations take priority over a saved camera.
+    } else if (validCamera) {
+      const selected = this.agentLocation(saved.selected);
+      if (selected) this.chooseLocation(selected, { immediate: true });
+      if (['satellite', 'route', 'terrain'].includes(saved.mapMode)) this.mapMode = saved.mapMode;
+      for (const name of Object.keys(this.layerPreferences)) if (typeof saved.layerPreferences?.[name] === 'boolean') this.layerPreferences[name] = saved.layerPreferences[name];
+      this.contourStrength = Number.isFinite(saved.contourStrength) ? Math.max(.1, Math.min(1, saved.contourStrength)) : .55;
+      this.elements['contour-strength'].value = String(Math.round(this.contourStrength * 100));
+      this.terrainEnabled = saved.terrainEnabled === true;
+      if (Array.isArray(saved.routeStops)) this.geo.routeStops = saved.routeStops.slice(0, MAX_ROUTE_STOPS).map((stop) => ({ query: String(stop.query || '').slice(0, 160), place: this.agentLocation(stop.place), suggestions: [] }));
+      this.map.jumpTo({ center: camera.center, zoom: camera.zoom, bearing: Number.isFinite(camera.bearing) ? camera.bearing : 0, pitch: Number.isFinite(camera.pitch) ? Math.max(0, Math.min(78, camera.pitch)) : 0 });
+      this.applyTerrain();
+      this.applyMapMode();
+      this.renderWorkspace();
+      this.renderGeography();
+    } else await this.initializeLocation();
+    this.workspaceReady = true;
+    this.saveExploreState();
   }
 
   async detectCountry() {
@@ -1651,12 +1987,15 @@ class CityExplorer {
 
   async initializeLocation() {
     if (this.initializeLocationFromUrl()) return;
+    const revision = this.locationRevision || 0;
     this.setGeoStatus('Opening your approximate Geo-IP location...');
     try {
       const detected = await ipLocation();
+      if (this.productMode !== 'explore' || (this.locationRevision || 0) !== revision) return;
       this.applyIpLocation(detected, { immediate: true });
       this.setGeoStatus('');
     } catch {
+      if (this.productMode !== 'explore' || (this.locationRevision || 0) !== revision) return;
       this.detectCountry();
       this.setGeoStatus('Geo-IP location is unavailable. Search for a place to set the map anchor.', true);
     }
@@ -1768,6 +2107,7 @@ class CityExplorer {
       this.renderSuggestions([]);
       this.setSearchStatus('');
       this.setLoading(false);
+      if (this.studio?.handleInstruction(query)) return;
       if (this.applyLocalInstruction(query)) return;
       return this.startAgentRequest(query);
     }
@@ -1841,6 +2181,8 @@ class CityExplorer {
   }
 
   chooseLocation(location, { source = 'selected', immediate = false } = {}) {
+    if (this.markManualChange()) return;
+    this.locationRevision = (this.locationRevision || 0) + 1;
     this.searchController?.abort();
     this.suggestionController?.abort();
     clearTimeout(this.suggestionTimer);
@@ -1859,6 +2201,8 @@ class CityExplorer {
     this.setStream({ loaded: 0, total: 9, buildings: 0, inferred: 0, active: true, preview: true, source: '', degraded: false });
     this.resetMapForLocation({ immediate, overview: source === 'geoip' });
     this.updateDashboard();
+    this.saveExploreState();
+    this.persistWorkspaceState();
   }
 
   resetMapForLocation({ immediate = false, overview = false } = {}) {
@@ -1872,7 +2216,7 @@ class CityExplorer {
     this.applyTerrain();
     const camera = { center: [location.lon, location.lat], zoom: overview ? 11 : this.mapMode === 'terrain' ? 12 : 14, pitch: this.terrainEnabled ? 45 : 0, bearing: overview || this.mapMode === 'route' ? 0 : -12 };
     if (immediate) this.map.jumpTo(camera);
-    else this.map.flyTo({ ...camera, duration: 1800 });
+    else this.map.flyTo({ ...camera, duration: motionDuration(600) });
     this.worker.postMessage({ type: 'reset', apiBaseUrl: API_BASE_URL, context: { region: location.id, lat: location.lat, lon: location.lon }, tiles: spiralTiles(location.lon, location.lat, 1) });
   }
 
@@ -2217,6 +2561,15 @@ class CityExplorer {
     const popup = new window.maplibregl.Popup({ closeButton: true, className: 'mono-popup', offset: 12, maxWidth: '300px' })
       .setLngLat([point.lon, point.lat]).setDOMContent(content).addTo(map);
     this.terrainPointPopup = popup;
+    this.inspectedCoordinate = { lon: point.lon, lat: point.lat };
+    this.terrainPointMarker?.remove();
+    if (window.maplibregl.Marker) {
+      const marker = document.createElement('span');
+      marker.className = 'inspection-marker';
+      marker.setAttribute('aria-hidden', 'true');
+      this.terrainPointMarker = new window.maplibregl.Marker({ element: marker }).setLngLat([point.lon, point.lat]).addTo(map);
+    }
+    this.updateDashboard();
     document.documentElement.dataset.terrainPoint = 'true';
     const active = () => this.terrainPointSequence === sequence && this.terrainPointPopup === popup &&
       this.map === map && !this.viewMode && this.workspaceView === 'explore' && this.mapMode === 'terrain';
@@ -2228,6 +2581,10 @@ class CityExplorer {
       controller.abort();
       if (this.terrainPointController === controller) this.terrainPointController = null;
       document.documentElement.dataset.terrainPoint = 'false';
+      this.terrainPointMarker?.remove();
+      this.terrainPointMarker = null;
+      this.inspectedCoordinate = null;
+      this.updateDashboard();
     });
     action.addEventListener('click', () => {
       if (!active()) return;
@@ -2318,7 +2675,7 @@ class CityExplorer {
   }
 
   showBuilding(event) {
-    if (this.viewMode) return;
+    if (this.viewMode || this.studio?.tool) return;
     const feature = event.features?.[0];
     if (!feature) return;
     const properties = feature.properties || {};
@@ -2378,7 +2735,7 @@ class CityExplorer {
   }
 
   showPoi(event) {
-    if (this.viewMode) return;
+    if (this.viewMode || this.studio?.tool) return;
     const feature = event.features?.[0];
     if (!feature) return;
     const content = document.createElement('div');
@@ -2410,6 +2767,7 @@ class CityExplorer {
   }
 
   selectSearchResult(event) {
+    if (this.studio?.tool) return;
     const feature = event.features?.[0];
     const coordinates = feature?.geometry?.coordinates;
     if (!feature || !Array.isArray(coordinates) || coordinates.length < 2) return;
@@ -2597,6 +2955,8 @@ class CityExplorer {
       row.append(kind, name, summary, focus, recompute, remove);
       areaList.append(row);
     }
+    this.saveExploreState();
+    this.persistWorkspaceState();
   }
 
   renderRoutePlan() {
@@ -2710,6 +3070,7 @@ class CityExplorer {
   }
 
   setRouteStopQuery(index, query) {
+    if (this.markManualChange()) return;
     const stop = this.routePlan()[index];
     if (!stop) return;
     stop.query = query;
@@ -2805,6 +3166,7 @@ class CityExplorer {
   }
 
   chooseRouteStop(index, place) {
+    if (this.markManualChange()) return;
     if (this.workspaceView !== 'routes') this.setWorkspaceView('routes');
     const plan = this.routePlan();
     const targetIndex = plan[index] ? index : plan.findIndex((candidate) => !candidate.place);
@@ -2821,7 +3183,7 @@ class CityExplorer {
     this.renderWorkspace();
     this.renderGeography();
     this.updateIntroCard();
-    this.map.flyTo({ center: [place.lon, place.lat], zoom: Math.max(14, this.map.getZoom()), duration: 600 });
+    this.map.flyTo({ center: [place.lon, place.lat], zoom: Math.max(14, this.map.getZoom()), duration: motionDuration(450) });
     this.setGeoStatus(`Added ${place.name} to stop ${this.routeStopLabel(targetIndex)}.`);
   }
 
@@ -2858,6 +3220,7 @@ class CityExplorer {
   }
 
   async addPin(pin) {
+    if (this.markManualChange()) throw new Error('A workspace undo is still in progress.');
     const response = await postJson('/api/pins', pin);
     this.geo.pins.push(response.pin);
     this.renderWorkspace();
@@ -2866,6 +3229,7 @@ class CityExplorer {
   }
 
   async removePin(pinId) {
+    if (this.markManualChange()) return;
     try {
       await deleteRequest(`/api/pins/${encodeURIComponent(pinId)}`);
       this.geo.pins = this.geo.pins.filter((pin) => pin.id !== pinId);
@@ -2889,21 +3253,30 @@ class CityExplorer {
     }
     this.setGeoStatus('Requesting browser location...');
     navigator.geolocation.getCurrentPosition(async ({ coords }) => {
+      this.geo.context = { lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy, source: 'browser', countryCode: this.country.countryCode || '' };
+      this.map.flyTo({ center: [coords.longitude, coords.latitude], zoom: Math.max(14, this.map.getZoom()), duration: motionDuration(450) });
+      this.locationMarker?.remove();
+      if (window.maplibregl?.Marker) {
+        const marker = document.createElement('span');
+        marker.className = 'inspection-marker';
+        marker.setAttribute('aria-hidden', 'true');
+        this.locationMarker = new window.maplibregl.Marker({ element: marker }).setLngLat([coords.longitude, coords.latitude]).addTo(this.map);
+      }
       try {
         const context = await jsonRequest(`/api/context?lat=${coords.latitude}&lon=${coords.longitude}`);
         this.country = context.country || this.country;
         this.geo.context = { lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy, source: 'browser', countryCode: this.country.countryCode || '' };
         this.renderRegion();
-        this.map.flyTo({ center: [coords.longitude, coords.latitude], zoom: Math.max(14, this.map.getZoom()), duration: 800 });
         if (this.workspaceView === 'routes') this.chooseRouteStop(this.activeRouteStopIndex, { id: `browser:${coords.latitude.toFixed(6)},${coords.longitude.toFixed(6)}`, name: 'My location', lat: coords.latitude, lon: coords.longitude, countryCode: this.country.countryCode || '' });
         this.setGeoStatus(`${this.workspaceView === 'routes' ? 'Added your location to the route plan' : 'Centered on your location'}${coords.accuracy ? ` (about ${Math.round(coords.accuracy)} m accuracy)` : ''}.`);
       } catch (error) {
-        this.setGeoStatus(error.message, true);
+        this.setGeoStatus('Centered on your location. Place details are unavailable; map navigation remains active.', true);
       }
-    }, () => this.setGeoStatus('Browser location permission was not granted.', true), { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 });
+    }, (error) => this.setGeoStatus(error.code === 1 ? 'Location permission was not granted. Allow it in browser settings or search for a place instead.' : 'Your location could not be determined. Try again or search for a place.', true), { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 });
   }
 
   async createPinArea() {
+    if (this.markManualChange()) return;
     const payload = this.pinAreaPayload();
     if (!payload) return;
     try {
@@ -2937,6 +3310,7 @@ class CityExplorer {
   }
 
   async recomputeArea(area) {
+    if (this.markManualChange()) return;
     const payload = this.pinAreaPayload(area.label);
     if (!payload) return;
     try {
@@ -2954,10 +3328,11 @@ class CityExplorer {
     const coordinates = geometryPositions(area.geometry).filter((position) => Array.isArray(position) && position.length >= 2);
     if (!coordinates.length) return;
     const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
-    this.map.fitBounds(bounds, { padding: 90, maxZoom: 16, duration: 600 });
+    this.map.fitBounds(bounds, { padding: 90, maxZoom: 16, duration: motionDuration(450) });
   }
 
   async removeArea(areaId) {
+    if (this.markManualChange()) return;
     try {
       await deleteRequest(`/api/areas/${encodeURIComponent(areaId)}`);
       this.geo.areas = this.geo.areas.filter((area) => area.id !== areaId);
@@ -2970,6 +3345,7 @@ class CityExplorer {
   }
 
   addRouteStop() {
+    if (this.markManualChange()) return;
     const plan = this.routePlan();
     if (plan.length >= MAX_ROUTE_STOPS) {
       this.setGeoStatus(`A route plan can contain up to ${MAX_ROUTE_STOPS} stops.`, true);
@@ -2984,6 +3360,7 @@ class CityExplorer {
   }
 
   moveRouteStop(index, direction) {
+    if (this.markManualChange()) return;
     const plan = this.routePlan();
     const nextIndex = index + direction;
     if (nextIndex < 0 || nextIndex >= plan.length) return;
@@ -2995,6 +3372,7 @@ class CityExplorer {
   }
 
   removeRouteStop(index) {
+    if (this.markManualChange()) return;
     const plan = this.routePlan();
     if (plan.length <= 2) plan[index] = { query: '', place: null, suggestions: [] };
     else plan.splice(index, 1);
@@ -3006,6 +3384,7 @@ class CityExplorer {
 
   async findRoute(event) {
     event.preventDefault();
+    if (this.markManualChange()) return;
     if (this.routeSubmitting) return;
     const plan = this.routePlan();
     const stops = plan.map((stop) => stop.place);
@@ -3049,6 +3428,7 @@ class CityExplorer {
   }
 
   async clearAdditions(confirmed = false) {
+    if (this.markManualChange()) return;
     if (!confirmed) {
       const dialog = document.getElementById('clear-workspace-dialog');
       dialog.returnValue = '';
@@ -3072,7 +3452,13 @@ class CityExplorer {
       this.setViewMode(false);
       return;
     }
-    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable) return;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.tagName?.toLowerCase() === 'select' || target?.isContentEditable) return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+      event.preventDefault();
+      if (event.shiftKey && this.productMode === 'studio') this.studio?.redo();
+      else this.undoMapAction();
+      return;
+    }
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === 'Escape' && this.agentQuestionOpen) {
       event.preventDefault();
@@ -3086,6 +3472,7 @@ class CityExplorer {
       return;
     }
     if (event.key === 'Escape') {
+      if (this.studio?.handleEscape()) { event.preventDefault(); return; }
       if (this.terrainPointPopup) this.terrainPointPopup.remove();
       else if (document.getElementById('info-drawer-content').hidden === false) this.setInfoDrawerOpen(false);
       else if (this.agentRunId || this.agentSubmitting) this.cancelAgentRequest();
@@ -3118,16 +3505,21 @@ class CityExplorer {
 
   operate(action) {
     if (!this.map) return;
-    if (action === 'in') this.map.zoomIn({ duration: 250 });
-    if (action === 'out') this.map.zoomOut({ duration: 250 });
+    if (['in', 'out', 'reset'].includes(action)) this.cameraInteractionRevision = (this.cameraInteractionRevision || 0) + 1;
+    if (action === 'in') this.map.zoomIn({ duration: motionDuration(250) });
+    if (action === 'out') this.map.zoomOut({ duration: motionDuration(250) });
     if (action === 'pitch') this.setTerrainView(!this.terrainEnabled);
-    if (action === 'reset' && this.selected) {
-      this.map.flyTo({ center: [this.selected.lon, this.selected.lat], zoom: this.mapMode === 'terrain' ? 12 : 14, pitch: this.terrainEnabled ? 45 : 0, bearing: this.mapMode === 'route' ? 0 : -12 });
-    }
+    if (action === 'reset') this.map.easeTo({ bearing: 0, duration: motionDuration(280) });
   }
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
+  if (!window.maplibregl?.Map) {
+    const notice = document.getElementById('map-notice');
+    notice.textContent = 'The map library could not load. Check your connection and reload Meridian.';
+    notice.classList.remove('is-hidden');
+    return;
+  }
   if ('serviceWorker' in navigator) {
     try {
       await Promise.race([

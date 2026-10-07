@@ -481,6 +481,9 @@ class MapAgentToolTests(unittest.TestCase):
             clear_workspace=self.clear_workspace,
             add_pin=self.add_pin,
             save_workspace_state=save_state,
+            capture_workspace=mock.Mock(),
+            mutate_workspace=mock.Mock(),
+            restore_workspace=mock.Mock(),
         ))
 
     def clear_workspace(self) -> None:
@@ -597,16 +600,20 @@ class MapAgentServiceTests(unittest.TestCase):
             return {"content": "The map is clear."}
 
     def test_agent_service_emits_validated_map_update_after_tool_loop(self) -> None:
-        workspace = {"pins": [], "areas": [], "state": {}}
+        cache = server.Cache(Path(":memory:"))
+        self.addCleanup(cache.close)
         tools = AgentTools(AgentDependencies(
             suggest_cities=lambda query, country: [],
             resolve_city=lambda query, country: None,
             search_places=lambda query, country, lat, lon: {"results": [], "source": "openstreetmap", "lookupStage": "local-osm-cache"},
             plan_route=lambda waypoints, profile: {},
-            workspace_snapshot=lambda: workspace,
-            clear_workspace=lambda: workspace.update({"pins": [], "areas": [], "state": {}}),
+            workspace_snapshot=cache.workspace_snapshot,
+            clear_workspace=cache.clear_workspace,
             add_pin=lambda name, lat, lon, place_id, source: {},
             save_workspace_state=lambda state: state,
+            capture_workspace=cache.capture_workspace,
+            mutate_workspace=cache.mutate_workspace,
+            restore_workspace=cache.restore_workspace,
         ))
         hub = self.Hub()
         service = MapAgentService(self.Client(), tools, hub)
@@ -632,16 +639,20 @@ class MapAgentServiceTests(unittest.TestCase):
                     return {"content": "", "tool_calls": [{"id": "city", "function": {"name": "find_city", "arguments": '{"query":"Delhi"}'}}]}
                 return {"content": "Delhi is ready."}
 
-        workspace = {"pins": [], "areas": [], "state": {}}
+        cache = server.Cache(Path(":memory:"))
+        self.addCleanup(cache.close)
         tools = AgentTools(AgentDependencies(
             suggest_cities=lambda query, country: [city],
             resolve_city=lambda query, country: city,
             search_places=lambda query, country, lat, lon: {"results": [], "source": "openstreetmap", "lookupStage": "local-osm-cache"},
             plan_route=lambda waypoints, profile: {},
-            workspace_snapshot=lambda: workspace,
-            clear_workspace=lambda: workspace.update({"pins": [], "areas": [], "state": {}}),
+            workspace_snapshot=cache.workspace_snapshot,
+            clear_workspace=cache.clear_workspace,
             add_pin=lambda name, lat, lon, place_id, source: {},
             save_workspace_state=lambda state: state,
+            capture_workspace=cache.capture_workspace,
+            mutate_workspace=cache.mutate_workspace,
+            restore_workspace=cache.restore_workspace,
         ))
         hub = self.Hub()
         service = MapAgentService(Client(), tools, hub)
