@@ -217,6 +217,45 @@ test('building layers and highlights are visible in Streets and Terrain, never S
   }
 });
 
+test('building cards lead with height, retain expandable provenance, and reject missing floor ranges', () => {
+  const { app, window } = setup();
+  app.map = { setFilter() {} };
+  window.maplibregl = { Popup: class {
+    constructor(options) { this.options = options; }
+    setLngLat() { return this; }
+    setDOMContent(content) { this.content = content; return this; }
+    addTo() { return this; }
+    on(name, callback) { this.close = callback; }
+    remove() { this.removed = true; this.close(); }
+  } };
+  for (const [range, expected] of [
+    [undefined, ''], [null, ''], [[], ''], [[3], ''], [[null, 5], ''], [[4, 2], ''],
+    [['', 5], ''], [[false, 5], ''], ['broken json', ''], ['{}', ''], ['[2,5]', '2-5 levels'], [[4, 4], '4 levels'], [[1, 1], '1 level'],
+  ]) {
+    const previous = app.buildingPopup;
+    app.showBuilding({ features: [{ properties: { render_height: 34, estimatedLevelRange: range } }], lngLat: { lat: 40.7, lng: -74 } });
+    const { content, options } = app.buildingPopup;
+    assert.equal(options.className, 'building-card');
+    assert.equal(content.children[0].textContent, 'Building');
+    assert.equal(content.children[1].textContent, 'OpenStreetMap preview');
+    assert.equal(content.children[2].children[0].textContent, '34 m');
+    const disclosure = content.querySelector('details');
+    assert(disclosure);
+    assert.equal(disclosure.getAttribute('open'), null);
+    const rows = disclosure.querySelector('dl').children;
+    const details = Object.fromEntries(rows.map(row => row.children.map(cell => cell.textContent)));
+    assert.equal(details['Estimated floors'] || '', expected);
+    assert.equal(details.Floors, undefined);
+    assert.equal(details['Map coordinate'], '40.700000, -74.000000');
+    assert.equal(JSON.stringify(details).includes('undefined'), false);
+    if (previous) assert.equal(previous.removed, true);
+  }
+  app.showBuilding({ features: [{ properties: { name: '<script>not markup</script>', levels: null } }], lngLat: { lat: 0, lng: 0 } });
+  assert.equal(app.buildingPopup.content.children[0].textContent, '<script>not markup</script>');
+  assert.equal(app.buildingPopup.content.children[0].children.length, 0);
+  assert.equal(app.buildingPopup.content.children[2].children[1].textContent, 'Height unavailable');
+});
+
 test('mode changes preserve preview loading state while restoring loaded building layers', () => {
   const { app } = setup();
   app.map = buildingMap();

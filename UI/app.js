@@ -1,7 +1,7 @@
 import { AGENT_SOCKET_URL, API_BASE_URL, apiPath } from './config.js';
 
 const TILE_ZOOM = 14;
-const ACCENT = '#ecad73';
+const ACCENT = '#d0dac5';
 const PREVIEW_LAYER = 'local-buildings-preview';
 const TERRAIN_SOURCE = 'local-terrain-dem';
 const TERRAIN_TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
@@ -28,9 +28,14 @@ function meters(value) {
 }
 
 function levelRange(value) {
+  // MapLibre serializes array-valued GeoJSON properties in rendered features.
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return ''; }
+  }
   const values = Array.isArray(value) ? value : [];
+  if (values.length !== 2 || values.some((entry) => entry === null || !['number', 'string'].includes(typeof entry) || String(entry).trim() === '')) return '';
   const [low, high] = values.map(numeric);
-  if (low === null || high === null) return '';
+  if (low === null || high === null || low <= 0 || high < low) return '';
   return low === high ? `${low} level${low === 1 ? '' : 's'}` : `${low}-${high} levels`;
 }
 
@@ -1480,11 +1485,13 @@ class CityExplorer {
     const content = document.createElement('div');
     content.className = 'building-popup';
     const title = document.createElement('strong');
+    title.className = 'building-title';
     const buildingType = String(properties.buildingType || properties.class || 'Building');
     title.textContent = properties.name || (buildingType === 'yes' || buildingType === 'unknown' ? 'Building' : readable(buildingType));
     const type = document.createElement('span');
-    type.className = 'popup-type';
-    type.textContent = readable(buildingType);
+    type.className = 'building-subtitle';
+    const dataSource = sourceName(properties.source) || (properties.render_height ? 'OpenStreetMap preview' : 'Open data');
+    type.textContent = properties.name && !['yes', 'unknown', 'building'].includes(buildingType.toLowerCase()) ? `${readable(buildingType)} / ${dataSource}` : dataSource;
     const details = document.createElement('dl');
     details.className = 'building-details';
     const addDetail = (label, value) => {
@@ -1499,22 +1506,30 @@ class CityExplorer {
     };
     const height = meters(properties.height ?? properties.render_height);
     const baseHeight = meters(properties.minHeight ?? properties.render_min_height);
-    addDetail('Height', height);
+    const metric = document.createElement('div');
+    metric.className = 'building-height';
+    const value = document.createElement('strong');
+    value.textContent = height || '--';
+    const label = document.createElement('span');
+    label.textContent = !height ? 'Height unavailable' : Number(properties.inferred) === 1 || String(properties.heightSource || '').startsWith('hbet-') ? 'Estimated height' : 'Height';
+    metric.append(value, label);
     addDetail('Base height', baseHeight);
-    addDetail('Floors', numeric(properties.levels)?.toLocaleString());
+    const floors = numeric(properties.levels);
+    addDetail('Floors', floors > 0 ? floors.toLocaleString() : '');
     addDetail('Estimated floors', levelRange(properties.estimatedLevelRange));
     addDetail('Height method', heightMethod(properties));
     addDetail('Height confidence', heightConfidence(properties));
     addDetail('Height adjustment', Number(properties.heightAdjustedToBase) === 1 ? 'Raised above source base height' : '');
     addDetail('Community', properties.community);
-    addDetail('Data source', sourceName(properties.source) || (properties.render_height ? 'OpenStreetMap preview' : 'Open data'));
     addDetail('Record ID', sourceId || properties.osm_id || properties.id);
     addDetail('Map coordinate', `${event.lngLat.lat.toFixed(6)}, ${event.lngLat.lng.toFixed(6)}`);
-    const source = document.createElement('span');
-    source.className = 'popup-meta';
-    source.textContent = 'AVAILABLE BUILDING DATA';
-    content.append(title, type, details, source);
-    const popup = new window.maplibregl.Popup({ closeButton: true, className: 'mono-popup', offset: 12, maxWidth: '320px' }).setLngLat(event.lngLat).setDOMContent(content).addTo(this.map);
+    const more = document.createElement('details');
+    more.className = 'building-more';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Building details';
+    more.append(summary, details);
+    content.append(title, type, metric, more);
+    const popup = new window.maplibregl.Popup({ closeButton: true, className: 'building-card', offset: 18, maxWidth: '320px' }).setLngLat(event.lngLat).setDOMContent(content).addTo(this.map);
     popup.on('close', () => { if (this.buildingPopup === popup) this.buildingPopup = null; });
     this.buildingPopup = popup;
   }

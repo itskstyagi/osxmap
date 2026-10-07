@@ -479,6 +479,10 @@ class Cache:
                     canonical_places.append(place)
         return canonical_places
 
+    def get_place(self, place_id: str, include_payload: bool = False) -> dict[str, Any] | None:
+        with self.lock:
+            return self._canonical_place(place_id, include_payload=include_payload)
+
     def search_places(self, normalized_query: str, limit: int | None = None, provider: str = "", country_code: str = "", include_payload: bool = False) -> list[dict[str, Any]]:
         """Return stored places whose normalized name contains the query substring."""
         pattern = f"%{normalized_query}%"
@@ -841,7 +845,7 @@ def resolve_location(query: str, country_code: str) -> dict[str, Any] | None:
     results = nominatim_search(query, country, 1)
     if not results:
         discovery = lookup_places(query, country_code, None, None)
-        results = [map_location(place, cached=discovery["stored"]) for place in discovery["results"]]
+        results = [map_location(CACHE.get_place(place["id"], include_payload=True) or place, cached=discovery["stored"]) for place in discovery["results"]]
         if not results:
             return None
     CACHE.put_geocode(key, results[0])
@@ -978,7 +982,7 @@ def saved_place_matches(query: str, country_code: str) -> list[dict[str, Any]]:
         return []
     country = country_param(country_code).upper() if len(parts) == 1 else ""
     matches = []
-    for place in CACHE.search_places(parts[0], limit=32, include_payload=True):
+    for place in CACHE.search_places(parts[0], include_payload=True):
         if country and place.get("countryCode") and place["countryCode"].upper() != country:
             continue
         payload = place.get("providerPayload") or {}
@@ -991,7 +995,7 @@ def saved_place_matches(query: str, country_code: str) -> list[dict[str, Any]]:
         normalize_query(place["name"]) != parts[0],
         bool(country) and place.get("countryCode", "").upper() != country,
         place.get("provider") != "openstreetmap",
-    ))[:8]
+    ))
 
 
 def map_location(place: dict[str, Any], cached: bool = False) -> dict[str, Any]:
@@ -1007,7 +1011,7 @@ def map_location(place: dict[str, Any], cached: bool = False) -> dict[str, Any]:
 def suggest_map_locations(query: str, country_code: str) -> list[dict[str, Any]]:
     # Saved landmarks must not be hidden by a previously cached empty city search.
     saved = saved_place_matches(query, country_code)
-    return [map_location(place, cached=True) for place in saved] if saved else suggest_locations(query, country_code)
+    return [map_location(place, cached=True) for place in saved[:8]] if saved else suggest_locations(query, country_code)
 
 
 PLACE_LOOKUP_POLICY_VERSION = "osm-first-v2"
@@ -1164,6 +1168,7 @@ def lookup_places(query: str, country_code: str, lat: float | None, lon: float |
     fallback_reason = "no-usable-osm-result"
     saved_serp = [place for place in saved_place_matches(query, country_code) if place.get("provider") == "serpapi-google-maps"]
     if saved_serp:
+        saved_serp = rank_places_by_context(saved_serp, country_code, lat, lon)[:8]
         CACHE.put_place_lookup(lookup_key, context, saved_serp)
         return place_discovery(saved_serp, "serpapi", "local-serp-cache", stored=True, fallback_reason=fallback_reason, serp_eligible=True)
     places = search_serp_places(query, lat, lon, country_code)

@@ -346,6 +346,15 @@ class MapLocationSearchTests(unittest.TestCase):
         city.assert_not_called()
         serp.assert_not_called()
 
+    def test_saved_landmarks_do_not_change_strict_agent_city_search(self) -> None:
+        self.cache.put_places([self.place])
+        with mock.patch.object(server, "nominatim_search", return_value=[]) as city, mock.patch.object(server, "search_serp_places") as serp:
+            result = server.resolve_agent_city("Darma Valley", "IN")
+
+        self.assertIsNone(result)
+        city.assert_called_once_with("Darma Valley", "in", 6)
+        serp.assert_not_called()
+
     def test_qualified_saved_search_uses_address_and_provider_country(self) -> None:
         self.cache.put_places([self.place])
         with mock.patch.object(server, "nominatim_search") as city:
@@ -359,6 +368,21 @@ class MapLocationSearchTests(unittest.TestCase):
         self.cache.put_places([{**self.place, "countryCode": "IN"}])
         self.assertEqual(server.saved_place_matches("Darma Valley", "GB"), [])
         self.assertEqual(len(server.saved_place_matches("Darma Valley", "IN")), 1)
+
+    def test_exact_saved_match_is_not_lost_behind_newer_substring_matches(self) -> None:
+        self.cache.put_places([self.place])
+        self.cache.put_places([
+            {**self.place, "id": f"serpapi-google-maps:other-{index}", "providerId": f"other-{index}",
+             "name": f"Darma Valley Lodge {index}", "countryCode": "GB", "lat": 51.0, "lon": float(index)}
+            for index in range(33)
+        ])
+        with mock.patch.object(server, "nominatim_search") as city:
+            result = server.resolve_location("Darma Valley", "IN")
+            suggestions = server.suggest_map_locations("Darma Valley", "IN")
+
+        self.assertEqual(result["id"], self.place["id"])
+        self.assertEqual(suggestions[0]["id"], self.place["id"])
+        city.assert_not_called()
 
     def test_full_search_falls_back_to_google_and_reuses_persisted_places(self) -> None:
         payload = {
@@ -378,6 +402,7 @@ class MapLocationSearchTests(unittest.TestCase):
 
         self.assertEqual(first["provider"], "serpapi-google-maps")
         self.assertFalse(first["cached"])
+        self.assertEqual(first["country"], "India")
         self.assertTrue(second["cached"])
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(suggestions[0]["id"], first["id"])
@@ -404,6 +429,19 @@ class MapLocationSearchTests(unittest.TestCase):
         self.assertEqual(discovery["results"][0]["id"], self.place["id"])
         category.assert_called_once()
         osm.assert_called_once()
+        google.assert_not_called()
+
+    def test_saved_google_results_are_ranked_by_context_before_limiting(self) -> None:
+        self.cache.put_places([
+            {**self.place, "id": f"serpapi-google-maps:other-{index}", "providerId": f"other-{index}",
+             "name": "Darma valley", "lat": 10.0, "lon": float(index)}
+            for index in range(9)
+        ] + [self.place])
+        with mock.patch.object(server, "search_osm_category_places", return_value=[]), mock.patch.object(server, "search_nominatim_places", return_value=[]), mock.patch.object(server, "search_serp_places") as google:
+            result = server.lookup_places("Darma Valley", "IN", self.place["lat"], self.place["lon"])
+
+        self.assertEqual(result["results"][0]["id"], self.place["id"])
+        self.assertEqual(len(result["results"]), 8)
         google.assert_not_called()
 
     def test_normal_city_search_and_cached_autocomplete_still_work(self) -> None:
