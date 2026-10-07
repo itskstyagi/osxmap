@@ -1,19 +1,23 @@
-const CACHE_NAME = 'monument-map-v1';
+const CACHE_NAME = 'monument-map-v2';
 const MAX_BYTES = 96 * 1024 * 1024;
 const MAX_ENTRIES = 400;
 const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+const IMAGERY_MAX_AGE = 60 * 60 * 1000;
 const pending = new Map();
 let writes = Promise.resolve();
 let queuedWrites = 0;
 
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener('activate', (event) => event.waitUntil(
+  caches.delete('monument-map-v1').catch(() => {}).then(() => self.clients.claim()),
+));
 
 function cacheable(request) {
   if (request.method !== 'GET') return false;
   const url = new URL(request.url);
   return url.hostname === 'tiles.openfreemap.org'
-    || (url.hostname === 'elevation-tiles-prod.s3.amazonaws.com' && url.pathname.startsWith('/terrarium/'));
+    || (url.hostname === 'elevation-tiles-prod.s3.amazonaws.com' && url.pathname.startsWith('/terrarium/'))
+    || (url.hostname === 'services.arcgisonline.com' && /^\/ArcGIS\/rest\/services\/World_Imagery\/MapServer\/tile\/\d+\/\d+\/\d+$/.test(url.pathname));
 }
 
 async function entries(cache) {
@@ -68,18 +72,24 @@ async function store(cache, request, response) {
 
 self.addEventListener('fetch', (event) => {
   if (!cacheable(event.request)) return;
+  const imagery = new URL(event.request.url).hostname === 'services.arcgisonline.com';
+  if (imagery && event.request.cache === 'no-store') return;
   event.respondWith((async () => {
     let cache;
     let cached;
     try {
       cache = await caches.open(CACHE_NAME);
       cached = await cache.match(event.request);
-      if (cached && Date.now() - Number(cached.headers.get('X-Monument-Cached-At')) < MAX_AGE) return cached;
+      const cacheControl = cached?.headers.get('Cache-Control') || '';
+      const maxAge = imagery ? Math.min(IMAGERY_MAX_AGE, Number(cacheControl.match(/(?:^|,)\s*max-age="?(\d+)/i)?.[1] ?? Infinity) * 1000) : MAX_AGE;
+      if (cached && Date.now() - Number(cached.headers.get('X-Monument-Cached-At')) < maxAge
+        && (!imagery || !/\b(?:no-cache|no-store)\b/i.test(cacheControl))) return cached;
     } catch { /* Storage may be disabled; normal network loading still works. */ }
     const key = JSON.stringify([event.request.url, event.request.credentials, event.request.mode, [...event.request.headers]]);
     if (!pending.has(key)) {
       let stored = Promise.resolve();
-      const request = fetch(event.request).then((response) => {
+      // Expired imagery URLs must revalidate even when the browser HTTP cache is fresh.
+      const request = fetch(event.request, imagery ? { cache: 'no-cache' } : undefined).then((response) => {
         if (cache && response.ok && queuedWrites < 12) {
           queuedWrites += 1;
           const copy = response.clone();
@@ -94,7 +104,7 @@ self.addEventListener('fetch', (event) => {
     }
     try { return (await pending.get(key)).clone(); }
     catch (error) {
-      if (cached) return cached;
+      if (cached && !imagery) return cached;
       throw error;
     }
   })());

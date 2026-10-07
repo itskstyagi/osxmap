@@ -23,6 +23,10 @@ class Element {
         return force;
       },
     };
+    Object.defineProperty(this, 'className', {
+      get: () => [...classes].join(' '),
+      set: (value) => { classes.clear(); String(value).split(/\s+/).filter(Boolean).forEach((name) => classes.add(name)); },
+    });
     this.children = [];
     this.listeners = new Map();
     this.hidden = Object.hasOwn(attributes, 'hidden');
@@ -38,6 +42,7 @@ class Element {
   setAttribute(name, value) { this.attributes[name] = String(value); }
   getAttribute(name) { return this.attributes[name] ?? null; }
   removeAttribute(name) { delete this.attributes[name]; }
+  contains(element) { return this === element || this.children.some((child) => child.contains(element)); }
   matches(selector) {
     if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
     const match = selector.match(/^([\w-]+)?(?:\[([\w-]+)(?:="([^"]*)")?\])?$/);
@@ -111,13 +116,15 @@ function setup({ mobile = false } = {}) {
   const document = parseHtml(readFileSync(join(__dirname, 'index.html'), 'utf8'));
   document.getElementById = (id) => document.querySelectorAll('[id]').find((element) => element.id === id) || null;
   document.createElement = (tag) => new Element(tag);
+  document.createTextNode = (text) => { const node = new Element('text'); node.textContent = text; return node; };
   document.documentElement = document.querySelector('html');
   const timers = new Map();
   let timerId = 0;
   const requests = [];
   const window = {
     innerWidth: mobile ? 390 : 1280,
-    matchMedia: () => ({ matches: !mobile }),
+    innerHeight: mobile ? 844 : 1000,
+    matchMedia: (query) => ({ matches: query.includes('max-width') ? mobile : !mobile, addEventListener() {} }),
     addEventListener() {},
     clearTimeout: (id) => timers.delete(id),
     clearInterval() {},
@@ -135,7 +142,7 @@ function setup({ mobile = false } = {}) {
   const source = readFileSync(join(__dirname, 'app.js'), 'utf8')
     .replace(/^import[^\n]*\n/, '')
     .replaceAll('import.meta.url', JSON.stringify('file:///UI/app.js'));
-  vm.runInContext(`${source}\nglobalThis.CityExplorer = CityExplorer; globalThis.applyMonochrome = applyMonochrome; globalThis.renderAgentReply = renderAgentReply;`, context, { filename: 'app.js' });
+  vm.runInContext(`${source}\nglobalThis.CityExplorer = CityExplorer; globalThis.applyMonochrome = applyMonochrome; globalThis.renderAgentReply = renderAgentReply; globalThis.coordinateQuery = coordinateQuery; globalThis.mapInstruction = mapInstruction;`, context, { filename: 'app.js' });
   const app = Object.create(context.CityExplorer.prototype);
   app.elements = Object.fromEntries(document.querySelectorAll('[id]').map((element) => [element.id, element]));
   Object.assign(app, {
@@ -145,11 +152,16 @@ function setup({ mobile = false } = {}) {
     routeSubmitting: false, routeAnimationFrame: null, routeAnimationVersion: 0,
     agentActivity: { connection: 'READY', request: 'Ready', tool: 'No active tool' },
     agentSocketReady: true, agentSubmitting: false, agentRunId: '',
+    agentTerminalRunIds: new Set(), agentRequestSerial: 0, agentPostSerial: 0,
+    workspaceView: 'explore', searchResults: [], commandMode: false, searchFocused: false,
+    layerPreferences: { labels: true, buildings: true, roads: true, places: true, boundaries: true, contours: true, hillshade: true },
+    routeStopTimers: new Map(), routeStopControllers: new Map(),
     updateDashboard() {}, setMapMode(mode) { this.mapMode = mode; },
     renderRegion() {}, setStream() {}, resetMapForLocation() {},
+    refreshMapMetadata() {},
   });
   return {
-    app, document, window, requests, timers, applyMonochrome: context.applyMonochrome, renderAgentReply: context.renderAgentReply,
+    app, document, window, requests, timers, context, coordinateQuery: context.coordinateQuery, mapInstruction: context.mapInstruction, applyMonochrome: context.applyMonochrome, renderAgentReply: context.renderAgentReply,
     async runTimer() {
       const [id, callback] = timers.entries().next().value;
       timers.delete(id);
@@ -190,7 +202,9 @@ test('display controls stay outside the sidebar after UI initialization', () => 
     assert.equal(control.closest('.app-actions').parent, document.querySelector('.app-shell'));
     assert.equal(control.listeners.get('click').length, 1);
   }
-  assert.equal(document.querySelector('.workspace-nav').closest('.manual-sidebar'), document.querySelector('.manual-sidebar'));
+  assert.equal(document.querySelector('.workspace-nav').closest('.manual-sidebar'), null);
+  assert.equal(document.getElementById('search-form').closest('.manual-sidebar'), null);
+  assert.equal(document.getElementById('manual-controls-content').hidden, true);
 });
 
 test('assistant replies render safe formatting without treating HTML or unsafe links as markup', () => {
@@ -230,6 +244,7 @@ test('completed AI replies are not truncated or overwritten by reconnect and pro
 test('view mode toggles accessibly without changing panel or workspace state', async () => {
   const { app, document } = setup();
   app.bindUi();
+  app.setManualControlsOpen(true);
   app.setInfoDrawerOpen(true);
   app.setGeoToolsOpen(true);
   const workspace = app.geo;
@@ -265,7 +280,7 @@ test('Escape exits view mode before canceling pending interactions; search resto
   const search = event('/');
   app.handleShortcut(search);
   assert.equal(app.viewMode, false);
-  assert.equal(app.manualControlsOpen, true);
+  assert.equal(app.manualControlsOpen, undefined);
   assert.equal(app.elements['search-input'].focused, true);
 });
 
@@ -381,11 +396,12 @@ function routeSetup() {
 test('mobile clarification stays outside collapsed controls and does not open information', async () => {
   const { app, document } = setup({ mobile: true });
   app.bindUi();
+  app.agentSubmitting = true;
   app.handleAgentEvent({ type: 'agent.question', runId: 'run-1', question: 'Which city?', choices: ['Paris', 'London'] });
   const question = app.elements['agent-question'];
   assert.equal(app.agentQuestionOpen, true);
   assert.equal(question.classList.contains('is-hidden'), false);
-  assert.equal(question.closest('.agent-panel').parent, document.querySelector('.manual-sidebar'));
+  assert.equal(question.closest('.agent-panel').parent, document.querySelector('.floating-search'));
   assert.equal(question.closest('.manual-controls-content'), null);
   for (let ancestor = question; ancestor; ancestor = ancestor.parent) assert.equal(ancestor.hidden, false);
   assert.equal(question.focused, true);
@@ -412,13 +428,13 @@ test('mobile Workspace navigation closes information and keeps controls and util
   assert.equal(document.documentElement.dataset.sidebar, 'open');
 });
 
-test('bindUi keeps route summary and geographic status outside hidden information', () => {
+test('route summary and status remain on the map outside collapsed controls and metadata', () => {
   const { app, document } = setup({ mobile: true });
   app.bindUi();
   const summary = document.querySelector('.route-summary');
-  assert.equal(summary.parent, app.elements['route-form'].parent);
+  assert.equal(summary.parent, document.querySelector('.map-region'));
   assert.equal(summary.closest('.info-drawer'), null);
-  assert.equal(app.elements['geo-status'].parent, document.querySelector('.search-panel'));
+  assert.equal(app.elements['geo-status'].parent, document.querySelector('.map-region'));
 });
 
 test('city autocomplete exposes ARIA options, wraps arrow selection, and Enter chooses the active place', () => {
@@ -596,7 +612,7 @@ test('route response renders the complete geometry immediately without animation
   assert.equal(app.routeFocused, true);
   assert.equal(app.routeSubmitting, false);
   assert.equal(app.elements['trace-route'].disabled, false);
-  assert.equal(app.elements['trace-route'].textContent, 'Trace route');
+  assert.equal(app.elements['trace-route'].textContent, 'Plan route');
 });
 
 test('route response is discarded when stops change, and cleanup respects incomplete updated stops', async () => {
@@ -610,7 +626,7 @@ test('route response is discarded when stops change, and cleanup respects incomp
   assert.match(app.elements['geo-status'].textContent, /stops changed/);
   assert.equal(app.routeSubmitting, false);
   assert.equal(app.elements['trace-route'].disabled, true);
-  assert.equal(app.elements['trace-route'].textContent, 'Trace route');
+  assert.equal(app.elements['trace-route'].textContent, 'Plan route');
 });
 
 test('route response is discarded when the stop order changes', async () => {
@@ -657,7 +673,7 @@ test('route request failure reports error and restores the submit control', asyn
   assert.equal(app.elements['geo-status'].classList.contains('is-error'), true);
   assert.equal(app.routeSubmitting, false);
   assert.equal(app.elements['trace-route'].disabled, false);
-  assert.equal(app.elements['trace-route'].textContent, 'Trace route');
+  assert.equal(app.elements['trace-route'].textContent, 'Plan route');
 });
 
 test('clearAdditions only deletes after dialog confirmation; cancellation leaves workspace intact', async () => {
@@ -704,4 +720,366 @@ test('confirmed clear failure preserves local workspace and shows an error', asy
   assert.equal(app.geo.pins, pins);
   assert.equal(app.elements['geo-status'].textContent, 'Workspace server unavailable');
   assert.equal(app.elements['geo-status'].classList.contains('is-error'), true);
+});
+
+test('coordinate input explicitly handles decimals, hemispheres, geo URIs, and validation', () => {
+  const { coordinateQuery } = setup();
+  for (const query of ['37.7749, -122.4194', '37.7749 N, 122.4194 W', '37.7749\u00b0 N 122.4194\u00b0 W', 'geo:37.7749,-122.4194?z=12']) {
+    const point = coordinateQuery(query);
+    assert.equal(point.lat, 37.7749);
+    assert.equal(point.lon, -122.4194);
+  }
+  assert.equal(coordinateQuery('0, 0').lat, 0);
+  assert.equal(coordinateQuery('-90, 180').lon, 180);
+  assert.match(coordinateQuery('91, 0').error, /latitude/);
+  assert.match(coordinateQuery('0, -181').error, /longitude/);
+  assert.equal(coordinateQuery('San Francisco'), null);
+});
+
+test('primary coordinate search centers and marks the map without geocoding or saving a pin', async () => {
+  const { app, requests } = setup();
+  let marked = 0;
+  app.renderSearchResults = () => { marked += 1; };
+  app.elements['search-input'].value = '0, 0';
+  await app.submitSearch(event());
+  assert.equal(app.selected.lat, 0);
+  assert.equal(app.selected.lon, 0);
+  assert.equal(app.searchResults[0], app.selected);
+  assert.equal(marked, 1);
+  assert.equal(requests.length, 0);
+  assert.equal(app.geo.pins.length, 0);
+  app.elements['search-input'].value = '91, 0';
+  await app.submitSearch(event());
+  assert.equal(app.elements['search-status'].classList.contains('is-error'), true);
+  assert.equal(app.selected.lat, 0);
+});
+
+test('natural-language and route queries use the map agent and skip city autocomplete', async () => {
+  const { app, requests, timers } = setup();
+  const received = [];
+  app.startAgentRequest = async (query) => { received.push(query); };
+  for (const query of ['Munsiyari to Milam Glacier', 'Find camps near Darkot', 'What is this mountain?']) {
+    app.elements['search-input'].value = query;
+    app.queueSuggestions();
+    assert.equal(timers.size, 0);
+    await app.submitSearch(event());
+    assert.equal(app.elements['search-submit'].getAttribute('aria-label'), 'Ask Meridian');
+  }
+  assert.deepEqual(received, ['Munsiyari to Milam Glacier', 'Find camps near Darkot', 'What is this mountain?']);
+  assert.equal(requests.length, 0);
+});
+
+test('explicit Ask Meridian toggle uses the same search field and retains plain place search', async () => {
+  const { app } = setup();
+  app.setCommandMode(true);
+  assert.equal(app.elements['search-command-toggle'].getAttribute('aria-pressed'), 'true');
+  let instruction;
+  app.startAgentRequest = async (message) => { instruction = message; };
+  app.elements['search-input'].value = 'Golden Gate Bridge';
+  await app.submitSearch(event());
+  assert.equal(instruction, 'Golden Gate Bridge');
+  app.setCommandMode(false);
+  let placeQuery;
+  app.resolveSearch = async (query) => { placeQuery = query; };
+  await app.submitSearch(event());
+  assert.equal(placeQuery, 'Golden Gate Bridge');
+});
+
+test('supported visualization instructions run locally and unsupported analysis is disclosed', async () => {
+  const { app, requests } = setup();
+  app.elements['search-input'].value = 'Show terrain';
+  await app.submitSearch(event());
+  assert.equal(app.mapMode, 'terrain');
+  assert.equal(app.manualControlsOpen, true);
+  assert.equal(app.elements['agent-panel'].hidden, false);
+  assert.match(app.elements['agent-result-summary'].textContent, /Topographic/);
+  app.elements['search-input'].value = 'Show me roads above 3000m';
+  await app.submitSearch(event());
+  assert.match(app.elements['agent-result-summary'].textContent, /not available/);
+  assert.equal(app.elements['agent-result-details'].hidden, false);
+  assert.equal(requests.length, 0);
+});
+
+test('map layer preferences persist across map modes without hiding route or search overlays', () => {
+  const { app } = setup();
+  const layers = [
+    { id: 'road-local', type: 'line' }, { id: 'poi-label', type: 'symbol' },
+    { id: 'boundary', type: 'line' }, { id: 'building', type: 'fill' },
+    { id: 'local-contours', type: 'line' }, { id: 'local-contour-labels', type: 'symbol' },
+    { id: 'geo-route-stop-label', type: 'symbol' }, { id: 'local-search-result-label', type: 'symbol' },
+  ];
+  const visibility = new Map();
+  app.map = {
+    getStyle: () => ({ layers }), getLayer: (id) => layers.find((layer) => layer.id === id), isStyleLoaded: () => true,
+    setLayoutProperty: (id, property, value) => { if (property === 'visibility') visibility.set(id, value); }, setPaintProperty() {},
+  };
+  app.mapMode = 'terrain';
+  app.toggleMapLayer('roads', false);
+  app.toggleMapLayer('labels', false);
+  app.toggleMapLayer('boundaries', false);
+  app.toggleMapLayer('buildings', false);
+  assert.equal(visibility.get('road-local'), 'none');
+  assert.equal(visibility.get('boundary'), 'none');
+  assert.equal(visibility.get('building'), 'none');
+  assert.equal(visibility.get('local-contour-labels'), 'none');
+  assert.equal(visibility.get('geo-route-stop-label'), undefined);
+  assert.equal(visibility.get('local-search-result-label'), undefined);
+  app.toggleMapLayer('roads', true);
+  assert.equal(visibility.get('road-local'), 'visible');
+});
+
+test('compact controls expand contextually and the title disappears without forcing map-only mode', () => {
+  const { app, document } = setup();
+  app.bindUi();
+  assert.equal(app.manualControlsOpen, false);
+  assert.equal(app.elements['manual-controls-content'].hidden, true);
+  app.setWorkspaceView('routes');
+  assert.equal(app.manualControlsOpen, true);
+  assert.equal(app.geoToolsOpen, true);
+  assert.equal(document.documentElement.dataset.workspaceView, 'routes');
+  assert.equal(document.getElementById('controls-label').textContent, 'Plan a route');
+  app.setWorkspaceView('explore');
+  assert.equal(app.manualControlsOpen, false);
+  assert.equal(app.geoToolsOpen, false);
+  app.dismissIntro();
+  assert.equal(document.getElementById('view-heading').classList.contains('is-dismissed'), true);
+  assert.equal(document.documentElement.dataset.uiQuiet, 'true');
+  assert.equal(app.viewMode, undefined);
+});
+
+test('idle assistant has no permanent panel and cannot disable place search when disconnected', () => {
+  const { app } = setup();
+  app.agentSocketReady = false;
+  app.renderAgentActivity();
+  assert.equal(app.elements['agent-panel'].hidden, true);
+  assert.equal(app.elements['search-submit'].disabled, false);
+  assert.equal(app.elements['search-input'].disabled, false);
+  app.agentSubmitting = true;
+  app.renderAgentActivity();
+  assert.equal(app.elements['agent-panel'].hidden, false);
+  assert.equal(app.elements['search-submit'].disabled, true);
+  assert.equal(app.elements['agent-cancel'].classList.contains('is-hidden'), false);
+});
+
+test('agent completion preserves details while rejecting late terminal or unrelated events', () => {
+  const { app } = setup();
+  app.agentRunId = 'run-1';
+  app.agentResultSummary = '3 places on the map';
+  app.handleAgentEvent({ type: 'agent.completed', runId: 'run-1', message: 'Found **three** places.' });
+  assert.equal(app.elements['agent-result-summary'].textContent, '3 places on the map');
+  assert.equal(app.elements['agent-result-details'].hidden, false);
+  assert.equal(app.elements['agent-result-details'].open, false);
+  app.applyAgentMapUpdate = () => assert.fail('A late update cannot modify the map');
+  app.handleAgentEvent({ type: 'agent.map', runId: 'run-1', update: {} });
+  app.handleAgentEvent({ type: 'agent.map', runId: 'unrelated', update: {} });
+  app.dismissAgentResult();
+  app.renderAgentActivity();
+  assert.equal(app.elements['agent-panel'].hidden, true);
+});
+
+test('missing geography context does not silently bias search to zero coordinates', () => {
+  const { app } = setup();
+  app.geo.context = { lat: null, lon: null };
+  assert.equal(app.placeContext(), null);
+  app.map = { getCenter: () => ({ lat: 37.7749, lng: -122.4194 }) };
+  assert.equal(app.placeContext().lat, 37.7749);
+  app.geo.context = { lat: 0, lon: 0 };
+  assert.equal(app.placeContext().lat, 0);
+});
+
+test('DEM sampling caps zoom, groups tiles, preserves sea level, and handles missing coverage', async () => {
+  const { app } = setup();
+  const calls = [];
+  app.contourDem = { getDemTile: async (z, x, y) => {
+    calls.push([z, x, y]);
+    return { width: 1, height: 1, data: new Float32Array([0]) };
+  } };
+  const values = await app.sampleElevationPoints([{ lon: 0, lat: 0 }, { lon: .001, lat: -.001 }, { lon: 360, lat: 0 }, { lon: null, lat: 0 }], 20);
+  assert.equal(values[0], 0);
+  assert.equal(values[1], 0);
+  assert.equal(values[2], 0);
+  assert.equal(values[3], null);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 13);
+  app.contourDem.getDemTile = async () => { throw new Error('No coverage'); };
+  assert.equal((await app.sampleElevationPoints([{ lon: 0, lat: 0 }], 13))[0], null);
+});
+
+test('DEM sampling wraps antimeridian coordinates and abort settles without waiting for shared tile work', async () => {
+  const { app } = setup();
+  assert.equal(app.metadataTilePoint({ lon: 180, lat: 0 }, 13).x, 0);
+  assert.equal(app.metadataTilePoint({ lon: -180, lat: 0 }, 13).x, 0);
+  assert.equal(app.metadataTilePoint({ lon: 0, lat: 90 }, 13).y, 0);
+  assert.equal(app.metadataTilePoint({ lon: 0, lat: -90 }, 13).y, 8191);
+  app.contourDem = { getDemTile: () => new Promise(() => {}) };
+  const controller = new AbortController();
+  const work = app.sampleElevationPoints([{ lon: 0, lat: 0 }], 13, controller);
+  controller.abort();
+  assert.equal((await work)[0], null);
+});
+
+function metadataSetup() {
+  const result = setup();
+  let center = { lat: 37.7749, lng: -122.4194 };
+  result.app.map = {
+    getCenter: () => center, getCanvas: () => ({ clientWidth: 1440, clientHeight: 1000 }),
+    getZoom: () => 12, getPitch: () => 0, getBearing: () => 0, isMoving: () => false,
+    getPadding: () => ({ top: 0, left: 0, bottom: 0, right: 0 }), getTerrain: () => null,
+    unproject: () => center,
+  };
+  result.app.contourDem = { getDemTile: async () => ({ width: 1, height: 1, data: new Float32Array([42]) }) };
+  result.document.getElementById('info-drawer-content').hidden = false;
+  result.app.mapMetadataSequence = 1;
+  return { ...result, move: (value) => { center = value; } };
+}
+
+test('elevation metadata is unexaggerated and explicitly labels a sampled range, not exact extrema', async () => {
+  const { app, document } = metadataSetup();
+  const snapshot = app.mapMetadataSnapshot();
+  assert.equal(await app.refreshElevationMetadata(snapshot, 1), true);
+  assert.equal(document.getElementById('context-center-elevation').textContent, '~42 m');
+  assert.equal(document.getElementById('terrain-range-low').textContent, '~42 m');
+  assert.match(document.getElementById('terrain-interval').textContent, /9\/9 points.*not exact extrema/);
+  assert.match(document.getElementById('context-elevation').textContent, /Mapzen.*composite/);
+});
+
+test('camera changes reject late DEM values rather than displaying an old elevation for the new view', async () => {
+  const { app, document, move } = metadataSetup();
+  let complete;
+  app.contourDem.getDemTile = () => new Promise((resolve) => { complete = resolve; });
+  const snapshot = app.mapMetadataSnapshot();
+  const work = app.refreshElevationMetadata(snapshot, 1);
+  move({ lat: 10, lng: 10 });
+  complete({ width: 1, height: 1, data: new Float32Array([8000]) });
+  assert.equal(await work, false);
+  assert.notEqual(document.getElementById('context-center-elevation').textContent, '~8,000 m');
+});
+
+test('imagery metadata uses center-footprint citations, handles dates, and stays available without DEM', async () => {
+  const { app, requests, document } = metadataSetup();
+  app.contourDem = null;
+  const snapshot = app.mapMetadataSnapshot();
+  assert.equal(snapshot.imageryLod, 13);
+  const work = app.refreshImageryMetadata(snapshot, 1);
+  const url = new URL(requests[0].url);
+  assert.match(url.pathname, /World_Imagery\/MapServer\/4\/query/);
+  assert.equal(url.searchParams.get('where'), 'MinMapLevel<=13 AND MaxMapLevel>=13');
+  assert.equal(JSON.parse(url.searchParams.get('geometry')).x, -122.4194);
+  requests[0].resolve({ ok: true, json: async () => ({ features: [{ attributes: { NICE_NAME: 'Verified source', SRC_DATE: 20260315, SRC_RES: .34, DrawOrder: 1 } }] }) });
+  assert.equal(await work, true);
+  assert.match(document.getElementById('context-imagery').textContent, /Verified source.*0.34 m.*Center footprint/);
+  assert.match(document.getElementById('context-imagery-date').textContent, /2026-03-15.*center footprint only/);
+  await app.refreshImageryMetadata(snapshot, 1);
+  assert.equal(requests.length, 1);
+});
+
+test('imagery metadata does not invent an acquisition date when the provider omits it', async () => {
+  const { app, requests, document } = metadataSetup();
+  const work = app.refreshImageryMetadata(app.mapMetadataSnapshot(), 1);
+  requests[0].resolve({ ok: true, json: async () => ({ features: [{ attributes: { NICE_NAME: 'TerraColor', SRC_DATE: null, SRC_DATE2: null } }] }) });
+  await work;
+  assert.match(document.getElementById('context-imagery-date').textContent, /Not supplied/);
+});
+
+test('long agent routes retain their destination and provider metadata when geometry is bounded', () => {
+  const { app } = setup();
+  const coordinates = Array.from({ length: 20001 }, (_, index) => [index / 1000, 10]);
+  const route = app.agentRoute({ id: 'large', stored: true, sourceVersion: 'v1', createdAt: 123, geometry: { type: 'LineString', coordinates } });
+  assert.equal(route.geometry.coordinates.length, 20000);
+  assert.equal(route.geometry.coordinates.at(-1)[0], 20);
+  assert.equal(route.stored, true);
+  assert.equal(route.sourceVersion, 'v1');
+  assert.equal(route.createdAt, 123);
+});
+
+function cacheSetup() {
+  const handlers = new Map();
+  const data = new Map();
+  const network = [];
+  const deleted = [];
+  const cache = {
+    match: async (request) => data.get(request.url || request)?.clone(),
+    keys: async () => [...data.keys()].map((url) => new Request(url)),
+    delete: async (request) => data.delete(request.url || request),
+    put: async (request, value) => { data.set(request.url || request, value.clone()); },
+  };
+  let now = 1791360000000;
+  class Clock extends Date { static now() { return now; } }
+  const context = vm.createContext({
+    self: { addEventListener: (type, callback) => { handlers.set(type, callback); }, skipWaiting() {}, clients: { claim: async () => {} } },
+    caches: { open: async () => cache, delete: async (name) => { deleted.push(name); return true; } },
+    Date: Clock, URL, Request, Response, Headers, Uint8Array, console,
+    fetch: async (request, options) => { network.push({ url: request.url, options }); return new Response('fresh tile', { headers: { 'Cache-Control': 'max-age=86400', 'Content-Type': 'image/jpeg' } }); },
+  });
+  vm.runInContext(readFileSync(join(__dirname, 'map-cache-worker.js'), 'utf8'), context);
+  const cached = (url, age, cacheControl = 'max-age=86400') => data.set(url, new Response('cached tile', { headers: { 'X-Monument-Cached-At': String(now - age), 'X-Monument-Bytes': '11', 'Cache-Control': cacheControl } }));
+  const dispatch = async (url, options = {}) => {
+    let response;
+    const waits = [];
+    handlers.get('fetch')({ request: new Request(url, options), respondWith: (work) => { response = work; }, waitUntil: (work) => { waits.push(work); } });
+    if (!response) return null;
+    const result = await response;
+    for (const wait of waits) await wait;
+    return result;
+  };
+  return { context, handlers, data, network, deleted, cached, dispatch, now: (value) => { now = value; } };
+}
+
+const imageryTile = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/12/1582/654';
+
+test('satellite cache refreshes old imagery while reusing bounded fresh tiles', async () => {
+  const cache = cacheSetup();
+  cache.cached(imageryTile, 30 * 60 * 1000);
+  assert.equal(await (await cache.dispatch(imageryTile)).text(), 'cached tile');
+  assert.equal(cache.network.length, 0);
+  cache.cached(imageryTile, 61 * 60 * 1000);
+  assert.equal(await (await cache.dispatch(imageryTile)).text(), 'fresh tile');
+  assert.equal(cache.network.length, 1);
+  assert.equal(cache.network[0].options.cache, 'no-cache');
+});
+
+test('satellite cache honors shorter provider TTL and never intercepts no-store requests or citations', async () => {
+  const cache = cacheSetup();
+  cache.cached(imageryTile, 61 * 1000, 'max-age=60');
+  await cache.dispatch(imageryTile);
+  assert.equal(cache.network.length, 1);
+  assert.equal(await cache.dispatch(imageryTile, { cache: 'no-store' }), null);
+  assert.equal(await cache.dispatch('https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/4/query?f=json'), null);
+});
+
+test('satellite cache declines stale fallback while DEM caching remains compatible with the configured endpoint', async () => {
+  const cache = cacheSetup();
+  cache.context.fetch = async () => { throw new Error('Offline'); };
+  cache.cached(imageryTile, 2 * 60 * 60 * 1000);
+  await assert.rejects(cache.dispatch(imageryTile), /Offline/);
+  const dem = 'https://elevation-tiles-prod.s3.amazonaws.com/terrarium/13/100/200.png';
+  cache.cached(dem, 24 * 60 * 60 * 1000);
+  assert.equal(await (await cache.dispatch(dem)).text(), 'cached tile');
+});
+
+test('rendering uses MapLibre antialiasing and preserves explicit flat Satellite view', () => {
+  const { app, context, window } = setup();
+  let options;
+  context.ResizeObserver = class { observe() {} };
+  context.requestAnimationFrame = () => 1;
+  context.localStorage = { setItem() {} };
+  window.maplibregl = {
+    Map: class {
+      constructor(value) { options = value; }
+      addControl() {} on() {}
+      getContainer() { return { querySelector: () => ({}) }; }
+    }, AttributionControl: class {}, ScaleControl: class {},
+  };
+  app.terrainEnabled = false;
+  app.createMap();
+  assert.equal(options.canvasContextAttributes.antialias, true);
+  assert.equal(options.pitch, 0);
+  assert.equal(options.antialias, undefined);
+  app.setMapMode = Object.getPrototypeOf(app).setMapMode;
+  app.applyMapMode = () => {};
+  app.setMapMode('satellite');
+  assert.equal(app.terrainEnabled, false);
+  app.terrainEnabled = true;
+  app.setMapMode('terrain');
+  assert.equal(app.terrainEnabled, true);
 });

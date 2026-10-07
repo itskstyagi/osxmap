@@ -4,14 +4,38 @@ const TILE_ZOOM = 14;
 const ACCENT = '#d0dac5';
 const PREVIEW_LAYER = 'local-buildings-preview';
 const TERRAIN_SOURCE = 'local-terrain-dem';
-const TERRAIN_TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+const TERRAIN_TILE_URL = 'https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png';
+const IMAGERY_TILE_URL = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const REGIONAL_IMAGERY = {
+  date: '2026-09-30', bounds: [-122.8, 37.6, -122.15, 38.05],
+  tiles: 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/HLS_S30_Nadir_BRDF_Adjusted_Reflectance/default/2026-09-30/GoogleMapsCompatible_Level12/{z}/{y}/{x}.png',
+};
 const FOCUS_SOURCE = 'local-city-focus';
 const GEOGRAPHY_SOURCE = 'local-geography';
 const SEARCH_RESULTS_SOURCE = 'local-search-results';
 const EMPTY_COLLECTION = { type: 'FeatureCollection', features: [] };
 const MAX_ROUTE_STOPS = 50;
 
+function coordinateQuery(query) {
+  const decimal = query.match(/^\s*([+-]?\d{1,3}(?:\.\d+)?)\s*[,;]\s*([+-]?\d{1,3}(?:\.\d+)?)\s*$/);
+  const directional = query.match(/^\s*(\d{1,2}(?:\.\d+)?)\s*\u00b0?\s*([NS])\s*[,;\s]+(\d{1,3}(?:\.\d+)?)\s*\u00b0?\s*([EW])\s*$/i);
+  const geo = query.match(/^geo:([+-]?\d{1,3}(?:\.\d+)?),([+-]?\d{1,3}(?:\.\d+)?)(?:\?z=\d+(?:\.\d+)?)?$/i);
+  const match = decimal || directional || geo;
+  if (!match) return null;
+  const lat = Number(match[1]) * (directional && match[2].toUpperCase() === 'S' ? -1 : 1);
+  const lon = Number(directional ? match[3] : match[2]) * (directional && match[4].toUpperCase() === 'W' ? -1 : 1);
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return { error: 'Use latitude from -90 to 90 and longitude from -180 to 180.' };
+  const name = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+  return { id: `coordinate:${lat},${lon}`, name, shortName: name, lat, lon, bbox: [lon, lat, lon, lat], provider: 'coordinates' };
+}
+
+function mapInstruction(query) {
+  return /^(?:find|show|hide|what|where|which|how|tell|take|plan|create|draw|go|zoom|clear|save|pin|add|remove|turn|enable|disable|switch|search|route|navigate|locate)\b/i.test(query) ||
+    /\S\s+to\s+\S|\b(?:near|nearby|around|above|below)\b|\?$|\b(?:on|off)\s*$/i.test(query);
+}
+
 function numeric(value) {
+  if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -211,6 +235,7 @@ function formatDuration(secondsValue) {
   const seconds = Number(secondsValue);
   if (!Number.isFinite(seconds)) return '';
   const minutes = Math.round(seconds / 60);
+  if (minutes >= 1440) return `${Math.floor(minutes / 1440)} d ${Math.floor(minutes % 1440 / 60)} h`;
   return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes} min`;
 }
 
@@ -335,7 +360,7 @@ function applyMonochrome(map, theme, mode = 'route') {
     if (layer.id.startsWith('local-') || layer.id.startsWith('geo-')) continue;
     const id = layer.id.toLowerCase();
     try {
-      map.setLayoutProperty(layer.id, 'visibility', satellite && ['background', 'fill', 'fill-extrusion'].includes(layer.type) ? 'none' : 'visible');
+      map.setLayoutProperty(layer.id, 'visibility', satellite && ['fill', 'fill-extrusion'].includes(layer.type) ? 'none' : 'visible');
       if (id.includes('building')) map.setLayoutProperty(layer.id, 'visibility', satellite ? 'none' : 'visible');
       if (layer.type === 'background') map.setPaintProperty(layer.id, 'background-color', colors.background);
       if (layer.type === 'fill') {
@@ -392,16 +417,14 @@ function applyMonochrome(map, theme, mode = 'route') {
     ['geo-pin-label', 'text-color', '#1a2117'], ['geo-route-stop-label', 'text-color', '#1a2117'],
     ['local-search-result-label', 'text-color', colors.text], ['local-search-result-label', 'text-halo-color', colors.halo],
   ]) if (map.getLayer(id)) map.setPaintProperty(id, property, color);
-  try {
-    map.setFog({
-      color: dark ? '#111113' : '#ecece8',
-      'high-color': dark ? '#1c1c20' : '#dfdfda',
-      'horizon-blend': 0.14,
-      range: [0.8, 8],
-    });
-  } catch {
-    // Fog availability depends on the remote base style and projection.
-  }
+  map.setSky?.({
+    'sky-color': dark ? '#1c1c20' : '#dfdfda',
+    'horizon-color': dark ? '#111113' : '#ecece8',
+    'fog-color': colors.background,
+    'sky-horizon-blend': 0.5,
+    'horizon-fog-blend': 0.5,
+    'fog-ground-blend': 0.1,
+  });
 }
 
 function addLocalLayers(map, theme) {
@@ -434,7 +457,7 @@ function addLocalLayers(map, theme) {
   });
   map.addLayer({
     id: 'local-poi-code', type: 'symbol', source: 'local-city', minzoom: 14, filter: ['==', ['get', 'kind'], 'poi'],
-    layout: { 'text-field': ['match', ['get', 'poiCategory'], 'health', '+', 'fuel', 'F', 'education', 'S', 'lodging', 'H', 'culture', 'M', 'shopping', '$', 'safety', '!', 'transit', 'T', ''], 'text-size': 8, 'text-allow-overlap': true, 'text-ignore-placement': true },
+    layout: { 'text-field': ['match', ['get', 'poiCategory'], 'health', '+', 'fuel', 'F', 'education', 'S', 'lodging', 'H', 'culture', 'M', 'shopping', '$', 'safety', '!', 'transit', 'T', ''], 'text-font': ['Noto Sans Regular'], 'text-size': 8, 'text-allow-overlap': true, 'text-ignore-placement': true },
     paint: { 'text-color': '#ffffff' },
   });
   map.addLayer({
@@ -456,18 +479,18 @@ function addLocalLayers(map, theme) {
   map.addLayer({ id: 'geo-route-casing', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#101310', 'line-width': 9, 'line-opacity': 0.6 } });
   map.addLayer({ id: 'geo-route', type: 'line', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffffff', 'line-width': 5, 'line-opacity': 1 } });
   map.addLayer({ id: 'geo-pin', type: 'circle', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'pin'], paint: { 'circle-radius': 7, 'circle-color': ACCENT, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
-  map.addLayer({ id: 'geo-pin-label', type: 'symbol', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'pin'], layout: { 'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'], 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff' } });
+  map.addLayer({ id: 'geo-pin-label', type: 'symbol', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'pin'], layout: { 'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Noto Sans Bold'], 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff' } });
   map.addLayer({ id: 'geo-route-stop-halo', type: 'circle', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-stop'], paint: { 'circle-radius': 13, 'circle-color': ACCENT, 'circle-opacity': 0.18 } });
   map.addLayer({ id: 'geo-route-stop', type: 'circle', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-stop'], paint: { 'circle-radius': 9, 'circle-color': ACCENT, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
-  map.addLayer({ id: 'geo-route-stop-label', type: 'symbol', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-stop'], layout: { 'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'], 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff' } });
+  map.addLayer({ id: 'geo-route-stop-label', type: 'symbol', source: GEOGRAPHY_SOURCE, filter: ['==', ['get', 'overlay'], 'route-stop'], layout: { 'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Noto Sans Bold'], 'text-allow-overlap': true, 'text-ignore-placement': true }, paint: { 'text-color': '#ffffff' } });
   map.addLayer({ id: 'local-search-result-halo', type: 'circle', source: SEARCH_RESULTS_SOURCE, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 8, 15, 15], 'circle-color': '#e6953f', 'circle-opacity': 0.18 } });
   map.addLayer({ id: 'local-search-result', type: 'circle', source: SEARCH_RESULTS_SOURCE, paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 4, 15, 6.5], 'circle-color': '#e6953f', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.25, 'circle-opacity': 0.95 } });
-  map.addLayer({ id: 'local-search-result-label', type: 'symbol', source: SEARCH_RESULTS_SOURCE, minzoom: 13, layout: { 'text-field': ['get', 'name'], 'text-size': 10, 'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'], 'text-offset': [0, 1.1], 'text-anchor': 'top', 'text-max-width': 14 }, paint: { 'text-color': '#374151', 'text-halo-color': '#ffffff', 'text-halo-width': 1.25 } });
+  map.addLayer({ id: 'local-search-result-label', type: 'symbol', source: SEARCH_RESULTS_SOURCE, minzoom: 13, layout: { 'text-field': ['get', 'name'], 'text-size': 10, 'text-font': ['Noto Sans Regular'], 'text-offset': [0, 1.1], 'text-anchor': 'top', 'text-max-width': 14 }, paint: { 'text-color': '#374151', 'text-halo-color': '#ffffff', 'text-halo-width': 1.25 } });
 }
 
 class CityExplorer {
   constructor() {
-    this.elements = Object.fromEntries(['search-input', 'search-form', 'search-loader', 'suggestions', 'region-label', 'status-dot', 'stream-card', 'stream-title', 'stream-count', 'stream-progress', 'stream-buildings', 'stream-source', 'use-location', 'use-approximate-location', 'pin-mode', 'show-area', 'clear-additions', 'route-form', 'route-stops', 'route-stop-count', 'route-plan-hint', 'add-route-stop', 'trace-route', 'pin-list', 'area-list', 'geo-status', 'toggle-geo-tools', 'geo-content', 'toggle-manual-controls', 'manual-controls-content', 'agent-composer', 'agent-input', 'agent-submit', 'agent-cancel', 'agent-question', 'agent-question-text', 'agent-question-choices', 'agent-connection', 'agent-request', 'agent-tool'].map((id) => [id, document.getElementById(id)]));
+    this.elements = Object.fromEntries([...document.querySelectorAll('[id]')].map((element) => [element.id, element]));
     this.theme = localStorage.getItem('theme') || 'dark';
     this.mapMode = ['satellite', 'route', 'terrain'].includes(localStorage.getItem('mapMode')) ? localStorage.getItem('mapMode') : 'satellite';
     this.workspaceView = 'explore';
@@ -484,7 +507,13 @@ class CityExplorer {
     this.buildings = 0;
     this.generation = 0;
     this.previewVisible = true;
-    this.terrainEnabled = this.mapMode === 'satellite';
+    this.terrainEnabled = false;
+    this.layerPreferences = { labels: true, buildings: true, roads: true, places: true, boundaries: true, contours: true, hillshade: true };
+    this.contourStrength = 0.55;
+    this.regionalImageryEnabled = localStorage.getItem('regionalImagery') !== 'off';
+    this.regionalImageryActive = false;
+    this.commandMode = false;
+    this.searchFocused = false;
     this.suggestionController = null;
     this.suggestionTimer = null;
     this.suggestionIndex = -1;
@@ -511,6 +540,10 @@ class CityExplorer {
     this.agentQuestionOpen = false;
     this.agentRequestSerial = 0;
     this.agentPostSerial = 0;
+    this.agentTerminalRunIds = new Set();
+    this.agentResultSummary = '';
+    this.agentLastMessage = '';
+    this.agentPanelDismissed = false;
     this.agentActivity = { connection: 'CONNECTING', request: 'Waiting for connection', tool: 'No active tool' };
     this.worker = new Worker(new URL('./tile-worker.js', import.meta.url), { type: 'module' });
     this.setTheme(this.theme);
@@ -527,12 +560,28 @@ class CityExplorer {
     el['search-form'].addEventListener('submit', (event) => this.submitSearch(event));
     el['search-input'].addEventListener('input', () => this.queueSuggestions());
     el['search-input'].addEventListener('keydown', (event) => this.handleSearchKey(event));
-    el['search-input'].addEventListener('focus', () => { if (this.selected?.name !== el['search-input'].value) this.selected = null; });
+    el['search-input'].addEventListener('focus', () => { this.searchFocused = true; this.updateSearchDiscovery(); });
+    document.querySelector('.floating-search').addEventListener('focusout', (event) => {
+      if (event.relatedTarget && document.querySelector('.floating-search').contains(event.relatedTarget)) return;
+      this.searchFocused = false;
+      this.updateSearchDiscovery();
+    });
+    el['search-command-toggle'].addEventListener('click', () => {
+      this.setCommandMode(!this.commandMode);
+      el['search-input'].focus();
+    });
+    document.querySelectorAll('[data-search-example]').forEach((button) => button.addEventListener('click', () => {
+      el['search-input'].value = button.dataset.searchExample;
+      this.commandMode = false;
+      this.queueSuggestions();
+      el['search-input'].focus();
+    }));
     el['toggle-geo-tools'].addEventListener('click', () => this.setGeoToolsOpen(!this.geoToolsOpen));
     el['toggle-manual-controls'].addEventListener('click', () => this.setManualControlsOpen(!this.manualControlsOpen));
     el['use-location'].addEventListener('click', () => this.useBrowserLocation());
     el['use-approximate-location'].addEventListener('click', () => this.useApproximateLocation());
     el['pin-mode'].addEventListener('click', () => this.togglePinMode());
+    el['workspace-pin-mode'].addEventListener('click', () => this.togglePinMode());
     el['show-area'].addEventListener('click', () => this.createPinArea());
     el['clear-additions'].addEventListener('click', () => this.clearAdditions());
     el['route-form'].addEventListener('submit', (event) => {
@@ -543,8 +592,8 @@ class CityExplorer {
       }
     });
     el['add-route-stop'].addEventListener('click', () => this.addRouteStop());
-    el['agent-composer'].addEventListener('submit', (event) => this.submitAgentRequest(event));
     el['agent-cancel'].addEventListener('click', () => this.cancelAgentRequest());
+    el['agent-dismiss-result'].addEventListener('click', () => this.dismissAgentResult());
     document.getElementById('agent-dismiss-question').addEventListener('click', () => this.cancelAgentRequest());
     document.getElementById('replay-route').addEventListener('click', () => {
       if (this.geo.routeAnimation) this.stopRouteAnimation();
@@ -556,19 +605,9 @@ class CityExplorer {
     document.querySelectorAll('[data-map-action]').forEach((button) => button.addEventListener('click', () => this.operate(button.dataset.mapAction)));
     document.addEventListener('keydown', (event) => this.handleShortcut(event));
     this.worker.onmessage = ({ data }) => this.handleWorkerMessage(data);
-    const desktop = window.matchMedia('(min-width: 901px)').matches;
     this.setGeoToolsOpen(false);
-    this.setManualControlsOpen(desktop);
-    el['manual-controls-content'].append(el['stream-card']);
-    const sidebar = el['manual-controls-content'].closest('.manual-sidebar');
-    sidebar.prepend(document.querySelector('.floating-toolbar'));
-    el['manual-controls-content'].prepend(document.querySelector('.map-mode-panel'), document.querySelector('.map-controls'));
-    el['manual-controls-content'].append(document.getElementById('map-notice'));
-    el['route-form'].after(document.querySelector('.route-summary'));
-    el['search-form'].closest('.search-panel').append(el['geo-status']);
+    this.setManualControlsOpen(false);
     const information = document.getElementById('info-drawer-content');
-    information.prepend(document.querySelector('.workspace-metrics'), document.getElementById('agent-hud'));
-    sidebar.append(document.querySelector('.agent-panel'));
     document.getElementById('toggle-info-drawer').addEventListener('click', () => this.setInfoDrawerOpen(information.hidden));
     document.getElementById('clear-map-cache').addEventListener('click', () => {
       navigator.serviceWorker?.controller?.postMessage({ type: 'clear-map-cache' });
@@ -578,8 +617,28 @@ class CityExplorer {
     });
     document.getElementById('cache-status').textContent = navigator.serviceWorker?.controller ? 'Cache ready / 96 MB limit' : 'Local cache unavailable; browser caching remains active';
     navigator.serviceWorker?.controller?.postMessage({ type: 'map-cache-stats' });
-    document.querySelectorAll('button[data-map-mode]').forEach((button) => button.addEventListener('click', () => this.setMapMode(button.dataset.mapMode)));
+    document.querySelectorAll('button[data-map-mode]').forEach((button) => button.addEventListener('click', () => {
+      this.setMapMode(button.dataset.mapMode);
+      if (this.workspaceView === 'explore') this.setManualControlsOpen(button.dataset.mapMode === 'terrain');
+      this.refreshMapMetadata();
+    }));
     document.querySelectorAll('button[data-workspace-view]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView(button.dataset.workspaceView)));
+    document.querySelectorAll('[data-open-routes]').forEach((button) => button.addEventListener('click', () => this.setWorkspaceView('routes')));
+    document.querySelectorAll('[data-layer-toggle]').forEach((button) => button.addEventListener('click', () => this.toggleMapLayer(button.dataset.layerToggle)));
+    el['contour-strength'].addEventListener('input', () => {
+      this.contourStrength = Number(el['contour-strength'].value) / 100;
+      this.applyLayerPreferences();
+    });
+    el['regional-overview-toggle'].addEventListener('click', () => {
+      this.regionalImageryEnabled = !this.regionalImageryEnabled;
+      if (this.regionalImageryEnabled && this.regionalImageryUnavailable) {
+        this.regionalImageryUnavailable = false;
+        this.map.getSource('local-regional-imagery')?.setTiles([REGIONAL_IMAGERY.tiles]);
+      }
+      localStorage.setItem('regionalImagery', this.regionalImageryEnabled ? 'on' : 'off');
+      this.updateSatelliteImagery();
+      this.refreshMapMetadata();
+    });
     document.getElementById('theme-toggle')?.addEventListener('click', () => this.setTheme(this.theme === 'dark' ? 'light' : 'dark'));
     document.getElementById('view-mode-toggle').addEventListener('click', () => this.setViewMode(!this.viewMode));
     document.getElementById('focus-route')?.addEventListener('click', () => this.focusRoute());
@@ -594,9 +653,32 @@ class CityExplorer {
       this.map?.resize();
     });
     this.renderAgentActivity();
+    this.updateSearchIntent();
+    this.introTimer = setTimeout(() => this.dismissIntro(), 2800);
+    document.addEventListener('pointerdown', (event) => {
+      this.dismissIntro();
+      if (!(event.target instanceof Element) || event.target.closest('.floating-search')) return;
+      this.searchFocused = false;
+      this.renderSuggestions([]);
+      this.updateSearchDiscovery();
+    });
+    document.addEventListener('keydown', () => this.dismissIntro(), { once: true });
+    const viewport = window.matchMedia('(max-width: 700px)');
+    viewport.addEventListener('change', () => {
+      if (this.workspaceView === 'explore') this.setManualControlsOpen(false);
+      this.updateDashboard();
+    });
+    this.renderRoutePlan();
     window.addEventListener('beforeunload', () => {
       window.clearTimeout(this.agentReconnectTimer);
       window.clearInterval(this.clockTimer);
+      clearTimeout(this.introTimer);
+      clearTimeout(this.geoStatusTimer);
+      this.elevationController?.abort();
+      this.imageryMetadataController?.abort();
+      this.terrainPointController?.abort();
+      clearTimeout(this.mapMetadataTimer);
+      this.attributionObserver?.disconnect();
       this.agentSocket?.close();
     });
   }
@@ -619,7 +701,7 @@ class CityExplorer {
     sidebar.classList.toggle('is-collapsed', !open);
     document.documentElement.dataset.sidebar = open ? 'open' : 'closed';
     toggle.setAttribute('aria-expanded', String(open));
-    toggle.querySelector('b').textContent = open ? 'CLOSE' : 'OPEN';
+    this.elements['manual-controls-content'].hidden = !open;
   }
 
   setInfoDrawerOpen(open) {
@@ -627,10 +709,15 @@ class CityExplorer {
     const toggle = document.getElementById('toggle-info-drawer');
     content.hidden = !open;
     document.querySelector('.info-drawer').classList.toggle('is-open', open);
+    document.documentElement.dataset.mapDetails = String(open);
     toggle.setAttribute('aria-expanded', String(open));
-    toggle.setAttribute('aria-label', `${open ? 'Collapse' : 'Expand'} map information`);
-    if (open && window.innerWidth <= 900) this.setManualControlsOpen(false);
+    toggle.setAttribute('aria-label', `${open ? 'Collapse' : 'Expand'} map details`);
+    if (open && window.innerWidth <= 700) this.setManualControlsOpen(false);
     if (open) navigator.serviceWorker?.controller?.postMessage({ type: 'map-cache-stats' });
+    if (open) {
+      this.updateDashboard();
+      this.refreshMapMetadata();
+    }
   }
 
   setGeoToolsOpen(open) {
@@ -638,8 +725,145 @@ class CityExplorer {
     const panel = this.elements['geo-content'].closest('.geo-panel');
     const toggle = this.elements['toggle-geo-tools'];
     panel.classList.toggle('is-collapsed', !open);
+    this.elements['geo-content'].hidden = !open;
     toggle.setAttribute('aria-expanded', String(open));
     toggle.querySelector('b').textContent = open ? 'CLOSE' : 'OPEN';
+  }
+
+  dismissIntro() {
+    clearTimeout(this.introTimer);
+    document.getElementById('view-heading').classList.add('is-dismissed');
+    document.documentElement.dataset.uiQuiet = 'true';
+  }
+
+  setCommandMode(enabled) {
+    this.commandMode = enabled;
+    this.suggestionController?.abort();
+    clearTimeout(this.suggestionTimer);
+    this.renderSuggestions([]);
+    this.updateSearchIntent();
+    this.updateSearchDiscovery();
+  }
+
+  updateSearchIntent() {
+    const input = this.elements['search-input'];
+    const instruction = this.commandMode || (!coordinateQuery(input.value.trim()) && mapInstruction(input.value.trim()));
+    const toggle = this.elements['search-command-toggle'];
+    toggle.setAttribute('aria-pressed', String(this.commandMode));
+    toggle.setAttribute('aria-label', this.commandMode ? 'Search for a place instead of asking Meridian' : 'Ask Meridian instead of searching for a place');
+    input.setAttribute('placeholder', this.commandMode ? 'Ask Meridian to find places or plan a route...' : 'Search places, coordinates, or ask Meridian...');
+    const submit = this.elements['search-submit'];
+    submit.setAttribute('aria-label', instruction ? 'Ask Meridian' : 'Search map');
+    submit.setAttribute('title', instruction ? 'Ask Meridian' : 'Search map');
+    document.querySelector('.floating-search').classList.toggle('is-command', instruction);
+  }
+
+  updateSearchDiscovery() {
+    this.elements['search-discovery'].hidden = !this.searchFocused || Boolean(this.elements['search-input'].value.trim()) || this.agentSubmitting || Boolean(this.agentRunId) || this.agentQuestionOpen;
+    document.documentElement.dataset.searchActive = String(this.searchFocused || this.agentSubmitting || Boolean(this.agentRunId) || this.agentQuestionOpen);
+  }
+
+  dismissAgentResult() {
+    this.agentPanelDismissed = true;
+    this.elements['agent-panel'].hidden = true;
+    this.elements['search-input'].focus({ preventScroll: true });
+  }
+
+  showCommandResult(summary, detail = '') {
+    this.agentPanelDismissed = false;
+    this.agentResultSummary = summary;
+    this.elements['agent-result-summary'].textContent = summary;
+    this.elements['agent-result-summary'].hidden = !summary;
+    this.elements['agent-panel'].hidden = false;
+    this.elements['agent-feedback'].textContent = '';
+    this.elements['agent-result-details'].hidden = !detail;
+    this.elements['agent-result-details'].open = false;
+    if (detail) renderAgentReply(this.elements['agent-response'], detail);
+    else this.elements['agent-response'].hidden = true;
+    this.agentActivity.tool = 'No active tool';
+    this.agentActivity.request = 'Map updated';
+    this.searchFocused = false;
+    this.updateSearchDiscovery();
+  }
+
+  applyLocalInstruction(query) {
+    const normalized = query.toLowerCase().trim().replace(/[.!]$/, '');
+    if (/\b(?:slope|aspect|viewshed|elevation profile|elevation gain|roads above|roads below)\b/.test(normalized)) {
+      this.showCommandResult('Terrain analysis is not available yet', 'Meridian can show relief, contours, and sampled point elevations. Slope, aspect, elevation profiles, and elevation-filtered roads require terrain analysis that this map service does not currently provide.');
+      return true;
+    }
+    if (/\b(?:hiking|off-road|scenic)\b.*\broute\b|\broute\b.*\b(?:hiking|off-road|scenic)\b/.test(normalized)) {
+      this.showCommandResult('Driving routes are currently supported', 'The route service uses the OpenStreetMap road network. Hiking, scenic, and off-road routing are not available; Meridian will not substitute a driving plan or invent journey estimates.');
+      return true;
+    }
+    const mode = normalized.match(/^(?:show|switch to|open)(?: the)? (satellite|streets?|terrain)(?: (?:map|view|mode))?$/);
+    if (mode) {
+      this.setWorkspaceView('explore');
+      this.setMapMode(mode[1].startsWith('street') ? 'route' : mode[1]);
+      if (mode[1] === 'terrain') this.setManualControlsOpen(true);
+      this.refreshMapMetadata();
+      this.showCommandResult(mode[1] === 'terrain' ? 'Topographic view / contours in meters' : mode[1] === 'satellite' ? 'Satellite imagery / plan view' : 'Streets / road network');
+      return true;
+    }
+    const layer = normalized.match(/^(show|hide|enable|disable)(?: the)? (labels|buildings|roads|places|boundaries|contours|hillshade)$/) || normalized.match(/^(labels|buildings|roads|places|boundaries|contours|hillshade) (on|off)$/);
+    if (layer) {
+      const name = layer[1] === 'show' || layer[1] === 'hide' || layer[1] === 'enable' || layer[1] === 'disable' ? layer[2] : layer[1];
+      const enabled = ['show', 'enable', 'on'].includes(layer[1]) || layer[2] === 'on';
+      if (['contours', 'hillshade'].includes(name) && this.mapMode !== 'terrain') {
+        this.setWorkspaceView('explore');
+        this.setMapMode('terrain');
+      }
+      this.toggleMapLayer(name, enabled);
+      this.showCommandResult(`${readable(name)} ${enabled ? 'on' : 'off'}`);
+      return true;
+    }
+    if (/^(?:show|enable|turn on) 3d$|^3d on$/.test(normalized) || /^(?:hide|disable|turn off) 3d$|^3d off$/.test(normalized)) {
+      const enabled = /^(?:show|enable|turn on)|on$/.test(normalized);
+      this.setTerrainView(enabled);
+      this.showCommandResult(enabled ? '3D relief enabled' : 'Plan view / 3D relief off');
+      return true;
+    }
+    return false;
+  }
+
+  toggleMapLayer(name, enabled = !this.layerPreferences?.[name]) {
+    this.layerPreferences = { labels: true, buildings: true, roads: true, places: true, boundaries: true, contours: true, hillshade: true, ...this.layerPreferences };
+    if (!Object.hasOwn(this.layerPreferences, name)) return;
+    this.layerPreferences[name] = enabled;
+    for (const layer of this.map?.getStyle?.()?.layers || []) {
+      if (!this.layerMatchesPreference(layer, name)) continue;
+      const id = layer.id.toLowerCase();
+      const inMode = /local-contour|local-hillshade/.test(id) ? this.mapMode === 'terrain'
+        : this.mapMode !== 'satellite' || (!['fill', 'fill-extrusion'].includes(layer.type) && name !== 'buildings');
+      this.map.setLayoutProperty(layer.id, 'visibility', enabled && inMode ? 'visible' : 'none');
+    }
+    this.applyMapMode();
+  }
+
+  layerMatchesPreference(layer, name) {
+    const id = layer.id.toLowerCase();
+    if (/^(?:geo-|local-search-result|local-city-focus)/.test(id)) return false;
+    return name === 'labels' ? layer.type === 'symbol'
+      : name === 'buildings' ? /building|local-selection|local-hover/.test(id)
+      : name === 'roads' ? /road|highway|bridge|tunnel|transportation/.test(id)
+      : name === 'places' ? /poi/.test(id)
+      : name === 'boundaries' ? /boundary|border/.test(id)
+      : name === 'contours' ? /local-contour/.test(id)
+      : name === 'hillshade' && id === 'local-hillshade';
+  }
+
+  applyLayerPreferences() {
+    const preferences = this.layerPreferences;
+    if (!preferences || !this.map?.getStyle?.()) return;
+    document.querySelectorAll('[data-layer-toggle]').forEach((button) => {
+      button.setAttribute('aria-pressed', String(preferences[button.dataset.layerToggle]));
+      button.disabled = button.dataset.layerToggle === 'buildings' && this.mapMode === 'satellite';
+      button.setAttribute('title', button.disabled ? 'Buildings are visible in Streets and Terrain' : '');
+    });
+    for (const layer of this.map.getStyle()?.layers || []) {
+      if (Object.entries(preferences).some(([name, enabled]) => !enabled && this.layerMatchesPreference(layer, name))) this.map.setLayoutProperty(layer.id, 'visibility', 'none');
+    }
+    if (this.map.getLayer('local-contours')) this.map.setPaintProperty('local-contours', 'line-opacity', this.contourStrength ?? 0.55);
   }
 
   setAgentActivity(activity) {
@@ -656,13 +880,18 @@ class CityExplorer {
     const activityPanel = document.getElementById('agent-hud');
     if (active && activityPanel) activityPanel.open = true;
     const feedback = document.getElementById('agent-feedback');
-    feedback.textContent = active && this.agentActivity.tool !== 'No active tool'
-      ? this.agentActivity.tool : this.agentActivity.request;
+    feedback.textContent = this.agentActivity.tool === 'Failed' || this.agentActivity.tool === 'Request failed'
+      ? this.agentActivity.request
+      : active && this.agentActivity.tool !== 'No active tool' ? this.agentActivity.tool : this.agentActivity.request;
     feedback.classList.toggle('is-error', this.agentActivity.tool === 'Failed' || this.agentActivity.tool === 'Request failed');
-    el['agent-submit'].disabled = !this.agentSocketReady || active;
-    el['agent-submit'].textContent = active ? 'Working' : 'Send';
+    el['search-submit'].disabled = active;
     el['agent-cancel'].classList.toggle('is-hidden', !active);
-    el['agent-input'].disabled = active;
+    el['search-input'].disabled = active;
+    const failed = this.agentActivity.tool === 'Failed' || this.agentActivity.tool === 'Request failed';
+    el['agent-panel'].hidden = !(active || this.agentQuestionOpen || failed || (!this.agentPanelDismissed && this.agentResultSummary));
+    document.querySelector('.floating-search').setAttribute('aria-busy', String(active));
+    this.setLoading(Boolean(this.searchLoading));
+    this.updateSearchDiscovery();
   }
 
   connectAgentSocket() {
@@ -689,6 +918,11 @@ class CityExplorer {
       if (this.agentSocket !== socket) return;
       this.agentSocketReady = false;
       this.agentSocket = null;
+      if (this.agentRunId || this.agentSubmitting) {
+        this.agentPostSerial = 0;
+        this.finishAgentRun();
+        this.setAgentActivity({ connection: 'RETRYING', request: 'Connection interrupted. Map changes already applied are kept; retry your instruction after reconnecting.', tool: 'Request failed' });
+      }
       this.renderAgentActivity();
       const delay = Math.min(10000, 500 * 2 ** this.agentReconnectAttempts);
       this.agentReconnectAttempts += 1;
@@ -708,7 +942,7 @@ class CityExplorer {
     if (message.type === 'session.ready' && message.sessionId === this.agentSessionId) {
       this.agentSocketReady = true;
       this.agentReconnectAttempts = 0;
-      this.setAgentActivity({ connection: 'READY', request: this.agentRunId ? 'Request in progress' : 'Ready for a map request' });
+      this.setAgentActivity({ connection: 'READY', request: this.agentRunId ? 'Request in progress' : 'Search a place or give the map an instruction.' });
       return;
     }
     if (message.type === 'error') {
@@ -719,7 +953,7 @@ class CityExplorer {
   }
 
   agentEventIsCurrent(runId) {
-    return Boolean(runId) && (this.agentSubmitting || !this.agentRunId || this.agentRunId === runId);
+    return Boolean(runId) && !this.agentTerminalRunIds?.has(runId) && (this.agentRunId === runId || (this.agentSubmitting && !this.agentRunId));
   }
 
   handleAgentEvent(event) {
@@ -753,7 +987,9 @@ class CityExplorer {
     }
     if (event.type === 'agent.completed') {
       this.finishAgentRun();
-      renderAgentReply(document.getElementById('agent-response'), event.message || 'Your map is ready.');
+      const message = event.message || 'Your map is ready.';
+      const summary = this.agentResultSummary || String(message).replace(/[#*_`]/g, '').split('\n').find((line) => line.trim())?.slice(0, 180) || 'Map updated';
+      this.showCommandResult(summary, message);
       this.setAgentActivity({ request: 'Map request completed', tool: 'Completed' });
       return;
     }
@@ -769,6 +1005,11 @@ class CityExplorer {
   }
 
   finishAgentRun() {
+    if (this.agentRunId) {
+      this.agentTerminalRunIds ||= new Set();
+      this.agentTerminalRunIds.add(this.agentRunId);
+      if (this.agentTerminalRunIds.size > 40) this.agentTerminalRunIds.delete(this.agentTerminalRunIds.values().next().value);
+    }
     this.agentSubmitting = false;
     this.agentCancelRequested = false;
     this.agentRunId = '';
@@ -778,21 +1019,30 @@ class CityExplorer {
 
   async submitAgentRequest(event) {
     event.preventDefault();
-    const message = this.elements['agent-input'].value.trim();
-    if (!message) return this.elements['agent-input'].focus();
+    const message = this.elements['search-input'].value.trim();
+    if (!message) return this.elements['search-input'].focus();
     await this.startAgentRequest(message);
   }
 
   async startAgentRequest(message) {
     if (this.agentSubmitting || this.agentRunId) return;
     if (!this.agentSocketReady) {
-      this.setAgentActivity({ request: 'Waiting for the agent connection' });
+      this.agentPanelDismissed = false;
+      this.setSearchStatus('Meridian instructions need the local map service. Place and coordinate search still work; retry the instruction once connected.', true);
+      this.setAgentActivity({ request: 'Waiting for the Meridian connection' });
       this.connectAgentSocket();
       return;
     }
     this.agentQuestionOpen = false;
     this.elements['agent-question'].classList.add('is-hidden');
     this.agentSubmitting = true;
+    this.agentLastMessage = message;
+    this.agentResultSummary = '';
+    this.agentPanelDismissed = false;
+    this.elements['agent-result-summary'].hidden = true;
+    this.elements['agent-result-details'].hidden = true;
+    this.searchFocused = false;
+    this.updateSearchDiscovery();
     this.agentCancelRequested = false;
     const requestSerial = ++this.agentRequestSerial;
     this.agentPostSerial = requestSerial;
@@ -807,7 +1057,9 @@ class CityExplorer {
       if (this.agentPostSerial !== requestSerial) return;
       this.agentSubmitting = false;
       this.agentRunId = this.agentRunId || response.runId;
-      this.elements['agent-input'].value = '';
+      this.elements['search-input'].value = '';
+      this.commandMode = false;
+      this.updateSearchIntent();
       this.setAgentActivity({ request: 'Request in progress' });
       if (this.agentCancelRequested) this.sendAgentCancel();
     } catch (error) {
@@ -822,7 +1074,7 @@ class CityExplorer {
       this.agentQuestionOpen = false;
       this.elements['agent-question'].classList.add('is-hidden');
       this.setAgentActivity({ request: 'Clarification dismissed', tool: 'No active tool' });
-      this.elements['agent-input'].focus();
+      this.elements['search-input'].focus();
       return;
     }
     if (!this.agentSubmitting && !this.agentRunId) return;
@@ -841,6 +1093,8 @@ class CityExplorer {
     const safeChoices = Array.isArray(choices) ? [...new Set(choices.map((choice) => String(choice || '').trim()).filter(Boolean))].slice(0, 4) : [];
     if (!safeQuestion || safeChoices.length < 2) return;
     this.agentQuestionOpen = true;
+    this.agentPanelDismissed = false;
+    this.elements['agent-panel'].hidden = false;
     this.elements['agent-question-text'].textContent = safeQuestion;
     const container = this.elements['agent-question-choices'];
     container.replaceChildren();
@@ -852,6 +1106,8 @@ class CityExplorer {
       container.append(button);
     }
     this.elements['agent-question'].classList.remove('is-hidden');
+    this.searchFocused = false;
+    this.updateSearchDiscovery();
     document.getElementById('agent-question').focus({ preventScroll: true });
   }
 
@@ -905,7 +1161,9 @@ class CityExplorer {
 
   agentRoute(value) {
     if (!value || typeof value !== 'object' || value.geometry?.type !== 'LineString' || !Array.isArray(value.geometry.coordinates)) return null;
-    const coordinates = value.geometry.coordinates.slice(0, 20_000).map((point) => {
+    const points = value.geometry.coordinates;
+    const bounded = points.length > 20_000 ? Array.from({ length: 20_000 }, (_, index) => points[Math.round(index * (points.length - 1) / 19_999)]) : points;
+    const coordinates = bounded.map((point) => {
       const lon = numeric(point?.[0]);
       const lat = numeric(point?.[1]);
       return lon === null || lat === null || lon < -180 || lon > 180 || lat < -90 || lat > 90 ? null : [lon, lat];
@@ -919,6 +1177,7 @@ class CityExplorer {
     return {
       id: String(value.id || 'agent-route').slice(0, 160), provider: String(value.provider || '').slice(0, 80),
       profile: String(value.profile || 'driving').slice(0, 40), waypoints,
+      stored: value.stored === true, sourceVersion: String(value.sourceVersion || '').slice(0, 120), createdAt: numeric(value.createdAt),
       geometry: { type: 'LineString', coordinates }, summary: value.summary && typeof value.summary === 'object' ? value.summary : {},
     };
   }
@@ -1015,6 +1274,7 @@ class CityExplorer {
     if (update.clear === true) {
       this.clearWorkspaceLocal(false);
       this.setGeoStatus('The map agent cleared the workspace.');
+      this.agentResultSummary = 'Workspace cleared / saved route records kept';
       return;
     }
     const selected = this.agentLocation(update.selectedCity);
@@ -1037,6 +1297,12 @@ class CityExplorer {
     this.renderSearchResults();
     this.updateIntroCard();
     this.applyAgentView(update.view);
+    const route = this.geo.route;
+    this.agentResultSummary = route
+      ? `${formatDistance(route.summary.distanceMeters) || 'Distance unavailable'} / ${formatDuration(route.summary.durationSeconds) || 'Time unavailable'} / driving`
+      : this.searchResults.length
+        ? `${this.searchResults.length} place${this.searchResults.length === 1 ? '' : 's'} on the map`
+        : selected ? `Exploring ${selected.shortName || selected.name}` : 'Map updated';
   }
 
   createMap() {
@@ -1044,7 +1310,7 @@ class CityExplorer {
       this.contourDem = new window.mlcontour.DemSource({ url: TERRAIN_TILE_URL, encoding: 'terrarium', maxzoom: 13, worker: true, cacheSize: 200 });
       this.contourDem.setupMaplibre(window.maplibregl);
     }
-    this.map = new window.maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/positron', center: [-122.48, 37.82], zoom: 11, pitch: this.terrainEnabled ? 45 : 0, bearing: -12, maxPitch: 78, attributionControl: false, antialias: true, maxTileCacheSize: 512, maxTileCacheZoomLevels: 5 });
+    this.map = new window.maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/positron', center: [-122.48, 37.82], zoom: 11, pitch: this.terrainEnabled ? 45 : 0, bearing: -12, maxPitch: 78, attributionControl: false, canvasContextAttributes: { antialias: true }, maxTileCacheSize: 512, maxTileCacheZoomLevels: 5 });
     this.map.addControl(new window.maplibregl.AttributionControl({ compact: true }), 'bottom-right');
     this.map.addControl(new window.maplibregl.ScaleControl({ maxWidth: 100, unit: 'metric' }), 'bottom-left');
     this.map.on('style.load', () => {
@@ -1057,6 +1323,7 @@ class CityExplorer {
       this.map.getSource(FOCUS_SOURCE)?.setData(this.selected ? this.focusFeature(this.selected) : EMPTY_COLLECTION);
       this.renderGeography();
       this.renderSearchResults();
+      this.refreshMapMetadata();
       if (this.map.getLayer(PREVIEW_LAYER) && !this.previewBuildingEventsBound) {
         this.map.on('click', PREVIEW_LAYER, (event) => this.showBuilding(event));
         this.map.on('mousemove', PREVIEW_LAYER, (event) => this.hoverBuilding(event));
@@ -1076,17 +1343,30 @@ class CityExplorer {
     this.map.on('click', 'local-search-result', (event) => this.selectSearchResult(event));
     this.map.on('mouseenter', 'local-search-result', () => { this.map.getCanvas().style.cursor = 'pointer'; });
     this.map.on('mouseleave', 'local-search-result', () => { this.map.getCanvas().style.cursor = ''; });
-    this.map.on('movestart', () => { if (this.selected && this.map.getZoom() >= 13) this.setPreviewVisible(true); });
+    this.map.on('movestart', (event) => {
+      if (event.originalEvent) this.dismissIntro();
+      this.elevationController?.abort();
+      this.imageryMetadataController?.abort();
+      clearTimeout(this.mapMetadataTimer);
+      this.mapMetadataState = null;
+      this.mapMetadataSequence = (this.mapMetadataSequence || 0) + 1;
+      if (this.selected && this.map.getZoom() >= 13) this.setPreviewVisible(true);
+    });
     this.map.on('moveend', () => {
       this.updateDashboard();
+      this.updateSatelliteImagery();
+      this.refreshMapMetadata();
       if (this.selected && this.map.getZoom() >= 13) this.worker.postMessage({ type: 'append', tiles: visibleTiles(this.map) });
     });
     this.map.on('error', (event) => {
       const source = event.sourceId || event.error?.sourceId;
-      if (source === 'local-imagery') {
+      if (source === 'local-regional-imagery') {
+        this.regionalImageryUnavailable = true;
+        this.updateSatelliteImagery();
+        this.showMapNotice('Regional satellite scene is unavailable. Showing the aerial composite instead.');
+      } else if (source === 'local-imagery') {
         this.imageryUnavailable = true;
-        if (this.mapMode === 'satellite') this.setMapMode('route');
-        this.showMapNotice('Satellite imagery is unavailable. Showing the street map.');
+        if (this.mapMode === 'satellite') this.showMapNotice('Some satellite tiles could not load. Select Satellite again to retry, or choose the street map.');
       } else if (source === 'local-contour-source' || source === TERRAIN_SOURCE) {
         this.showMapNotice('Some elevation data is unavailable. Map navigation remains active.');
       }
@@ -1097,12 +1377,18 @@ class CityExplorer {
       this.operate('reset');
     });
     this.map.on('click', (event) => {
-      if (!this.pinMode || this.viewMode) return;
+      if (this.viewMode || (!this.pinMode && (this.mapMode !== 'terrain' || this.workspaceView !== 'explore'))) return;
       const interactiveLayers = [PREVIEW_LAYER, 'local-buildings', 'local-buildings-inferred', 'local-poi-marker', 'local-search-result', 'geo-pin', 'geo-route-stop', 'geo-area-fill', 'geo-route', 'geo-route-search']
         .filter((layer) => this.map.getLayer(layer));
       if (interactiveLayers.length && this.map.queryRenderedFeatures(event.point, { layers: interactiveLayers }).length) return;
-      this.addMapPin(event.lngLat.lng, event.lngLat.lat);
+      if (this.pinMode) this.addMapPin(event.lngLat.lng, event.lngLat.lat);
+      else this.inspectTerrainPoint(event);
     });
+    const attribution = this.map.getContainer().querySelector('.maplibregl-ctrl-bottom-right');
+    this.attributionObserver = new ResizeObserver(() => {
+      document.documentElement.style.setProperty('--attribution-height', `${Math.ceil(attribution.getBoundingClientRect().height)}px`);
+    });
+    this.attributionObserver.observe(attribution);
     requestAnimationFrame(() => this.map.resize());
   }
 
@@ -1112,10 +1398,15 @@ class CityExplorer {
     const lastFill = layers.reduce((index, layer, current) => layer.type === 'fill' ? current : index, -1);
     const firstLine = layers.slice(lastFill + 1).find((layer) => layer.type === 'line' || layer.type === 'symbol')?.id;
     this.map.addSource('local-imagery', {
-      type: 'raster', tiles: ['https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 19,
+      type: 'raster', tiles: [IMAGERY_TILE_URL], tileSize: 256, maxzoom: 19,
       attribution: 'Imagery &copy; <a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9">Esri, Vantor, Earthstar Geographics, GIS User Community</a>',
     });
-    this.map.addLayer({ id: 'local-satellite', type: 'raster', source: 'local-imagery', layout: { visibility: this.mapMode === 'satellite' ? 'visible' : 'none' }, paint: { 'raster-saturation': -0.42, 'raster-brightness-max': 0.78, 'raster-contrast': 0.2, 'raster-fade-duration': 250 } }, firstLayer);
+    this.map.addLayer({ id: 'local-satellite', type: 'raster', source: 'local-imagery', layout: { visibility: this.mapMode === 'satellite' ? 'visible' : 'none' }, paint: { 'raster-saturation': 0, 'raster-brightness-max': 1, 'raster-contrast': 0, 'raster-fade-duration': 0 } }, firstLayer);
+    this.map.addSource('local-regional-imagery', {
+      type: 'raster', tiles: [REGIONAL_IMAGERY.tiles], tileSize: 256, maxzoom: 12, bounds: REGIONAL_IMAGERY.bounds,
+      attribution: '<a href="https://www.earthdata.nasa.gov/centers/gibs" target="_blank" rel="noopener">NASA GIBS / HLS</a>; Contains modified Copernicus Sentinel data (2026)',
+    });
+    this.map.addLayer({ id: 'local-regional-satellite', type: 'raster', source: 'local-regional-imagery', layout: { visibility: 'none' }, paint: { 'raster-saturation': 0, 'raster-brightness-max': 1, 'raster-contrast': 0, 'raster-resampling': 'linear', 'raster-fade-duration': 0 } }, firstLayer);
     this.map.addLayer({ id: 'local-hillshade', type: 'hillshade', source: TERRAIN_SOURCE, layout: { visibility: 'none' }, paint: { 'hillshade-exaggeration': 0.7, 'hillshade-illumination-direction': 315 } }, firstLine);
     if (!this.contourDem) return;
     this.map.addSource('local-contour-source', {
@@ -1123,7 +1414,7 @@ class CityExplorer {
       tiles: [this.contourDem.contourProtocolUrl({ thresholds: { 8: [200, 1000], 10: [100, 500], 12: [50, 250], 14: [20, 100], 15: [10, 50] }, multiplier: 1, contourLayer: 'contours', elevationKey: 'ele', levelKey: 'level' })],
     });
     this.map.addLayer({ id: 'local-contours', type: 'line', source: 'local-contour-source', 'source-layer': 'contours', layout: { visibility: 'none' }, paint: { 'line-color': '#827c6d', 'line-opacity': 0.55, 'line-width': ['match', ['get', 'level'], 1, 1, 0.45] } }, firstLine);
-    this.map.addLayer({ id: 'local-contour-labels', type: 'symbol', source: 'local-contour-source', 'source-layer': 'contours', filter: ['>', ['get', 'level'], 0], layout: { visibility: 'none', 'symbol-placement': 'line', 'text-field': ['concat', ['to-string', ['get', 'ele']], ' m'], 'text-font': ['Open Sans Regular'], 'text-size': 9, 'symbol-spacing': 350 }, paint: { 'text-color': '#716b5d', 'text-halo-color': '#e8e5dc', 'text-halo-width': 1 } });
+    this.map.addLayer({ id: 'local-contour-labels', type: 'symbol', source: 'local-contour-source', 'source-layer': 'contours', filter: ['>', ['get', 'level'], 0], layout: { visibility: 'none', 'symbol-placement': 'line', 'text-field': ['concat', ['to-string', ['get', 'ele']], ' m'], 'text-font': ['Noto Sans Regular'], 'text-size': 9, 'symbol-spacing': 350 }, paint: { 'text-color': '#716b5d', 'text-halo-color': '#e8e5dc', 'text-halo-width': 1 } });
   }
 
   showMapNotice(message) {
@@ -1141,32 +1432,75 @@ class CityExplorer {
       this.setPreviewVisible(this.previewVisible);
     }
     this.updateDashboard();
+    this.applyLayerPreferences();
+    this.updateSatelliteImagery();
+    this.refreshMapMetadata();
+  }
+
+  updateSatelliteImagery() {
+    if (!this.map?.getLayer?.('local-regional-satellite')) return;
+    const bounds = this.map.getBounds();
+    const [west, south, east, north] = REGIONAL_IMAGERY.bounds;
+    const eligible = this.mapMode === 'satellite' && this.map.getZoom() >= 10.5 && this.map.getZoom() <= 12 && this.map.getPitch() === 0 &&
+      bounds.getWest() >= west && bounds.getEast() <= east && bounds.getSouth() >= south && bounds.getNorth() <= north;
+    const active = eligible && this.regionalImageryEnabled && !this.regionalImageryUnavailable;
+    if (active !== this.regionalImageryActive) {
+      this.elevationController?.abort();
+      this.imageryMetadataController?.abort();
+      clearTimeout(this.mapMetadataTimer);
+      this.mapMetadataState = null;
+      this.mapMetadataSequence = (this.mapMetadataSequence || 0) + 1;
+    }
+    this.regionalImageryActive = active;
+    this.map.setLayoutProperty('local-regional-satellite', 'visibility', active ? 'visible' : 'none');
+    this.elements['regional-imagery-control'].hidden = !eligible;
+    this.elements['regional-overview-toggle'].setAttribute('aria-pressed', String(this.regionalImageryEnabled));
+    this.elements['regional-imagery-note'].textContent = this.regionalImageryUnavailable
+      ? 'Regional scene unavailable. Aerial composite is active; toggle to retry.'
+      : `Bay Area / Sentinel-2 / ${REGIONAL_IMAGERY.date} / 30 m. Clouds and small gaps remain; aerial imagery shows through gaps. Close-up views use the aerial composite.`;
+    if (this.mapMode === 'satellite') this.elements['context-mode'].textContent = active ? 'Regional satellite / Sentinel-2 scene' : 'Satellite / Aerial composite';
+    if (active !== this.lastImageryMetadataSource) {
+      this.elements['context-imagery'].textContent = active ? 'NASA GIBS / HLS Sentinel-2 / 30 m' : 'Esri World Imagery';
+      this.elements['context-imagery-date'].textContent = active ? `${REGIONAL_IMAGERY.date} / regional scene` : 'Varies by source';
+      this.lastImageryMetadataSource = active;
+    }
   }
 
   setMapMode(mode) {
     if (!['satellite', 'route', 'terrain'].includes(mode)) return;
     if (mode === 'satellite' && this.imageryUnavailable) {
-      this.showMapNotice('Satellite service is unavailable. Choose another view or reload to retry.');
-      return;
+      this.imageryUnavailable = false;
+      this.map?.getSource('local-imagery')?.setTiles([IMAGERY_TILE_URL]);
+    }
+    if (mode === 'satellite' && this.regionalImageryUnavailable) {
+      this.regionalImageryUnavailable = false;
+      this.map?.getSource('local-regional-imagery')?.setTiles([REGIONAL_IMAGERY.tiles]);
     }
     this.mapMode = mode;
     localStorage.setItem('mapMode', mode);
     document.getElementById('map-notice')?.classList.add('is-hidden');
     this.applyMapMode();
-    this.setTerrainView(mode === 'satellite');
     if (mode === 'terrain' && !this.contourDem) this.showMapNotice('Contour library unavailable. Showing shaded terrain only.');
+    this.terrainPointPopup?.remove();
   }
 
   setWorkspaceView(view) {
+    if (!['explore', 'routes', 'workspace'].includes(view)) return;
     this.workspaceView = view;
+    this.searchFocused = false;
+    this.updateSearchDiscovery();
+    this.terrainPointPopup?.remove();
+    if (this.pinMode) this.setPinMode(false);
     document.querySelectorAll('button[data-workspace-view]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.workspaceView === view)));
     this.setInfoDrawerOpen(false);
-    this.setManualControlsOpen(true);
+    this.setManualControlsOpen(view !== 'explore');
     this.setGeoToolsOpen(view !== 'explore');
     const utility = document.querySelector('.utility-tools');
     if (utility) utility.open = view === 'workspace';
     if (view === 'routes') this.setMapMode('route');
     if (view === 'explore') this.elements['search-input'].focus();
+    document.getElementById('controls-label').textContent = view === 'routes' ? 'Plan a route' : view === 'workspace' ? 'Your workspace' : 'Map controls';
+    document.documentElement.dataset.workspaceView = view;
     this.updateDashboard();
   }
 
@@ -1181,13 +1515,13 @@ class CityExplorer {
     document.documentElement.dataset.workspaceView = this.workspaceView;
     document.documentElement.dataset.hasRoute = String(Boolean(this.geo.route));
     document.documentElement.dataset.hasWorkspace = String(Boolean(this.geo.pins.length || this.geo.areas.length));
-    set('context-place', this.selected?.shortName || this.selected?.name || 'Explore a place');
+    set('context-place', this.selected?.shortName || this.selected?.name || 'San Francisco Bay Area');
     set('context-mode', this.mapMode === 'satellite' ? 'Satellite imagery' : this.mapMode === 'route' ? 'Street map' : 'Topographic / Elevation contours');
     set('context-zoom', this.map ? `${this.map.getZoom().toFixed(1)} / ${this.terrainEnabled ? '3D terrain' : 'Plan view'}` : '--');
-    set('context-guidance', this.geo.route ? 'Journey estimates and route source are shown alongside this view.' : this.geo.pins.length ? 'Your saved pins are ready to use as journey stops or area boundaries.' : 'Save a pin or plan a journey. Route and workspace details will appear here.');
+    set('context-guidance', 'Imagery is a composite, not a live or single-date capture. Elevations are sampled from a DEM, not survey measurements.');
     set('metric-pins', this.geo.pins.length);
     set('metric-areas', this.geo.areas.filter((area) => !area.summary?.invalid).length);
-    set('metric-buildings', this.buildings.toLocaleString());
+    set('metric-buildings', (this.buildings || 0).toLocaleString());
     set('metric-distance', summary ? formatDistance(summary.distanceMeters) || '--' : '--');
     const distance = document.getElementById('metric-distance');
     if (distance && summary) {
@@ -1210,12 +1544,29 @@ class CityExplorer {
     const replay = document.getElementById('replay-route');
     replay.hidden = !this.geo.route || !this.routeSearchEdges(this.geo.route).length;
     replay.textContent = this.geo.routeAnimation ? 'Stop replay' : 'Replay calculation';
-    set('view-location', this.selected?.name || 'Find a place. Make it yours.');
+    set('view-location', this.selected?.name || 'San Francisco Bay Area');
     set('view-title', this.workspaceView === 'routes' ? 'Route Planner' : this.workspaceView === 'workspace' ? 'Your Workspace' : this.mapMode === 'terrain' ? 'Terrain Explorer' : 'City Explorer');
     set('view-mode-label', this.mapMode === 'satellite' ? 'Satellite imagery' : this.mapMode === 'route' ? 'Monochrome / Streets' : 'Topographic / Contours in meters');
     const center = this.map?.getCenter();
     if (center) set('map-coordinates', `${Math.abs(center.lat).toFixed(4)} ${center.lat < 0 ? 'S' : 'N'} / ${Math.abs(center.lng).toFixed(4)} ${center.lng < 0 ? 'W' : 'E'}`);
-    if (center) set('context-coordinates', `${center.lat.toFixed(4)}, ${center.lng.toFixed(4)}`);
+    if (center) set('context-coordinates', `${Math.abs(center.lat).toFixed(4)}\u00b0 ${center.lat < 0 ? 'S' : 'N'}\n${Math.abs(center.lng).toFixed(4)}\u00b0 ${center.lng < 0 ? 'W' : 'E'}`);
+    const terrainControls = document.getElementById('terrain-controls');
+    terrainControls.hidden = this.mapMode !== 'terrain' || this.workspaceView !== 'explore';
+    if (this.map?.unproject && this.map?.getCanvas) {
+      const canvas = this.map.getCanvas();
+      const left = this.map.unproject([0, canvas.clientHeight / 2]);
+      const right = this.map.unproject([100, canvas.clientHeight / 2]);
+      const radians = Math.PI / 180;
+      const a = Math.sin((right.lat - left.lat) * radians / 2) ** 2 + Math.cos(left.lat * radians) * Math.cos(right.lat * radians) * Math.sin((right.lng - left.lng) * radians / 2) ** 2;
+      const distance = 2 * 6371008.8 * Math.asin(Math.min(1, Math.sqrt(a)));
+      if (distance > 0 && Number.isFinite(distance)) {
+        const power = 10 ** Math.floor(Math.log10(distance));
+        const scale = [1, 2, 5, 10].filter((value) => value * power <= distance).at(-1) * power;
+        set('context-scale', formatDistance(scale));
+        document.getElementById('context-scale-line').style.width = `${Math.round(100 * scale / distance)}px`;
+      }
+    }
+    this.applyLayerPreferences();
     const focus = document.getElementById('focus-route');
     if (focus) focus.disabled = !this.geo.route?.geometry;
     this.updateClock();
@@ -1225,9 +1576,10 @@ class CityExplorer {
     const coordinates = this.geo.route?.geometry?.coordinates || [];
     if (coordinates.length < 2) return;
     const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
-    const desktop = window.innerWidth > 900;
+    const desktop = window.innerWidth > 700;
     const sidebarRight = document.querySelector('.manual-sidebar').getBoundingClientRect().right;
-    this.map.fitBounds(bounds, { padding: desktop ? { top: 70, left: sidebarRight + 24, right: 70, bottom: document.querySelector('.info-drawer').classList.contains('is-open') ? 260 : 70 } : { top: 220, right: 30, bottom: 100, left: 30 }, pitch: 0, maxZoom: 16, duration: 800 });
+    const top = desktop ? (window.innerWidth <= 1280 ? 160 : 96) : 180;
+    this.map.fitBounds(bounds, { padding: desktop ? { top, left: sidebarRight + 24, right: 40, bottom: 260 } : { top, right: 24, bottom: Math.min(280, window.innerHeight * .35), left: 24 }, pitch: 0, maxZoom: 16, duration: 800 });
   }
 
   addTerrainSource() {
@@ -1336,6 +1688,9 @@ class CityExplorer {
     this.setSearchStatus('');
     this.renderSuggestions([]);
     const query = this.elements['search-input'].value.trim();
+    this.updateSearchIntent();
+    this.updateSearchDiscovery();
+    if (this.commandMode || coordinateQuery(query) || mapInstruction(query)) return;
     if (query.length < 2 || this.selected?.name === query) return this.renderSuggestions([]);
     this.suggestionTimer = setTimeout(async () => {
       const controller = new AbortController();
@@ -1386,6 +1741,31 @@ class CityExplorer {
     event.preventDefault();
     const query = this.elements['search-input'].value.trim();
     if (!query) return this.elements['search-input'].focus();
+    this.dismissIntro();
+    this.searchFocused = false;
+    this.updateSearchDiscovery();
+    const coordinate = coordinateQuery(query);
+    if (coordinate) {
+      if (coordinate.error) {
+        this.setSearchStatus(coordinate.error, true);
+        return;
+      }
+      this.chooseLocation(coordinate);
+      this.searchResults = [coordinate];
+      this.renderSearchResults();
+      this.setGeoStatus(`Centered on ${coordinate.name}. Coordinates use latitude, longitude.`);
+      return;
+    }
+    if (this.commandMode || mapInstruction(query)) {
+      clearTimeout(this.suggestionTimer);
+      this.suggestionController?.abort();
+      this.searchController?.abort();
+      this.renderSuggestions([]);
+      this.setSearchStatus('');
+      this.setLoading(false);
+      if (this.applyLocalInstruction(query)) return;
+      return this.startAgentRequest(query);
+    }
     return this.resolveSearch(query, this.country.countryCode);
   }
 
@@ -1406,7 +1786,7 @@ class CityExplorer {
       if (!response.result) throw new Error('No matching place. Try adding a city or country.');
       this.chooseLocation(response.result);
     } catch (error) {
-      if (!controller.signal.aborted) this.setSearchStatus(`${error.message || 'Search unavailable.'} Edit your search or press Go to retry.`, true);
+      if (!controller.signal.aborted) this.setSearchStatus(`${error.message || 'Search unavailable.'} Edit your search or press Enter to retry.`, true);
     } finally {
       if (this.searchController === controller && !controller.signal.aborted) this.setLoading(false);
     }
@@ -1417,8 +1797,13 @@ class CityExplorer {
     if (event.key === 'Escape') {
       clearTimeout(this.suggestionTimer);
       this.suggestionController?.abort();
+      this.searchController?.abort();
+      this.searchFocused = false;
       this.setLoading(false);
       this.renderSuggestions([]);
+      this.updateSearchDiscovery();
+      if (this.agentQuestionOpen || this.agentRunId || this.agentSubmitting) this.cancelAgentRequest();
+      else if (!this.elements['agent-panel'].hidden) this.dismissAgentResult();
       return;
     }
     if (!options.length) return;
@@ -1459,7 +1844,11 @@ class CityExplorer {
     this.selected = location;
     if (location.countryCode) this.country = { country: location.country || '', countryCode: location.countryCode, method: source };
     this.geo.context = { ...this.geo.context, lat: location.lat, lon: location.lon, source, countryCode: location.countryCode || this.country.countryCode || '' };
-    this.elements['search-input'].value = location.name;
+    this.elements['search-input'].value = source === 'geoip' ? '' : location.name;
+    this.commandMode = false;
+    this.searchFocused = false;
+    this.updateSearchIntent();
+    this.updateSearchDiscovery();
     this.renderSuggestions([]);
     this.renderRegion();
     this.setStream({ loaded: 0, total: 9, buildings: 0, inferred: 0, active: true, preview: true, source: '', degraded: false });
@@ -1475,7 +1864,6 @@ class CityExplorer {
     this.setPreviewVisible(true);
     if (this.map.getLayer('local-selection')) this.map.setFilter('local-selection', ['==', ['get', 'sourceId'], '__none__']);
     this.map.getSource(FOCUS_SOURCE)?.setData(this.focusFeature(location));
-    this.terrainEnabled = this.mapMode === 'satellite';
     this.applyTerrain();
     const camera = { center: [location.lon, location.lat], zoom: this.mapMode === 'terrain' ? 12 : 14, pitch: this.terrainEnabled ? 45 : 0, bearing: this.mapMode === 'route' ? 0 : -12 };
     if (immediate) this.map.jumpTo(camera);
@@ -1553,7 +1941,356 @@ class CityExplorer {
     this.updateDashboard();
   }
 
-  setLoading(loading) { this.elements['search-loader'].classList.toggle('is-hidden', !loading); }
+  refreshMapMetadata() {
+    const snapshot = this.mapMetadataSnapshot();
+    const previous = this.mapMetadataState;
+    if (!snapshot?.elevationVisible) {
+      clearTimeout(this.mapMetadataTimer);
+      this.elevationController?.abort();
+      this.imageryMetadataController?.abort();
+      this.mapMetadataState = null;
+      this.mapMetadataSequence = (this.mapMetadataSequence || 0) + 1;
+      return;
+    }
+    const cooldown = previous?.failed ? 5000 : 30000;
+    if (previous?.key === snapshot.key && previous.map === snapshot.map && previous.dem === snapshot.dem &&
+      (previous.pending || Date.now() - previous.finishedAt < cooldown)) return;
+
+    clearTimeout(this.mapMetadataTimer);
+    this.elevationController?.abort();
+    this.imageryMetadataController?.abort();
+    const sequence = this.mapMetadataSequence = (this.mapMetadataSequence || 0) + 1;
+    const state = { key: snapshot.key, map: snapshot.map, dem: snapshot.dem, pending: true };
+    this.mapMetadataState = state;
+    const delay = Math.max(250, 1000 - (Date.now() - (this.mapMetadataStartedAt || 0)));
+    this.mapMetadataTimer = setTimeout(() => {
+      this.mapMetadataTimer = null;
+      if (!this.isMapMetadataCurrent(snapshot, sequence)) {
+        if (this.mapMetadataState === state) this.mapMetadataState = null;
+        return;
+      }
+      this.mapMetadataStartedAt = Date.now();
+      const requests = [this.refreshElevationMetadata(snapshot, sequence)];
+      if (snapshot.detailsOpen) requests.push(this.refreshImageryMetadata(snapshot, sequence));
+      Promise.allSettled(requests).then((results) => {
+        if (this.mapMetadataState !== state) return;
+        if (!this.isMapMetadataCurrent(snapshot, sequence)) {
+          this.mapMetadataState = null;
+          return;
+        }
+        state.pending = false;
+        state.finishedAt = Date.now();
+        state.failed = results.some((result) => result.status === 'rejected' || result.value === false);
+      });
+    }, delay);
+  }
+
+  async sampleElevationPoints(points, zoom, controller = new AbortController()) {
+    const locations = Array.isArray(points) ? points.slice(0, 10) : [];
+    const elevations = locations.map(() => null);
+    const dem = this.contourDem;
+    if (!Number.isFinite(zoom) || typeof dem?.getDemTile !== 'function' || controller.signal.aborted) return elevations;
+    const z = Math.max(0, Math.min(13, Math.round(zoom)));
+    const groups = new Map();
+    locations.forEach((location, index) => {
+      const point = this.metadataTilePoint(location, z);
+      if (!point) return;
+      const key = `${z}/${point.x}/${point.y}`;
+      if (!groups.has(key)) groups.set(key, { x: point.x, y: point.y, points: [] });
+      groups.get(key).points.push({ ...point, index });
+    });
+    const requests = [...groups.values()].map(async (group) => {
+      try {
+        const tile = await dem.getDemTile(z, group.x, group.y, controller);
+        if (controller.signal.aborted || !Number.isInteger(tile?.width) || !Number.isInteger(tile?.height) ||
+          tile.width < 1 || tile.height < 1 || !tile.data || tile.data.length < tile.width * tile.height) return;
+        for (const point of group.points) {
+          // DEM values lie on pixel centers, not the tile's outer edges.
+          const x = Math.max(0, Math.min(tile.width - 1, Math.round(point.u * tile.width - 0.5)));
+          const y = Math.max(0, Math.min(tile.height - 1, Math.round(point.v * tile.height - 0.5)));
+          const value = tile.data[y * tile.width + x];
+          if (Number.isFinite(value) && value >= -12000 && value <= 9000) elevations[point.index] = value;
+        }
+      } catch {
+        // Missing DEM coverage must not be reported as sea level.
+      }
+    });
+    let cancel;
+    const cancelled = new Promise((resolve) => {
+      cancel = () => resolve();
+      controller.signal.addEventListener('abort', cancel, { once: true });
+      if (controller.signal.aborted) cancel();
+    });
+    try {
+      // A shared cached DEM request may remain active for other map consumers.
+      await Promise.race([Promise.all(requests), cancelled]);
+    } finally {
+      controller.signal.removeEventListener('abort', cancel);
+    }
+    return controller.signal.aborted ? locations.map(() => null) : elevations;
+  }
+
+  async refreshElevationMetadata(snapshot = this.mapMetadataSnapshot(), sequence = this.mapMetadataSequence) {
+    if (!snapshot?.elevationVisible || !this.isMapMetadataCurrent(snapshot, sequence)) return false;
+    this.elevationController?.abort();
+    const controller = new AbortController();
+    this.elevationController = controller;
+    const current = () => !controller.signal.aborted && this.isMapMetadataCurrent(snapshot, sequence);
+    const set = (id, value, title) => {
+      const element = document.getElementById(id);
+      if (element) { element.textContent = value; element.title = title || ''; }
+    };
+    const format = (value) => Number.isFinite(value) ? `~${(Math.round(value) || 0).toLocaleString()} m` : 'Unavailable';
+    const contourZoom = Math.max(0, Math.min(15, Math.floor(snapshot.zoom)));
+    const intervals = contourZoom >= 15 ? [10, 50] : contourZoom >= 14 ? [20, 100] : contourZoom >= 12 ? [50, 250] : contourZoom >= 10 ? [100, 500] : contourZoom >= 8 ? [200, 1000] : null;
+    const contourLabel = intervals
+      ? `Nominal contours: ${intervals[0]} m / ${intervals[1]} m major${snapshot.pitch > 0 ? '; pitch may mix intervals' : ''}.`
+      : 'Contours start at nominal zoom 8.';
+    const provenance = `Mapzen Terrain Tiles via AWS, composite DEM / sampled DEM z${snapshot.demZoom}. Unexaggerated meters; native resolution varies. Acquisition date and vertical accuracy are not supplied.`;
+    const render = (values = []) => {
+      const viewport = values.slice(1).filter(Number.isFinite);
+      set('context-center-elevation', format(values[0]), provenance);
+      set('terrain-center-elevation', format(values[0]), provenance);
+      set('terrain-range-low', format(viewport.length ? Math.min(...viewport) : null), 'Lowest valid viewport sample, not the minimum terrain elevation.');
+      set('terrain-range-high', format(viewport.length ? Math.max(...viewport) : null), 'Highest valid viewport sample, not the maximum terrain elevation.');
+      set('terrain-interval', `Sampled viewport range (${viewport.length}/9 points), not exact extrema. ${contourLabel}`, provenance);
+      return Number.isFinite(values[0]) || viewport.length > 0;
+    };
+    set('context-elevation', 'Mapzen / Terrain Tiles via AWS (composite DEM)', provenance);
+    set('context-center-elevation', 'Sampling...', provenance);
+    set('terrain-center-elevation', 'Sampling...', provenance);
+    set('terrain-range-low', '--', 'Sampled viewport range, not exact extrema.');
+    set('terrain-range-high', '--', 'Sampled viewport range, not exact extrema.');
+    set('terrain-interval', `Sampling viewport range. ${contourLabel}`, provenance);
+    const timeout = setTimeout(() => {
+      if (current()) render();
+      controller.abort();
+    }, 12000);
+    try {
+      const points = [snapshot.center];
+      for (const y of [0.1, 0.5, 0.9]) for (const x of [0.1, 0.5, 0.9]) {
+        try { points.push(snapshot.map.unproject([snapshot.width * x, snapshot.height * y])); }
+        catch { points.push(null); }
+      }
+      const elevations = await this.sampleElevationPoints(points, snapshot.demZoom, controller);
+      return current() ? render(elevations) : false;
+    } catch {
+      if (current()) render();
+      return false;
+    } finally {
+      clearTimeout(timeout);
+      if (this.elevationController === controller) this.elevationController = null;
+    }
+  }
+
+  async refreshImageryMetadata(snapshot = this.mapMetadataSnapshot(), sequence = this.mapMetadataSequence) {
+    if (!snapshot?.detailsOpen || !this.isMapMetadataCurrent(snapshot, sequence)) return false;
+    this.imageryMetadataController?.abort();
+    if (snapshot.regionalImagery) {
+      this.elements['context-imagery'].textContent = 'NASA GIBS / HLS Sentinel-2 / 30 m';
+      this.elements['context-imagery-date'].textContent = `${REGIONAL_IMAGERY.date} / regional scene`;
+      this.elements['context-imagery'].title = 'Adjacent HLS S30 tiles from the same Sentinel-2C pass. Reflectance imagery at 30 m; clouds and small coverage gaps remain. Aerial imagery shows through transparent pixels. Not live imagery or a global cloudless mosaic.';
+      return true;
+    }
+    const controller = new AbortController();
+    this.imageryMetadataController = controller;
+    const current = () => !controller.signal.aborted && this.isMapMetadataCurrent(snapshot, sequence);
+    const footprint = `Center footprint / nominal imagery LOD ${snapshot.imageryLod}`;
+    const set = (id, value, title) => {
+      const element = document.getElementById(id);
+      if (element) { element.textContent = value; element.title = title || ''; }
+    };
+    const sourceMetric = (value) => value !== null && value !== undefined && String(value).trim() && Number.isFinite(Number(value)) && Number(value) > 0
+      ? `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 3 })} m` : 'Not supplied';
+    const sourceDate = (citation) => {
+      const raw = String(citation?.SRC_DATE ?? '');
+      const match = raw.match(/^(\d{4})(\d{2})(\d{2})$/);
+      if (match) {
+        const label = `${match[1]}-${match[2]}-${match[3]}`;
+        const date = new Date(`${label}T00:00:00Z`);
+        if (Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === label) return label;
+      }
+      const alternate = citation?.SRC_DATE2;
+      if (alternate !== null && alternate !== undefined && String(alternate).trim() && Number.isFinite(Number(alternate))) {
+        const date = new Date(Number(alternate));
+        if (Number.isFinite(date.getTime())) return date.toISOString().slice(0, 10);
+      }
+      return 'Not supplied';
+    };
+    const render = (entry) => {
+      const citation = entry?.citation;
+      const name = String(citation?.NICE_NAME || citation?.NICE_DESC || 'Source name not supplied').trim().slice(0, 100);
+      const description = String(citation?.NICE_DESC || '').trim().slice(0, 100);
+      const resolution = sourceMetric(citation?.SRC_RES);
+      const accuracy = sourceMetric(citation?.SRC_ACC);
+      const release = String(citation?.ReleaseName || 'Not supplied').trim().slice(0, 100);
+      const detail = `${footprint}. Satellite/aerial composite, not live or a viewport-wide acquisition date. ${description}\nSource resolution: ${resolution}; reported source accuracy: ${accuracy}. Service release: ${release}.${entry?.overlaps > 1 ? ` Highest DrawOrder citation shown among ${entry.overlaps} overlapping footprints.` : ''} Pitch/terrain can select mixed imagery LODs.`;
+      set('context-imagery', `Esri World Imagery / ${citation ? `${name}${resolution !== 'Not supplied' ? ` / ${resolution} source resolution` : ''}` : 'Citation unavailable'} / ${footprint}${snapshot.pitch > 0 ? ' (view may mix LODs)' : ''}`, detail);
+      set('context-imagery-date', `${entry ? sourceDate(citation) : 'Unavailable'} / center footprint only`, detail);
+      return Boolean(citation);
+    };
+    set('context-imagery', `Esri World Imagery / Loading citation / ${footprint}`, 'Center footprint only; nominal LOD, not viewport-wide coverage.');
+    set('context-imagery-date', 'Loading citation...', 'Acquisition dates apply only to the queried center footprint.');
+    const timeout = setTimeout(() => {
+      if (current()) render(null);
+      controller.abort();
+    }, 12000);
+    try {
+      const tile = this.metadataTilePoint(snapshot.center, snapshot.imageryLod);
+      // Keep the actual query point in the key: citation seams can cross one tile.
+      const key = `${snapshot.imageryLod}/${tile.x}/${tile.y}/${snapshot.center.lon},${snapshot.center.lat}`;
+      const cache = this.imageryMetadataCache || (this.imageryMetadataCache = new Map());
+      let entry = cache.get(key);
+      if (entry && Date.now() - entry.at >= (entry.citation ? 300000 : 30000)) { cache.delete(key); entry = null; }
+      if (!entry) {
+        const params = new URLSearchParams({
+          f: 'json', geometry: JSON.stringify({ x: snapshot.center.lon, y: snapshot.center.lat, spatialReference: { wkid: 4326 } }),
+          geometryType: 'esriGeometryPoint', inSR: '4326', spatialRel: 'esriSpatialRelIntersects',
+          where: `MinMapLevel<=${snapshot.imageryLod} AND MaxMapLevel>=${snapshot.imageryLod}`,
+          outFields: 'SRC_DATE,SRC_DATE2,SRC_RES,SRC_ACC,NICE_NAME,NICE_DESC,ReleaseName,DrawOrder',
+          returnGeometry: 'false', orderByFields: 'DrawOrder DESC', resultRecordCount: '20',
+        });
+        const response = await fetch(`https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/4/query?${params}`, { signal: controller.signal, credentials: 'omit' });
+        if (!response.ok) throw new Error('Imagery citation unavailable.');
+        const payload = await response.json();
+        if (payload.error || !Array.isArray(payload.features)) throw new Error('Imagery citation unavailable.');
+        const priority = (record) => record.DrawOrder !== null && record.DrawOrder !== undefined && Number.isFinite(Number(record.DrawOrder)) ? Number(record.DrawOrder) : -Infinity;
+        const records = payload.features.slice(0, 20).map((feature) => feature.attributes).filter((record) => record && typeof record === 'object')
+          .sort((first, second) => priority(second) - priority(first));
+        if (!current()) return false;
+        entry = { at: Date.now(), citation: records[0] || null, overlaps: records.length };
+      }
+      if (!current()) return false;
+      cache.delete(key);
+      cache.set(key, entry);
+      while (cache.size > 20) cache.delete(cache.keys().next().value);
+      return render(entry);
+    } catch {
+      if (current()) render(null);
+      return false;
+    } finally {
+      clearTimeout(timeout);
+      if (this.imageryMetadataController === controller) this.imageryMetadataController = null;
+    }
+  }
+
+  async inspectTerrainPoint(event) {
+    const map = this.map;
+    if (!map || this.viewMode || this.workspaceView !== 'explore' || this.mapMode !== 'terrain' || !window.maplibregl?.Popup) return;
+    const zoom = Math.max(0, Math.min(13, Math.round(map.getZoom() + 1)));
+    const point = this.metadataTilePoint(event?.lngLat, zoom);
+    if (!point) return;
+    this.terrainPointController?.abort();
+    this.terrainPointPopup?.remove();
+    const sequence = this.terrainPointSequence = (this.terrainPointSequence || 0) + 1;
+    const controller = new AbortController();
+    const dem = this.contourDem;
+    this.terrainPointController = controller;
+    const location = { id: `terrain:${point.lat.toFixed(6)},${point.lon.toFixed(6)}`, name: `Terrain point ${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}`, lat: point.lat, lon: point.lon, provider: 'coordinates', countryCode: '' };
+    const content = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = 'Terrain point';
+    const elevation = document.createElement('span');
+    elevation.className = 'popup-type';
+    elevation.textContent = 'Sampling elevation...';
+    const coordinates = document.createElement('span');
+    coordinates.className = 'popup-meta';
+    coordinates.textContent = `${point.lat.toFixed(5)}, ${point.lon.toFixed(5)} (latitude, longitude)`;
+    const source = document.createElement('span');
+    source.className = 'popup-meta';
+    source.textContent = `Mapzen / Terrain Tiles via AWS, composite DEM / z${zoom}. Approximate unexaggerated meters; native resolution varies.`;
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'popup-action';
+    action.textContent = 'Use as route start';
+    content.append(title, elevation, coordinates, source, action);
+    const popup = new window.maplibregl.Popup({ closeButton: true, className: 'mono-popup', offset: 12, maxWidth: '300px' })
+      .setLngLat([point.lon, point.lat]).setDOMContent(content).addTo(map);
+    this.terrainPointPopup = popup;
+    const active = () => this.terrainPointSequence === sequence && this.terrainPointPopup === popup &&
+      this.map === map && !this.viewMode && this.workspaceView === 'explore' && this.mapMode === 'terrain';
+    const current = () => active() && !controller.signal.aborted && this.contourDem === dem;
+    popup.on('close', () => {
+      if (this.terrainPointPopup !== popup) return;
+      this.terrainPointPopup = null;
+      this.terrainPointSequence = (this.terrainPointSequence || 0) + 1;
+      controller.abort();
+      if (this.terrainPointController === controller) this.terrainPointController = null;
+    });
+    action.addEventListener('click', () => {
+      if (!active()) return;
+      popup.remove();
+      this.setWorkspaceView('routes');
+      this.chooseRouteStop(0, location);
+    });
+    const timeout = setTimeout(() => {
+      if (current()) elevation.textContent = 'Elevation unavailable';
+      controller.abort();
+    }, 12000);
+    try {
+      const [value] = await this.sampleElevationPoints([location], zoom, controller);
+      if (current()) elevation.textContent = Number.isFinite(value)
+        ? `Approximately ${(Math.round(value) || 0).toLocaleString()} m (unexaggerated sample)` : 'Elevation unavailable';
+    } catch {
+      if (current()) elevation.textContent = 'Elevation unavailable';
+    } finally {
+      clearTimeout(timeout);
+      if (this.terrainPointController === controller) this.terrainPointController = null;
+    }
+  }
+
+  metadataTilePoint(location, zoom) {
+    const longitude = location?.lng ?? location?.lon ?? location?.[0];
+    const latitude = location?.lat ?? location?.[1];
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude) || !Number.isInteger(zoom) || zoom < 0 || zoom > 19) return null;
+    const wrapped = longitude % 360;
+    const lon = wrapped >= 180 ? wrapped - 360 : wrapped < -180 ? wrapped + 360 : wrapped;
+    const lat = Math.max(-85.0511287798066, Math.min(85.0511287798066, latitude));
+    const scale = 2 ** zoom;
+    const worldX = Math.max(0, Math.min(scale * (1 - Number.EPSILON), (lon + 180) / 360 * scale));
+    const radians = lat * Math.PI / 180;
+    const worldY = Math.max(0, Math.min(scale, (1 - Math.asinh(Math.tan(radians)) / Math.PI) / 2 * scale));
+    const x = ((Math.floor(worldX) % scale) + scale) % scale;
+    const y = Math.max(0, Math.min(scale - 1, Math.floor(worldY)));
+    return { lon, lat, x, y, u: worldX - Math.floor(worldX), v: Math.max(0, Math.min(1, worldY - y)) };
+  }
+
+  mapMetadataSnapshot() {
+    if (!this.map) return null;
+    try {
+      const map = this.map;
+      const center = this.metadataTilePoint(map.getCenter(), 0);
+      const canvas = map.getCanvas();
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      const zoom = map.getZoom();
+      const pitch = map.getPitch();
+      const bearing = map.getBearing();
+      const padding = map.getPadding?.() || {};
+      const terrain = map.getTerrain?.();
+      if (!center || !Number.isFinite(zoom) || !Number.isFinite(pitch) || !Number.isFinite(bearing) ||
+        !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+      const detailsOpen = document.getElementById('info-drawer-content')?.hidden === false;
+      const imageryLod = Math.max(0, Math.min(19, Math.round(zoom + 1)));
+      return {
+        map, dem: this.contourDem, center: { lon: center.lon, lat: center.lat }, width, height, zoom, pitch, bearing, detailsOpen, imageryLod,
+        regionalImagery: this.regionalImageryActive === true,
+        demZoom: Math.min(13, imageryLod), elevationVisible: detailsOpen || (this.workspaceView === 'explore' && this.mapMode === 'terrain'),
+        key: [center.lon, center.lat, width, height, zoom, pitch, bearing, padding.top, padding.right, padding.bottom, padding.left,
+          terrain?.source, terrain?.exaggeration, detailsOpen, this.workspaceView, this.mapMode, this.regionalImageryActive].join('|'),
+      };
+    } catch { return null; }
+  }
+
+  isMapMetadataCurrent(snapshot, sequence) {
+    return Boolean(snapshot && this.mapMetadataSequence === sequence && this.map === snapshot.map && this.contourDem === snapshot.dem &&
+      !snapshot.map.isMoving?.() && this.mapMetadataSnapshot()?.key === snapshot.key);
+  }
+
+  setLoading(loading) {
+    this.searchLoading = loading;
+    this.elements['search-loader'].classList.toggle('is-hidden', !(loading || this.agentSubmitting || this.agentRunId));
+  }
 
   hoverBuilding(event) {
     const feature = event.features?.[0];
@@ -1792,6 +2529,9 @@ class CityExplorer {
   setGeoStatus(message, error = false) {
     this.elements['geo-status'].textContent = message;
     this.elements['geo-status'].classList.toggle('is-error', error);
+    this.elements['geo-status'].classList.toggle('is-hidden', !message);
+    clearTimeout(this.geoStatusTimer);
+    if (message && !error) this.geoStatusTimer = setTimeout(() => this.elements['geo-status'].classList.add('is-hidden'), 6500);
   }
 
   renderWorkspace() {
@@ -1856,7 +2596,7 @@ class CityExplorer {
       row.dataset.routeStop = String(index);
       const marker = document.createElement('span');
       marker.className = 'route-stop-index';
-      marker.textContent = this.routeStopLabel(index);
+      marker.textContent = index === 0 ? 'From' : index === plan.length - 1 ? 'To' : `Waypoint ${index}`;
       const field = document.createElement('div');
       field.className = 'route-stop-field';
       const input = document.createElement('input');
@@ -1864,7 +2604,7 @@ class CityExplorer {
       input.value = stop.query;
       input.placeholder = index === 0 ? 'Starting point' : index === plan.length - 1 ? 'Destination' : 'Stop';
       input.autocomplete = 'off';
-      input.setAttribute('aria-label', `Route stop ${this.routeStopLabel(index)}`);
+      input.setAttribute('aria-label', index === 0 ? 'Route starting point' : index === plan.length - 1 ? 'Route destination' : `Route waypoint ${index}`);
       input.addEventListener('focus', () => { this.activeRouteStopIndex = index; });
       input.addEventListener('input', () => this.setRouteStopQuery(index, input.value));
       input.addEventListener('keydown', (event) => {
@@ -1909,10 +2649,10 @@ class CityExplorer {
     const complete = selectedCount === plan.length && selectedCount >= 2;
     this.elements['route-stop-count'].textContent = `${selectedCount} STOP${selectedCount === 1 ? '' : 'S'}`;
     this.elements['trace-route'].disabled = !complete || this.routeSubmitting;
-    this.elements['trace-route'].textContent = this.routeSubmitting ? 'Calculating...' : 'Trace route';
+    this.elements['trace-route'].textContent = this.routeSubmitting ? 'Calculating...' : 'Plan route';
     this.elements['route-plan-hint'].textContent = !complete
-        ? 'Type to reuse previously searched places. Press Enter to search OpenStreetMap first and show every match on the map.'
-      : `${selectedCount} stops in order. Use ^ and v to rearrange the plan.`;
+        ? 'Press Enter to find a place, then choose a match. Driving routes only.'
+      : `${selectedCount} stops in order. Distance and time are road-network estimates.`;
   }
 
   async loadWorkspace(restoreLocation = true) {
@@ -1951,6 +2691,8 @@ class CityExplorer {
     const context = this.geo.context;
     if (numeric(context.lat) !== null && numeric(context.lon) !== null) return { lat: Number(context.lat), lon: Number(context.lon) };
     if (this.selected) return { lat: this.selected.lat, lon: this.selected.lon };
+    const center = this.map?.getCenter?.();
+    if (center) return { lat: center.lat, lon: center.lng };
     return null;
   }
 
@@ -2010,6 +2752,12 @@ class CityExplorer {
   async searchRouteStop(index) {
     const stop = this.routePlan()[index];
     const query = stop?.query.trim() || '';
+    const coordinate = coordinateQuery(query);
+    if (coordinate) {
+      if (coordinate.error) this.setGeoStatus(coordinate.error, true);
+      else this.chooseRouteStop(index, coordinate);
+      return;
+    }
     if (query.length < 2) {
       this.setGeoStatus('Enter at least two characters before searching for places.', true);
       return;
@@ -2044,6 +2792,7 @@ class CityExplorer {
   }
 
   chooseRouteStop(index, place) {
+    if (this.workspaceView !== 'routes') this.setWorkspaceView('routes');
     const plan = this.routePlan();
     const targetIndex = plan[index] ? index : plan.findIndex((candidate) => !candidate.place);
     const stop = plan[targetIndex];
@@ -2073,7 +2822,11 @@ class CityExplorer {
     const button = this.elements['pin-mode'];
     button.classList.toggle('is-active', enabled);
     button.setAttribute('aria-pressed', String(enabled));
-    button.textContent = enabled ? 'CANCEL PIN MODE' : 'PIN STOP ON MAP';
+    button.textContent = enabled ? 'Cancel map pick' : 'Pick on map';
+    const workspaceButton = this.elements['workspace-pin-mode'];
+    workspaceButton.setAttribute('aria-pressed', String(enabled));
+    workspaceButton.classList.toggle('is-active', enabled);
+    workspaceButton.textContent = enabled ? 'Cancel map pick' : 'Save a map point';
     this.map.getCanvas().style.cursor = enabled ? 'crosshair' : '';
   }
 
@@ -2085,7 +2838,7 @@ class CityExplorer {
     this.setPinMode(false);
     try {
       const pin = await this.addPin({ name: `Map pin ${lat.toFixed(5)}, ${lon.toFixed(5)}`, lat, lon, source: 'map-click' });
-      this.chooseRouteStop(this.activeRouteStopIndex, { id: pin.id, name: pin.name, lat: pin.lat, lon: pin.lon, countryCode: '' });
+      if (this.workspaceView === 'routes') this.chooseRouteStop(this.activeRouteStopIndex, { id: pin.id, name: pin.name, lat: pin.lat, lon: pin.lon, countryCode: '' });
     } catch (error) {
       this.setGeoStatus(error.message, true);
     }
@@ -2129,8 +2882,8 @@ class CityExplorer {
         this.geo.context = { lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy, source: 'browser', countryCode: this.country.countryCode || '' };
         this.renderRegion();
         this.map.flyTo({ center: [coords.longitude, coords.latitude], zoom: Math.max(14, this.map.getZoom()), duration: 800 });
-        this.chooseRouteStop(this.activeRouteStopIndex, { id: `browser:${coords.latitude.toFixed(6)},${coords.longitude.toFixed(6)}`, name: 'My location', lat: coords.latitude, lon: coords.longitude, countryCode: this.country.countryCode || '' });
-        this.setGeoStatus(`Added your location to the route plan${coords.accuracy ? ` (about ${Math.round(coords.accuracy)} m accuracy)` : ''}.`);
+        if (this.workspaceView === 'routes') this.chooseRouteStop(this.activeRouteStopIndex, { id: `browser:${coords.latitude.toFixed(6)},${coords.longitude.toFixed(6)}`, name: 'My location', lat: coords.latitude, lon: coords.longitude, countryCode: this.country.countryCode || '' });
+        this.setGeoStatus(`${this.workspaceView === 'routes' ? 'Added your location to the route plan' : 'Centered on your location'}${coords.accuracy ? ` (about ${Math.round(coords.accuracy)} m accuracy)` : ''}.`);
       } catch (error) {
         this.setGeoStatus(error.message, true);
       }
@@ -2278,7 +3031,7 @@ class CityExplorer {
       this.routeSubmitting = false;
       const complete = this.routePlan().length >= 2 && this.routePlan().every((stop) => stop.place);
       this.elements['trace-route'].disabled = !complete;
-      this.elements['trace-route'].textContent = 'Trace route';
+      this.elements['trace-route'].textContent = 'Plan route';
     }
   }
 
@@ -2322,7 +3075,6 @@ class CityExplorer {
     if (event.key === '/') {
       event.preventDefault();
       if (this.viewMode) this.setViewMode(false);
-      this.setManualControlsOpen(true);
       this.elements['search-input'].focus();
       return;
     }
