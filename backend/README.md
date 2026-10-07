@@ -67,6 +67,15 @@ queues a validated operation for browser-side computation; it does not claim to
 have measured statistics or supply missing datasets. Categorical filters retain
 JSON scalar types, including booleans.
 
+The fixed tool list does not include general internet browsing, a web-page
+reader, or a population-dataset downloader. `report_limitation` terminates a
+request honestly when its dataset, web access, or analysis is unavailable, even
+after a geographic lookup. It emits `agent.limitation` with a fixed factual
+message and reason, never an invented heatmap. Any earlier map mutation in the
+run is rolled back when safe; rollback/conflict metadata accompanies the event.
+For omitted geographic presentation, the model gets one bounded recovery turn
+to present returned references or report a limitation, not an unbounded retry.
+
 Each run checkpoints pins, areas, and active state. Cancellation/failure restores
 that checkpoint only when SQLite revision and fingerprint guards confirm there
 were no intervening writes. Provider calls occur outside the short write

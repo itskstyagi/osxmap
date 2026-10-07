@@ -1242,7 +1242,9 @@ class CityExplorer {
       this.settleAgentAction(event);
       this.finishAgentRun();
       this.agentResultSummary = '';
-      this.showCommandResult('A sourced geographic dataset is required', event.message || 'This request needs data or tools that are not available in the current workspace.');
+      const title = { dataset_unavailable: 'A sourced geographic dataset is required', web_search_unavailable: 'Map-place search cannot download statistical datasets', analysis_unavailable: 'This analysis is not supported by the current tools' }[event.reason] || 'This request needs unavailable data or tools';
+      this.showCommandResult(title, event.message || 'This request needs data or tools that are not available in the current workspace.');
+      this.elements['agent-result-details'].open = true;
       this.setAgentActivity({ request: 'Capability limitation explained', tool: 'No map substituted' });
       return;
     }

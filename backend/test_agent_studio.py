@@ -178,7 +178,7 @@ class ContextAndStudioTests(BackendCase):
 
     def test_all_schemas_enforce_the_fixed_parameter_allowlist(self):
         names = {tool["function"]["name"] for tool in AGENT_TOOL_SCHEMAS}
-        self.assertEqual(names, {"find_city", "search_places", "plan_route", "present_map", "clear_map", "ask_user", "studio_operation"})
+        self.assertEqual(names, {"find_city", "search_places", "plan_route", "present_map", "clear_map", "ask_user", "studio_operation", "report_limitation"})
         context = self.tools.new_context(studio_context())
         for name in names | {"run_python", "read_settings"}:
             with self.subTest(name=name), self.assertRaises(server.ServiceError):
@@ -332,7 +332,7 @@ class CapabilityLimitationTests(BackendCase):
         self.assertEqual(len([item for _, item in hub.events if item["type"] == "agent.map"]), 1)
 
     def test_limitation_rolls_back_accidental_earlier_map_changes(self):
-        pin = self.cache.add_pin("Previous place", 2, 2)
+        pin = self.cache.add_pin("Previous place", 2, 2, None, "map-click")
         before = self.cache.workspace_snapshot()
         service, hub, _ = self.service([
             tool_call("clear_map"),

@@ -103,6 +103,35 @@ insufficient samples are reported instead of manufacturing a result.
 - Examples are synthetic and clearly labeled. No live population, fleet, flood,
   or risk dataset is bundled.
 
+### Population Heatmaps
+
+A heatmap needs geographically distributed numeric observations. A location
+lookup, a valley-wide population total, a list of villages, and internet snippets
+cannot establish that distribution. The agent currently has no general web
+browsing or population-grid downloader. It explicitly reports a capability/data
+limitation rather than treating discovered places as population observations.
+
+1. Obtain a sourced population dataset for the intended year and geographic
+   extent, such as a modeled population-count grid from the WorldPop data portal
+   (`https://hub.worldpop.org/`) or georeferenced official census observations.
+2. If the source is a GeoTIFF raster, use a GIS tool such as QGIS to clip the
+   raster to the intended region, convert the clipped valid pixels to points,
+   and export WGS 84 GeoJSON. Retain the numeric population field and source/year.
+   Do not generate random points from a regional total.
+3. In **Studio > Data**, import that GeoJSON and specify its source and units.
+   For a population-count raster use estimated people per source cell, not
+   people/km2 unless the original values are actually densities.
+4. Select the imported layer, open **Visualize**, choose **Heatmap**, and select
+   the population field. Alternatively, ask Meridian to use that exact loaded
+   layer and field with **Selected layer** scope.
+
+Heatmaps are smoothed relative-intensity displays, not a literal cell-density
+map, population census, or real-time measurement. Population models retain their
+source date, resolution, and uncertainty. Darma Valley requires a deliberately
+chosen region: a geocoder may return a point or administrative bounds rather
+than the valley boundary. Use **Select region** or an independently sourced
+boundary; do not label an entire district total as the valley's population.
+
 Date/year fields enable a timeline for the selected layer. Comparison captures
 a read-only reference map and synchronizes its camera with the current scene;
 change layers or scrub time to compare. Annotations are persistent geographic
@@ -125,6 +154,11 @@ instructions such as `show heatmap`, `summarize`, and `show 3d` do not require a
 model request. Other instructions use the backend's validated tools. Studio
 exposes viewport, selected-region, active-layer, and workspace scopes. The agent
 receives a bounded inventory rather than raw imported feature collections.
+If the model gathers places then stops without presenting an achievable map,
+the service gives it one bounded recovery turn. It can present known references
+or use `report_limitation` for missing data/tools. Limitations display visible
+guidance and retire the run without substituting unrelated geography. Earlier
+map mutations in that same run are rolled back when the revision guard permits.
 
 Progress and Stop remain available while changing product modes. Detailed
 results and tool activity are expandable rather than a permanent chat panel.

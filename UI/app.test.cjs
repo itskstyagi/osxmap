@@ -1336,6 +1336,7 @@ test('missing population data is an actionable capability result, not a fake hea
   assert.equal(app.elements['agent-feedback'].classList.contains('is-error'), false);
   assert.equal(app.elements['agent-result-summary'].textContent, 'A sourced geographic dataset is required');
   assert.equal(app.elements['agent-result-details'].hidden, false);
+  assert.equal(app.elements['agent-result-details'].open, true);
   assert.equal(app.elements['agent-task-chip'].hidden, true);
   assert.equal(app.searchResults.length, 0);
   app.handleAgentEvent({ type: 'agent.map', runId: 'population-run', update: { clear: true } });

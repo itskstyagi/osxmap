@@ -42,6 +42,8 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
   const errors = [];
   const styleErrors = [];
   const sockets = [];
+  let agentRunSequence = 0;
+  let agentRunId = '';
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => { if (message.type() === 'error' && /layers\.|paint\.|expression|TypeError|ReferenceError/.test(message.text())) styleErrors.push(message.text()); });
   await page.addInitScript(() => {
@@ -65,7 +67,10 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
   await page.route('https://ip-api.services.brahmai.in/**', (route) => route.fulfill({ json: { data: { status: 'success', city: 'Delhi', country: 'India', countryCode: 'IN', lat: 28.63, lon: 77.21 } } }));
   await page.route('http://127.0.0.1:8787/**', (route) => {
     if (route.request().url().includes('/api/tiles/')) return route.fulfill({ status: 204 });
-    if (route.request().url().includes('/api/agent/runs')) return route.fulfill({ status: 202, json: { accepted: true, runId: 'browser-test-run' } });
+    if (route.request().url().includes('/api/agent/runs')) {
+      agentRunId = `browser-test-run-${++agentRunSequence}`;
+      return route.fulfill({ status: 202, json: { accepted: true, runId: agentRunId } });
+    }
     return route.fulfill({ json: { pins: [], areas: [], state: {}, results: [] } });
   });
   await page.routeWebSocket('ws://127.0.0.1:8788/', (socket) => {
@@ -178,7 +183,7 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
       await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
       const before = await page.evaluate(() => JSON.parse(localStorage.getItem('meridian.studio.v1')).workspaces[0]);
       const selected = before.layers.find((layer) => layer.id === before.selectedLayerId);
-      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: 'browser-test-run', update: { studio: { action: 'visualize', layerId: selected.id, visualization: 'points', workspaceId: before.id } } }));
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { studio: { action: 'visualize', layerId: selected.id, visualization: 'points', workspaceId: before.id } } }));
       await page.locator('button[data-product-mode="explore"]').click();
       assert.equal(await page.locator('#agent-task-chip').isVisible(), true);
       await page.locator('#agent-task-stop').click();
@@ -189,6 +194,19 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
       await page.locator('#agent-dismiss-result').click().catch(() => {});
       await page.locator('#search-input').press('Escape');
       await page.locator('button[data-product-mode="explore"]').click();
+    });
+    await t.test('Unavailable population data shows readable import guidance and releases agent controls', async () => {
+      await page.locator('#search-input').fill('Create the heatmap of the population of Darma Valley');
+      await page.locator('#search-submit').click();
+      await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
+      const before = await page.locator('.studio-layer').count();
+      sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.limitation', runId: agentRunId, reason: 'dataset_unavailable', reversible: false, message: 'No population observations are loaded. Import a sourced GeoJSON dataset in Studio > Data, then select Heatmap and its numeric population field.' }));
+      await page.waitForFunction(() => document.getElementById('agent-task-chip').hidden);
+      assert.equal(await page.locator('#search-input').isDisabled(), false);
+      assert.equal(await page.locator('#agent-result-details').getAttribute('open'), '');
+      assert.match(await page.locator('#agent-response').innerText(), /Import a sourced GeoJSON dataset/);
+      assert.equal(await page.locator('.studio-layer').count(), before);
+      await page.locator('#agent-dismiss-result').click();
     });
     await t.test('Animated 3D commands can undo their own camera motion', async () => {
       await page.locator('button[data-product-mode="studio"]').click();
