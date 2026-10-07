@@ -212,7 +212,7 @@ test('display controls stay outside the sidebar after UI initialization', () => 
 test('assistant replies render safe formatting without treating HTML or unsafe links as markup', () => {
   const { document, renderAgentReply } = setup();
   const response = document.getElementById('agent-response');
-  renderAgentReply(response, '# Places\n\nFound **three places** with *great views* and `map data`.\nSecond line.\n\n- First place\n- Second place\n\n1. Next stop\n2. Last stop\n\n[Map](https://example.com/map) [Unsafe](javascript:alert)\n<script>alert(1)</script>\n\n```\n<img src=x onerror=alert(1)>\n```');
+  renderAgentReply(response, '# Places\n\nFound **three places** with *great views* and `map data`.\nSecond line.\n\n- First place\n- Second place\n\n1. Next stop\n2. Last stop\n\n[Map](https://example.com/map) [Unsafe](javascript:alert) [Unreturned](https://unverified.example/data) [Private](http://127.0.0.1:8787/api/workspace) [Credentials](https://name:password@example.org/data)\n<script>alert(1)</script>\n\n```\n<img src=x onerror=alert(1)>\n```', ['https://example.com/map']);
   assert.equal(response.hidden, false);
   assert.equal(response.querySelectorAll('h3').length, 1);
   assert.equal(response.querySelectorAll('strong').length, 1);
@@ -1384,5 +1384,6 @@ test('a sourced dataset can open Studio and browser rejection remains visible af
   app.studio.applySourcedDataset = () => { throw new Error('No features in scope'); };
   app.applyAgentMapUpdate({ dataset: { data: {} } });
   app.showCommandResult(app.agentResultSummary, 'Dataset queued.');
-  assert.match(app.elements['agent-response'].querySelector('p').textContent, /not applied.*No features in scope/);
+  const text = (node) => [node.textContent, ...node.children.flatMap(text)].join(' ');
+  assert.match(text(app.elements['agent-response']), /not applied.*No features in scope/);
 });

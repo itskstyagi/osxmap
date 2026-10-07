@@ -4,6 +4,7 @@ import io
 import json
 import socket
 import ssl
+import subprocess
 import sys
 import time
 import unittest
@@ -28,11 +29,15 @@ def feature(kind="Point", coordinates=None, properties=None):
 
 
 class OfflineCase(unittest.TestCase):
+    def patch(self, target, name, **kwargs):
+        patch = mock.patch.object(target, name, **kwargs)
+        self.addCleanup(patch.stop)
+        return patch.start()
+
     def setUp(self):
         # Fail closed even if a later regression accidentally reaches real transport.
-        self.dns = mock.patch.object(web.socket, "getaddrinfo", side_effect=AssertionError("Live DNS forbidden")).start()
-        self.socket = mock.patch.object(web.socket, "socket", side_effect=AssertionError("Live socket forbidden")).start()
-        self.addCleanup(mock.patch.stopall)
+        self.dns = self.patch(web.socket, "getaddrinfo", side_effect=AssertionError("Live DNS forbidden"))
+        self.socket = self.patch(web.socket, "socket", side_effect=AssertionError("Live socket forbidden"))
 
     def error(self, status, callback, *args):
         with self.assertRaises(ServiceError) as caught:
@@ -288,6 +293,11 @@ class CSVTests(OfflineCase):
         self.assertEqual(second["other"], "01,234")
         self.assertEqual(second["comment"], "1e999")
 
+    def test_named_temporal_identity_fields_remain_original_strings(self):
+        document = self.parse("lon,lat,population,year,observation_date,name,record_id\n0,0,0,2020,20200102,007,0001\n", "text/csv")
+        properties = document["dataset"]["features"][0]["properties"]
+        self.assertEqual(properties, {"lon": 0, "lat": 0, "population": 0, "year": "2020", "observation_date": "20200102", "name": "007", "record_id": "0001"})
+
     def test_quoted_multiline_cells_and_empty_header_failures(self):
         document = self.parse('lon,lat,name\n0,0,"Quoted ""name""\nsecond line"\n', "text/csv")
         self.assertEqual(document["dataset"]["features"][0]["properties"]["name"], 'Quoted "name"\nsecond line')
@@ -304,6 +314,7 @@ class CSVTests(OfflineCase):
         self.assertLessEqual(len(document["text"]), 24000)
         self.error(413, self.parse, "lon,lat\n" + "0,0\n" * 10001, "text/csv")
         self.error(413, self.parse, "lon,lat,name\n0,0," + "x" * 8001, "text/csv")
+        self.error(413, self.parse, "name\n" + "x" * 131073, "text/csv")
         headers = ["lon", "lat"] + [f"field{i}" for i in range(78)]
         wide = self.parse(",".join(headers) + "\n" + ",".join("0" for _ in headers), "text/csv")
         self.assertEqual(len(wide["fields"]), 80)
@@ -337,8 +348,18 @@ class FormatTests(OfflineCase):
         self.assertEqual(self.parse(json.dumps(feature()), "", "https://example.org/data.geojson")["format"], "geojson")
 
     def test_module_has_no_server_or_config_imports(self):
-        self.assertNotIn("backend.server", sys.modules)
-        self.assertNotIn("backend.config", sys.modules)
+        code = (
+            "import sys\nfrom unittest import mock\n"
+            "class Guard:\n"
+            "    def find_spec(self, fullname, path=None, target=None):\n"
+            "        if fullname in {'backend.server', 'backend.config', 'server', 'config'}:\n"
+            "            raise AssertionError('Server/config imports forbidden')\n"
+            "sys.meta_path.insert(0, Guard())\n"
+            "with mock.patch('socket.getaddrinfo', side_effect=AssertionError('Live DNS forbidden')), mock.patch('socket.socket', side_effect=AssertionError('Live socket forbidden')):\n"
+            "    from backend import web_sources\n"
+            "assert callable(web_sources.fetch_web_document)\n"
+        )
+        subprocess.run([sys.executable, "-B", "-c", code], check=True, capture_output=True, timeout=10)
 
 
 class FakeSocket:
@@ -399,8 +420,8 @@ class FetchTests(OfflineCase):
             return connection
 
         self.dns.side_effect = lambda host, port, **kwargs: [address(port=port)]
-        self.https = mock.patch.object(web, "_PinnedHTTPSConnection", side_effect=factory).start()
-        self.http = mock.patch.object(web, "_PinnedHTTPConnection", side_effect=factory).start()
+        self.https = self.patch(web, "_PinnedHTTPSConnection", side_effect=factory)
+        self.http = self.patch(web, "_PinnedHTTPConnection", side_effect=factory)
         return connections
 
     def test_real_http_protocol_uses_public_pinned_ip_and_host_without_state(self):

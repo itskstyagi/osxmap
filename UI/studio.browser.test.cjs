@@ -214,7 +214,7 @@ test('Meridian Studio in a real browser and MapLibre renderer', { skip: !chromiu
       await page.locator('#search-submit').click();
       await page.waitForFunction(() => !document.getElementById('agent-task-chip').hidden);
       sockets.at(-1).send(JSON.stringify({ v: 1, type: 'agent.map', runId: agentRunId, update: { dataset: {
-        data: fixture, name: 'Sourced population fixture', field: 'value', units: 'people per source cell', visualization: 'heatmap', scope: { type: 'workspace' },
+        data: { ...fixture, features: fixture.features.map((feature) => ({ ...feature, properties: { ...feature.properties, observedAt: '2011-01-01' } })) }, name: 'Sourced population fixture', field: 'value', units: 'people per source cell', visualization: 'heatmap', scope: { type: 'workspace' },
         source: { name: 'Offline source fixture, not real population', url: 'https://example.org/population.geojson', attribution: 'Regression source', caveat: 'Test-only observations. Not actual population.', retrievedAt: '2026-01-01' },
       } } }));
       await page.waitForFunction((count) => document.querySelectorAll('.studio-layer').length === count + 1, before);

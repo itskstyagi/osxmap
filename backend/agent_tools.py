@@ -449,7 +449,7 @@ class AgentTools:
             if not isinstance(properties, dict):
                 continue
             for key, value in properties.items():
-                if not isinstance(key, str) or not re.search(r"year|date|observ|time|census", key, re.I):
+                if not isinstance(key, str) or not re.search(r"(?:^|[_\s-])(?:year|date|time|timestamp)(?:$|[_\s-])|(?:year|date|time|timestamp|observedAt)$", key, re.I):
                     continue
                 time_value = cls._time_value(value)
                 if time_value:
@@ -559,6 +559,17 @@ class AgentTools:
             raise ServiceError("Choose a table index returned by read_web_source.", 400)
         table = tables[index]
         headers, rows = table.get("headers", []), table.get("rows", [])
+        time_column, time_value = arguments.get("timeColumn", ""), arguments.get("timeValue", "")
+        table_times = {header: sorted({normalized for row in rows if isinstance(row, list) and column < len(row) for normalized in [self._time_value(row[column])] if normalized}) for column, header in enumerate(headers) if isinstance(header, str) and re.search(r"(?:^|[_\s-])(?:year|date|time|timestamp)(?:$|[_\s-])|(?:year|date|time|timestamp|observedAt)$", header, re.I)}
+        if any(len(values) > 1 for values in table_times.values()) and not time_column:
+            raise ServiceError("This source table contains multiple observation dates or census years. Select timeColumn/timeValue before mapping values.", 400)
+        selected_time = self._time_value(time_value) if time_value else None
+        if time_column or time_value:
+            if not isinstance(time_column, str) or time_column not in table_times or selected_time not in table_times[time_column]:
+                raise ServiceError("The table observation column/value must come from the actual source rows.", 400)
+        elif len(table_times) == 1 and len(next(iter(table_times.values()))) == 1:
+            time_column = next(iter(table_times))
+            selected_time = table_times[time_column][0]
         region_column = arguments.get("regionColumn", "")
         if region_column and (region_column not in headers or headers.count(region_column) != 1):
             raise ServiceError("The region column must be a unique exact header returned by the source table.", 400)
@@ -582,6 +593,8 @@ class AgentTools:
             row = rows[row_index]
             if not isinstance(row, list) or max(name_index, value_index) >= len(row):
                 raise ServiceError("The chosen source row is incomplete.", 400)
+            if time_column and (headers.index(time_column) >= len(row) or self._time_value(row[headers.index(time_column)]) != selected_time):
+                raise ServiceError("The chosen row belongs to a different source observation or census year.", 400)
             name = str(row[name_index]).strip()
             raw_value = str(row[value_index]).strip()
             if re.fullmatch(r"[-+]?(?:\d{1,3}(?:,\d{3})+)(?:\.\d+)?", raw_value):
@@ -608,10 +621,11 @@ class AgentTools:
             if match["placeRef"] in used_places or not self._inside(place, bounds):
                 raise ServiceError("The place match is duplicated or outside the selected geographic scope.", 400)
             used_rows.add(row_index); used_places.add(match["placeRef"])
-            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [place["lon"], place["lat"]]}, "properties": {"name": name, "value": value, "sourceColumn": value_column, "sourceUrl": source["url"], "sourceRow": row_index, "locationProvider": place.get("provider", ""), "locationName": place["name"]}})
+            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [place["lon"], place["lat"]]}, "properties": {"name": name, "value": value, "sourceColumn": value_column, "sourceUrl": source["url"], "sourceRow": row_index, "sourceObservation": selected_time, "sourceCells": {str(header): row[column] for column, header in enumerate(headers) if column < len(row) and header not in {"__proto__", "prototype", "constructor"}}, "locationProvider": place.get("provider", ""), "locationName": place["name"]}})
         if arguments.get("visualization") == "choropleth":
             raise ServiceError("Source settlement points cannot be presented as statistical regions.", 400)
-        return self._dataset_update(context, source, {"type": "FeatureCollection", "features": features}, arguments, f"Matched table {index} column '{value_column}' to verified place points. Values are source row measurements at settlement locations, not a continuous population grid or a claim of complete valley coverage.", "value")
+        data = {"type": "FeatureCollection", "features": features, "metadata": {"sourceTitle": source["title"], "sourceTable": index, "sourceHeaders": headers, "sourceContext": str(document.get("text", ""))[:1200], "selectedObservation": selected_time}}
+        return self._dataset_update(context, source, data, {**arguments, "timeValue": selected_time or ""}, f"Matched table {index} column '{value_column}' to verified place points. Source observation: {selected_time or 'not explicitly provided; review source title/context'}. Values are source row measurements at settlement locations, not a continuous population grid or a claim of complete valley coverage.", "value")
 
     def _search_places(self, context: AgentRunContext, arguments: dict[str, Any]) -> dict[str, Any]:
         bounds = self._geographic_bounds(context)

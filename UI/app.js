@@ -60,7 +60,7 @@ function readable(value) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function renderAgentReply(container, message) {
+function renderAgentReply(container, message, allowedLinks = []) {
   container.replaceChildren();
   const inline = (parent, text) => {
     const tokens = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s)]+\))/g;
@@ -81,7 +81,7 @@ function renderAgentReply(container, message) {
         const link = token.match(/^\[([^\]]+)\]\((.+)\)$/);
         let url;
         try { url = new URL(link[2]); } catch { /* Invalid links stay plain text. */ }
-        const node = append(url && ['https:', 'http:'].includes(url.protocol) ? 'a' : 'span', link[1]);
+        const node = append(url && ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password && allowedLinks.includes(url.href) ? 'a' : 'span', link[1]);
         if (node.tagName.toLowerCase() === 'a') {
           node.setAttribute('href', url.href);
           node.setAttribute('target', '_blank');
@@ -1007,7 +1007,7 @@ class CityExplorer {
     this.elements['agent-feedback'].textContent = '';
     this.elements['agent-result-details'].hidden = !detail;
     this.elements['agent-result-details'].open = false;
-    if (detail) renderAgentReply(this.elements['agent-response'], this.agentApplicationError ? `${this.agentApplicationError}\n\nService response: ${detail}` : detail);
+    if (detail) renderAgentReply(this.elements['agent-response'], this.agentApplicationError ? `${this.agentApplicationError}\n\nService response: ${detail}` : detail, (this.agentSources || []).map((source) => source.url));
     else this.elements['agent-response'].hidden = true;
     this.agentActivity.tool = 'No active tool';
     this.agentActivity.request = 'Map updated';
@@ -1269,8 +1269,8 @@ class CityExplorer {
       this.finishAgentRun();
       this.agentResultSummary = '';
       const title = { dataset_unavailable: 'A sourced geographic dataset is required', web_search_unavailable: 'The web source or reader could not supply this data', analysis_unavailable: 'This analysis is not supported by the current tools' }[event.reason] || 'This request needs unavailable data or tools';
-      this.showCommandResult(title, event.message || 'This request needs data or tools that are not available in the current workspace.');
       this.renderAgentSources(event.sources);
+      this.showCommandResult(title, event.message || 'This request needs data or tools that are not available in the current workspace.');
       this.elements['agent-result-details'].open = true;
       this.setAgentActivity({ request: 'Capability limitation explained', tool: 'No map substituted' });
       return;
@@ -1280,8 +1280,8 @@ class CityExplorer {
       this.finishAgentRun();
       const message = event.message || 'Your map is ready.';
       const summary = this.agentResultSummary || String(message).replace(/[#*_`]/g, '').split('\n').find((line) => line.trim())?.slice(0, 180) || 'Map updated';
-      this.showCommandResult(summary, message);
       this.renderAgentSources(event.sources);
+      this.showCommandResult(summary, message);
       this.setAgentActivity({ request: 'Map request completed', tool: 'Completed' });
       return;
     }

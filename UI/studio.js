@@ -1156,6 +1156,7 @@ export class MeridianStudio {
     if (!['workspace', 'viewport', 'selection'].includes(scope.type)) throw new Error('Choose a geographic or workspace scope before loading a new dataset.');
     if (['viewport', 'selection'].includes(scope.type) && !validBounds(scope.bounds)) throw new Error('The supplied source scope is invalid.');
     const available = fieldsFor(data);
+    if (available.temporal.some((timeField) => temporalValues(makeLayer(data, { timeField })).length > 1)) throw new Error('The source contains multiple observation times. Select one actual census year or date before displaying a population heatmap.');
     const field = typeof update.field === 'string' ? update.field : '';
     if (field && !available.numeric.includes(field)) throw new Error('The source does not contain the requested numeric field.');
     if (!['points', 'heatmap', 'choropleth'].includes(update.visualization) || update.visualization === 'heatmap' && !field) throw new Error('A heatmap requires a real numeric source field.');

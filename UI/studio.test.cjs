@@ -317,7 +317,9 @@ test('sourced population datasets retain actual values and complete provenance t
   const instance = controller();
   instance.setTab = () => {};
   instance.focusLayer = () => {};
-  const update = { name: 'Sourced observations', data: collection(), field: 'value', units: 'people per settlement', visualization: 'heatmap', source: { name: 'Census 2011', url: 'https://example.org/census', attribution: 'Data office', retrievedAt: '2026-01-01', publishedDate: '2012', referenceYear: '2011', license: 'CC BY 4.0', resolution: 'settlement', caveat: 'Partial settlement coverage, not a continuous grid.' }, scope: { type: 'workspace' } };
+  const sourceData = collection();
+  for (const feature of sourceData.features) feature.properties.observedAt = '2011-01-01';
+  const update = { name: 'Sourced observations', data: sourceData, field: 'value', units: 'people per settlement', visualization: 'heatmap', source: { name: 'Census 2011', url: 'https://example.org/census', attribution: 'Data office', retrievedAt: '2026-01-01', publishedDate: '2012', referenceYear: '2011', license: 'CC BY 4.0', resolution: 'settlement', caveat: 'Partial settlement coverage, not a continuous grid.' }, scope: { type: 'workspace' } };
   const layer = instance.applySourcedDataset(update);
   assert.equal(instance.workspace.layers.length, 2);
   assert.equal(instance.workspace.history.length, 0);
@@ -332,7 +334,26 @@ test('sourced population datasets retain actual values and complete provenance t
 test('sourced dataset import respects frozen extent instead of widening an empty scope', () => {
   const instance = controller();
   const before = instance.workspace.layers.length;
-  assert.throws(() => instance.applySourcedDataset({ data: collection(), field: 'value', visualization: 'heatmap', scope: { type: 'selection', bounds: [10, 10, 11, 11] } }), /No source observations/);
+  const data = collection();
+  for (const feature of data.features) delete feature.properties.observedAt;
+  assert.throws(() => instance.applySourcedDataset({ data, field: 'value', visualization: 'heatmap', scope: { type: 'selection', bounds: [10, 10, 11, 11] } }), /No source observations/);
   assert.equal(instance.workspace.layers.length, before);
   assert.throws(() => instance.applySourcedDataset({ data: collection(), field: 'value', visualization: 'heatmap', workspaceId: 'wrong', scope: { type: 'workspace' } }), /different workspace/);
+});
+
+test('sourced heatmaps refuse regional totals, MultiPoint duplicate values and missing scoped numerics', () => {
+  const instance = controller();
+  const update = { field: 'population', visualization: 'heatmap', scope: { type: 'selection', bounds: [0, 0, 1, 1] } };
+  for (const geometry of [{ type: 'Polygon', coordinates: [[[-1, -1], [10, -1], [10, 2], [-1, 2], [-1, -1]]] }, { type: 'MultiPoint', coordinates: [[.5, .5], [10, 10]] }]) {
+    assert.throws(() => instance.applySourcedDataset({ ...update, data: { type: 'FeatureCollection', features: [{ type: 'Feature', geometry, properties: { population: 120000 } }] } }), /original Point/);
+  }
+  const missing = { type: 'FeatureCollection', features: [[.5, .5, null], [5, 5, 42]].map(([lon, lat, population]) => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { population } })) };
+  assert.throws(() => instance.applySourcedDataset({ ...update, data: missing }), /No valid source values/);
+  assert.equal(instance.workspace.layers.length, 1);
+});
+
+test('sourced population cannot silently combine observation years', () => {
+  const instance = controller();
+  assert.throws(() => instance.applySourcedDataset({ data: collection(), field: 'value', visualization: 'heatmap', scope: { type: 'workspace' } }), /multiple observation times/);
+  assert.equal(instance.workspace.layers.length, 1);
 });

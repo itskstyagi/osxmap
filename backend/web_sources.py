@@ -527,10 +527,12 @@ def _bounded_cell(value):
     return value if len(value) <= 500 else value[:497] + "..."
 
 
-def _scalar(value):
+def _scalar(value, force_text=False):
     stripped = value.strip()
     if stripped.casefold() in {"", "null"}:
         return None
+    if force_text:
+        return value
     if len(stripped) <= 128 and _NUMBER.fullmatch(stripped):
         number = stripped.replace(",", "")
         result = float(number) if any(c in number.lower() for c in ".e") else int(number)
@@ -554,8 +556,12 @@ def _parse_csv(text, document):
         longitude = [i for i, header in enumerate(headers) if header.casefold() in {"lon", "lng", "longitude", "x"}]
         latitude = [i for i, header in enumerate(headers) if header.casefold() in {"lat", "latitude", "y"}]
         has_coordinates = len(longitude) == len(latitude) == 1
+        text_columns = {i for i, header in enumerate(headers) if re.search(
+            r"(?:^|[\s_-])(?:name|date|time|year|datetime|timestamp|id|code)(?:$|[\s_-])", header, re.I)}
         table = {"headers": headers[:30], "rows": []}
         features, count, invalid = [], 0, 0
+        if any(len(line) > 131072 for line in io.StringIO(text, newline="")):
+            raise ServiceError("Web source CSV line limit exceeded.", 413)
         for row in reader:
             if not any(cell.strip() for cell in row):
                 continue
@@ -568,7 +574,7 @@ def _parse_csv(text, document):
             if len(table["rows"]) < 100:
                 table["rows"].append([_bounded_cell(cell) for cell in row[:30]])
             if has_coordinates:
-                values = [_scalar(cell) for cell in row]
+                values = [_scalar(cell, i in text_columns) for i, cell in enumerate(row)]
                 lon, lat = values[longitude[0]], values[latitude[0]]
                 if (type(lon) not in {int, float} or type(lat) not in {int, float}
                         or not -180 <= lon <= 180 or not -90 <= lat <= 90):

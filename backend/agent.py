@@ -84,6 +84,7 @@ Read public HTML, text, GeoJSON, or CSV returned by search_web or a page's disco
 
 ### load_web_dataset(sourceRef, name?, field?, units?, visualization?)
 Load a real dataset found by read_web_source into Studio. field must exactly match returned numericFields; heatmap requires it. visualization is heatmap, points, or choropleth. Units must be stated by the source, not guessed. Data transfer uses actual parsed geometry and values, not model-generated GeoJSON. Respect scope; layer scope cannot create a new dataset. Return queued, not already measured or rendered.
+For multiple source years/dates, choose timeField and an exact timeValue returned by the reader; never sum population across years. Heatmaps require original Point observations, not polygon/MultiPoint totals converted to proxy points. Polygon observations can use a real choropleth; raster still requires extraction. Table sources can select timeColumn/timeValue and preserve original header/row/context provenance.
 
 ### map_source_table(sourceRef, tableIndex, nameColumn, valueColumn, matches, name?, units?, visualization?)
 Map actual source-table values at carefully matched settlement locations. Each match is {rowIndex,placeRef}; rowIndex is zero-based, placeRef must come from search_places/find_city, source row name must match the verified location. All values are copied from the original numeric source column. Never pass a population value yourself. Explain source census/model year and incomplete match coverage. Up to twenty matches; no polygon/grid is synthesized.

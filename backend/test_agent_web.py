@@ -185,6 +185,31 @@ class GroundedWebAgentTests(BackendCase):
         result = self.tools.execute(context, "report_limitation", {"reason": "dataset_unavailable"})
         self.assertTrue(result["limitation"])
 
+    def test_population_counts_that_look_like_years_do_not_invent_temporal_fields(self):
+        self.reader.return_value["dataset"] = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [1, 1]}, "properties": {"census_population": population, "update_count": population}} for population in (1901, 2011)]}
+        context = self.source_context()
+        read = self.tools.execute(context, "read_web_source", {"sourceRef": "source:1"})
+        self.assertEqual(read["dataset"]["temporalFields"], [])
+        result = self.tools.execute(context, "load_web_dataset", {"sourceRef": "source:1", "field": "census_population"})
+        self.assertEqual(len(result["mapUpdate"]["dataset"]["data"]["features"]), 2)
+        self.assertEqual(result["mapUpdate"]["dataset"]["source"]["referenceYear"], "")
+
+    def test_source_load_requires_point_observations_and_one_actual_census_year(self):
+        self.reader.return_value["dataset"] = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [1, 1]}, "properties": {"population": 100, "year": 2011}}, {"type": "Feature", "geometry": {"type": "Point", "coordinates": [1, 1]}, "properties": {"population": 200, "year": 2021}}]}
+        context = self.source_context()
+        read = self.tools.execute(context, "read_web_source", {"sourceRef": "source:1"})
+        self.assertEqual(read["dataset"]["timeValues"]["year"], ["2011", "2021"])
+        with self.assertRaisesRegex(server.ServiceError, "multiple observation"):
+            self.tools.execute(context, "load_web_dataset", {"sourceRef": "source:1", "field": "population"})
+        result = self.tools.execute(context, "load_web_dataset", {"sourceRef": "source:1", "field": "population", "timeField": "year", "timeValue": "2021"})
+        update = result["mapUpdate"]["dataset"]
+        self.assertEqual([feature["properties"]["population"] for feature in update["data"]["features"]], [200])
+        self.assertEqual(update["source"]["referenceYear"], "2021")
+        for geometry in ({"type": "MultiPoint", "coordinates": [[1, 1], [20, 20]]}, {"type": "Polygon", "coordinates": [[[0, 0], [10, 0], [10, 10], [0, 0]]]}):
+            context.documents["source:1"]["dataset"] = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": geometry, "properties": {"population": 120000}}]}
+            with self.assertRaisesRegex(server.ServiceError, "original Point"):
+                self.tools.execute(context, "load_web_dataset", {"sourceRef": "source:1", "field": "population", "visualization": "heatmap"})
+
     def test_unsupported_download_returns_cited_limitation_without_fake_map(self):
         self.reader.side_effect = server.ServiceError("GeoTIFF is unsupported.", 422)
         hub = FakeHub()
