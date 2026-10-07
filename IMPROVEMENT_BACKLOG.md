@@ -80,14 +80,14 @@ values.
 
 | ID | Status | Finding | Evidence and locations | Target state |
 | --- | --- | --- | --- | --- |
-| UX-01 | Not started | Surface city-search failures and ambiguity. | Exact city lookup swallows every error and resolves the first Nominatim result. `UI/app.js:475-487`, `backend/server.py:841-852` | Show not-found/network/rate-limit feedback and retain credible alternatives for ambiguous input. |
-| UX-02 | Not started | Prevent stale autocomplete rendering. | Suggestion responses are not tied to the initiating query and loading state references mutable controller state. `UI/app.js:429-447` | Use request IDs/query snapshots and render only the current response. |
-| UX-03 | Not started | Turn city suggestions into a real accessible combobox. | Input/list lack combobox roles, active descendant, option IDs, and keyboard selection. `UI/index.html:20-24`, `UI/app.js:450-466` | Implement ARIA combobox interactions with arrows, Enter, Escape, and screen-reader announcements. |
+| UX-01 | In progress | Surface city-search failures and ambiguity. | Search now shows inline no-result, failure, and retry feedback. Exact lookup still resolves the first provider result; ambiguity selection remains outstanding. `UI/app.js:resolveSearch`, `UI/index.html:search-status` | Show not-found/network/rate-limit feedback and retain credible alternatives for ambiguous input. |
+| UX-02 | Done | Prevent stale autocomplete rendering. | Suggestions use request-local abort controllers and query checks; submitted searches cancel older lookups. Regression coverage is in `UI/app.test.cjs`. `UI/app.js:queueSuggestions`, `UI/app.js:resolveSearch` | Use request IDs/query snapshots and render only the current response. |
+| UX-03 | In progress | Turn city suggestions into a real accessible combobox. | City search now has combobox semantics, option IDs, active descendant, selected state, and arrow/Enter/Escape behavior. Live screen-reader/browser validation remains outstanding. `UI/index.html:search-input`, `UI/app.js:handleSearchKey` | Implement ARIA combobox interactions with arrows, Enter, Escape, and screen-reader announcements. |
 | UX-04 | Not started | Start large-city exploration with an appropriate overview. | Location bounds exist but selection always flies to z15.5 at a single point. `backend/server.py:801-825`, `UI/app.js:500-510` | Fit the city bbox, identify downloaded detailed coverage, and offer an explicit 3D-center transition. |
 | UX-05 | Not started | Explain that loaded detail is tile coverage, not whole-city coverage. | The stream state implies a city is ready after requested tiles complete. `UI/app.js:500-560` | Show detailed viewport coverage and available/failed tile areas. |
 | UX-06 | Not started | Separate stored-place inspection from pin persistence. | Clicking a stored place immediately creates a durable pin. `UI/app.js:677-686`, `UI/app.js:834-845` | Show a place card with explicit Pin, Route From, Route To, and View actions. |
 | UX-07 | Not started | Replace all-pins-in-creation-order area construction with an editable workflow. | Area generation uses every pin in insertion order and has no subset/reorder/preview/edit path. `UI/app.js:912-933` | Let users select/reorder pins, preview and edit geometry, name areas, and prevent duplicates. |
-| UX-08 | Not started | Give routes a persistent, legible result state. | Route details exist only in a transient status message; approximate fallback uses road-like styling. `UI/app.js:951-980` | Add a route panel with endpoints, source, cache status, summary, clear action, and distinct approximate styling. |
+| UX-08 | In progress | Give routes a persistent, legible result state. | Summary now appears beneath the planner with estimated-time and approximate-geometry disclosures. Final paths render immediately; algorithm replay is optional and stoppable. Cache status, dedicated clear, and distinct approximate styling remain outstanding. `UI/app.js:findRoute`, `UI/app.js:updateDashboard`, `UI/index.html:route-disclaimer` | Add a route panel with endpoints, source, cache status, summary, clear action, and distinct approximate styling. |
 | UX-09 | Not started | Restore expected map-control behavior. | Double click resets city rather than zooming; the 3D control has no state; no north reset exists. `UI/app.js:364-368`, `UI/app.js:1025-1031` | Preserve double-click zoom, add Recenter/North controls, and expose pitch state with `aria-pressed`. |
 | UX-10 | Not started | Add POI legend and filtering. | POI markers use category colors/codes but users cannot see categories, counts, or filters. `UI/app.js:244-256` | Add collapsible legend/filter, category counts, source coverage, and collision-aware labels. |
 | UX-11 | Not started | Show stored-place overlay truncation and lookup provenance. | API returns truncation but UI discards it; results compress provider state into `OSM` or `SERP`. `backend/server.py:2078-2079`, `UI/app.js:668-671`, `UI/app.js:814-829` | Show stored-place limits, cached/live state, provider, and fallback reason. |
@@ -105,10 +105,10 @@ values.
 | AX-02 | Not started | Increase touch target sizes. | Several geography and pin controls are 22-30px high. `UI/styles.css:271-285`, `UI/styles.css:393-397` | Use practical 40-44px target sizes for essential and destructive actions. |
 | AX-03 | Not started | Restore visible keyboard focus. | Outlines are removed on map canvas and inputs; many controls lack focus-visible styles. `UI/styles.css:89-90`, `UI/styles.css:121-128`, `UI/styles.css:466-486` | Apply high-contrast consistent focus indicators to every interactive element. |
 | AX-04 | Not started | Provide a keyboard/non-pointer feature-inspection path. | Building and POI details require pointer layer interaction. `UI/app.js:348-358`, `UI/app.js:577-639` | Add a keyboard-accessible selected-feature inspector or nearby-feature list. |
-| AX-05 | Not started | Respect reduced motion in map transitions. | MapLibre transitions use `essential: true`, which can bypass user reduced-motion preference. `UI/app.js:508`, `UI/app.js:841`, `UI/app.js:904`, `UI/app.js:976` | Gate animation duration with `prefers-reduced-motion` and avoid forced map motion. |
+| AX-05 | In progress | Respect reduced motion in map transitions. | Camera transitions no longer force `essential: true`; route replay already skips animation for reduced motion. Live MapLibre preference validation remains outstanding. `UI/app.js` | Gate animation duration with `prefers-reduced-motion` and avoid forced map motion. |
 | AX-06 | Not started | Reduce live-region announcement noise. | Tile progress updates a live stream card repeatedly. `UI/index.html:39-42`, `UI/app.js:549-560` | Announce state transitions and failures, not every count/progress update. |
 | AX-07 | Not started | Improve operational text legibility. | Essential labels use 7-10px type and dense all-caps styling. `UI/styles.css:282-285`, `UI/styles.css:335-357`, `UI/styles.css:495-503` | Raise minimum font sizes, simplify typography, and preserve hierarchy. |
-| AX-08 | Not started | Expose theme choice and system preference. | Theme exists in local storage but has no UI control and defaults to dark. `UI/app.js:284`, `UI/app.js:375-380`, `UI/README.md:16-18` | Add light/dark/system control and initialize from `prefers-color-scheme`. |
+| AX-08 | In progress | Expose theme choice and system preference. | Toolbar theme toggle is implemented; controls now inherit shared light/dark tokens instead of hardcoded dark rail/drawer colors. System preference selection remains outstanding. `UI/app.js:setTheme`, `UI/styles.css` | Add light/dark/system control and initialize from `prefers-color-scheme`. |
 | AX-09 | Not started | Keep source attribution accessible on mobile. | Custom attribution is hidden below the mobile breakpoint. `UI/styles.css:717-720` | Provide concise expandable attribution/source status on all screen sizes. |
 | AX-10 | Not started | Make keyboard shortcuts discoverable and cancelable. | `/`, `R`, `3`, `+`, and `-` are hidden features; there is no Escape cancellation path. `UI/app.js:998-1031` | Add shortcut help and context-safe `Esc` behavior for modes and popups. |
 
@@ -158,6 +158,12 @@ values.
 | Browser UX | Combobox keyboard flow, pin-mode feature clicks, reduced motion, mobile panel scrolling, failed-tile retry, source aggregation | `UI/app.js`, `UI/tile-worker.js`, `UI/styles.css` |
 
 ## Change Management Rules
+
+The October 7 clarity pass keeps assistant feedback and questions outside the
+collapsible manual controls, prevents Workspace navigation from hiding mobile
+tools, and adds a confirmation dialog before manual workspace clearing. This
+does not add Undo or server-enforced confirmation for agent mutations; those
+remain follow-up work. Browser/device visual validation is still required.
 
 | Rule | Reason |
 | --- | --- |

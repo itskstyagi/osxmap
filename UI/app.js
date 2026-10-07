@@ -402,6 +402,9 @@ class CityExplorer {
     this.terrainEnabled = this.mapMode === 'satellite';
     this.suggestionController = null;
     this.suggestionTimer = null;
+    this.suggestionIndex = -1;
+    this.searchController = null;
+    this.routeSubmitting = false;
     this.routeStopControllers = new Map();
     this.routeStopTimers = new Map();
     this.searchResults = [];
@@ -438,6 +441,7 @@ class CityExplorer {
     const el = this.elements;
     el['search-form'].addEventListener('submit', (event) => this.submitSearch(event));
     el['search-input'].addEventListener('input', () => this.queueSuggestions());
+    el['search-input'].addEventListener('keydown', (event) => this.handleSearchKey(event));
     el['search-input'].addEventListener('focus', () => { if (this.selected?.name !== el['search-input'].value) this.selected = null; });
     el['toggle-geo-tools'].addEventListener('click', () => this.setGeoToolsOpen(!this.geoToolsOpen));
     el['toggle-manual-controls'].addEventListener('click', () => this.setManualControlsOpen(!this.manualControlsOpen));
@@ -456,6 +460,14 @@ class CityExplorer {
     el['add-route-stop'].addEventListener('click', () => this.addRouteStop());
     el['agent-composer'].addEventListener('submit', (event) => this.submitAgentRequest(event));
     el['agent-cancel'].addEventListener('click', () => this.cancelAgentRequest());
+    document.getElementById('agent-dismiss-question').addEventListener('click', () => this.cancelAgentRequest());
+    document.getElementById('replay-route').addEventListener('click', () => {
+      if (this.geo.routeAnimation) this.stopRouteAnimation();
+      else if (this.geo.route) this.animateRoute(this.geo.route);
+    });
+    document.getElementById('clear-workspace-dialog').addEventListener('close', (event) => {
+      if (event.target.returnValue === 'clear') this.clearAdditions(true);
+    });
     document.querySelectorAll('[data-map-action]').forEach((button) => button.addEventListener('click', () => this.operate(button.dataset.mapAction)));
     document.addEventListener('keydown', (event) => this.handleShortcut(event));
     this.worker.onmessage = ({ data }) => this.handleWorkerMessage(data);
@@ -466,10 +478,12 @@ class CityExplorer {
     const sidebar = el['manual-controls-content'].closest('.manual-sidebar');
     sidebar.prepend(document.querySelector('.floating-toolbar'));
     el['manual-controls-content'].prepend(document.querySelector('.map-mode-panel'), document.querySelector('.map-controls'));
-    el['manual-controls-content'].append(document.getElementById('map-notice'), el['agent-question']);
+    el['manual-controls-content'].append(document.getElementById('map-notice'));
+    el['route-form'].after(document.querySelector('.route-summary'));
+    el['search-form'].closest('.search-panel').append(el['geo-status']);
     const information = document.getElementById('info-drawer-content');
-    information.prepend(document.querySelector('.route-summary'), document.querySelector('.workspace-metrics'), document.getElementById('agent-hud'));
-    sidebar.append(el['agent-composer']);
+    information.prepend(document.querySelector('.workspace-metrics'), document.getElementById('agent-hud'));
+    sidebar.append(document.querySelector('.agent-panel'));
     document.getElementById('toggle-info-drawer').addEventListener('click', () => this.setInfoDrawerOpen(information.hidden));
     document.getElementById('clear-map-cache').addEventListener('click', () => {
       navigator.serviceWorker?.controller?.postMessage({ type: 'clear-map-cache' });
@@ -545,9 +559,12 @@ class CityExplorer {
     const active = this.agentSubmitting || Boolean(this.agentRunId);
     const activityPanel = document.getElementById('agent-hud');
     if (active && activityPanel) activityPanel.open = true;
-    if (this.agentQuestionOpen) this.setInfoDrawerOpen(true);
+    const feedback = document.getElementById('agent-feedback');
+    feedback.textContent = active && this.agentActivity.tool !== 'No active tool'
+      ? this.agentActivity.tool : this.agentActivity.request;
+    feedback.classList.toggle('is-error', this.agentActivity.tool === 'Failed' || this.agentActivity.tool === 'Request failed');
     el['agent-submit'].disabled = !this.agentSocketReady || active;
-    el['agent-submit'].textContent = active ? 'WORKING' : 'SEND';
+    el['agent-submit'].textContent = active ? 'Working' : 'Send';
     el['agent-cancel'].classList.toggle('is-hidden', !active);
     el['agent-input'].disabled = active;
   }
@@ -640,7 +657,7 @@ class CityExplorer {
     }
     if (event.type === 'agent.completed') {
       this.finishAgentRun();
-      this.setAgentActivity({ request: String(event.message || 'Map request completed').slice(0, 160), tool: 'Completed' });
+      this.setAgentActivity({ request: String(event.message || 'Map request completed').slice(0, 2000), tool: 'Completed' });
       return;
     }
     if (event.type === 'agent.failed') {
@@ -708,6 +725,7 @@ class CityExplorer {
       this.agentQuestionOpen = false;
       this.elements['agent-question'].classList.add('is-hidden');
       this.setAgentActivity({ request: 'Clarification dismissed', tool: 'No active tool' });
+      this.elements['agent-input'].focus();
       return;
     }
     if (!this.agentSubmitting && !this.agentRunId) return;
@@ -737,6 +755,7 @@ class CityExplorer {
       container.append(button);
     }
     this.elements['agent-question'].classList.remove('is-hidden');
+    document.getElementById('agent-question').focus({ preventScroll: true });
   }
 
   agentMapContext() {
@@ -884,13 +903,13 @@ class CityExplorer {
     if (Array.isArray(view.bounds) && view.bounds.length === 4 && view.bounds.every((value) => numeric(value) !== null)) {
       const [west, south, east, north] = view.bounds.map(Number);
       if (west >= -180 && east <= 180 && south >= -90 && north <= 90 && west < east && south < north) {
-        this.map.fitBounds([[west, south], [east, north]], { padding: 90, maxZoom: 16, duration: 800, essential: true });
+        this.map.fitBounds([[west, south], [east, north]], { padding: 90, maxZoom: 16, duration: 800 });
         return;
       }
     }
     if (Array.isArray(view.center) && view.center.length >= 2 && numeric(view.center[0]) !== null && numeric(view.center[1]) !== null) {
       const zoom = numeric(view.zoom);
-      this.map.flyTo({ center: [Number(view.center[0]), Number(view.center[1])], zoom: zoom === null ? Math.max(12, this.map.getZoom()) : Math.max(1, Math.min(20, zoom)), duration: 700, essential: true });
+      this.map.flyTo({ center: [Number(view.center[0]), Number(view.center[1])], zoom: zoom === null ? Math.max(12, this.map.getZoom()) : Math.max(1, Math.min(20, zoom)), duration: 700 });
     }
   }
 
@@ -909,7 +928,11 @@ class CityExplorer {
     if (Array.isArray(update.routeStops)) {
       this.geo.routeStops = update.routeStops.slice(0, MAX_ROUTE_STOPS).map((place) => this.agentLocation(place)).filter(Boolean).map((place) => ({ query: place.name, place, suggestions: [] }));
     }
-    if (Object.prototype.hasOwnProperty.call(update, 'route')) this.geo.route = this.agentRoute(update.route);
+    if (Object.prototype.hasOwnProperty.call(update, 'route')) {
+      this.stopRouteAnimation(false);
+      this.geo.route = this.agentRoute(update.route);
+      if (this.geo.route) this.setWorkspaceView('routes');
+    }
     if (update.workspace) this.applyWorkspaceSnapshot(update.workspace);
     this.routePlan();
     this.renderWorkspace();
@@ -1040,12 +1063,12 @@ class CityExplorer {
   setWorkspaceView(view) {
     this.workspaceView = view;
     document.querySelectorAll('button[data-workspace-view]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.workspaceView === view)));
+    this.setInfoDrawerOpen(false);
     this.setManualControlsOpen(true);
     this.setGeoToolsOpen(view !== 'explore');
     const utility = document.querySelector('.utility-tools');
     if (utility) utility.open = view === 'workspace';
     if (view === 'routes') this.setMapMode('route');
-    if (view === 'workspace') this.setInfoDrawerOpen(true);
     if (view === 'explore') this.elements['search-input'].focus();
     this.updateDashboard();
   }
@@ -1077,9 +1100,17 @@ class CityExplorer {
     set('metric-duration', summary ? formatDuration(summary.durationSeconds) || '--' : '--');
     set('metric-stops', this.geo.routeStops.filter((stop) => stop.place).length);
     set('metric-provider', this.geo.route ? sourceName(this.geo.route.provider) || 'Road network' : 'No active route');
+    set('route-disclaimer', summary?.approximateGeometry
+      ? 'Approximate endpoint connector, not a road-following route. Driving distance and time are estimates.'
+      : summary?.approximateDuration
+        ? 'Driving plan. Time is estimated from distance, not live traffic.'
+        : 'Driving plan. Not traffic-aware navigation.');
+    const replay = document.getElementById('replay-route');
+    replay.hidden = !this.geo.route || !this.routeSearchEdges(this.geo.route).length;
+    replay.textContent = this.geo.routeAnimation ? 'Stop replay' : 'Replay calculation';
     set('view-location', this.selected?.name || 'Find a place. Make it yours.');
     set('view-title', this.workspaceView === 'routes' ? 'Route Planner' : this.workspaceView === 'workspace' ? 'Your Workspace' : this.mapMode === 'terrain' ? 'Terrain Explorer' : 'City Explorer');
-    set('view-mode-label', this.mapMode === 'satellite' ? 'Satellite / Live map' : this.mapMode === 'route' ? 'Monochrome / Route map' : 'Topographic / Contours in meters');
+    set('view-mode-label', this.mapMode === 'satellite' ? 'Satellite imagery' : this.mapMode === 'route' ? 'Monochrome / Streets' : 'Topographic / Contours in meters');
     const center = this.map?.getCenter();
     if (center) set('map-coordinates', `${Math.abs(center.lat).toFixed(4)} ${center.lat < 0 ? 'S' : 'N'} / ${Math.abs(center.lng).toFixed(4)} ${center.lng < 0 ? 'W' : 'E'}`);
     const focus = document.getElementById('focus-route');
@@ -1125,7 +1156,7 @@ class CityExplorer {
   setTerrainView(enabled, duration = 500) {
     this.terrainEnabled = enabled;
     this.applyTerrain();
-    this.map.easeTo({ pitch: this.terrainEnabled ? 60 : 0, duration, essential: true });
+    this.map.easeTo({ pitch: this.terrainEnabled ? 60 : 0, duration });
   }
 
   setTheme(theme) {
@@ -1152,7 +1183,8 @@ class CityExplorer {
   }
 
   renderRegion() {
-    this.elements['region-label'].textContent = `Search region: ${this.country.country || this.country.countryCode || 'worldwide'} / Geo-IP map anchor`;
+    const method = this.country.method === 'geoip' ? 'approximate IP location' : this.country.method === 'locale' ? 'browser language' : 'selected location';
+    this.elements['region-label'].textContent = `Search region: ${this.country.country || this.country.countryCode || 'worldwide'} / ${method}`;
     this.elements['status-dot'].classList.remove('pulse');
   }
 
@@ -1195,20 +1227,30 @@ class CityExplorer {
   queueSuggestions() {
     clearTimeout(this.suggestionTimer);
     this.suggestionController?.abort();
+    this.searchController?.abort();
+    this.setLoading(false);
+    this.setSearchStatus('');
+    this.renderSuggestions([]);
     const query = this.elements['search-input'].value.trim();
     if (query.length < 2 || this.selected?.name === query) return this.renderSuggestions([]);
     this.suggestionTimer = setTimeout(async () => {
-      this.suggestionController = new AbortController();
+      const controller = new AbortController();
+      this.suggestionController = controller;
       this.setLoading(true);
       try {
         const params = new URLSearchParams({ q: query });
         if (this.country.countryCode) params.set('countryCode', this.country.countryCode);
-        const result = await jsonRequest(`/api/suggest?${params}`, this.suggestionController.signal);
+        const result = await jsonRequest(`/api/suggest?${params}`, controller.signal);
+        if (controller.signal.aborted || this.elements['search-input'].value.trim() !== query) return;
         this.renderSuggestions(result.results || []);
+        if (!result.results?.length) this.setSearchStatus('No suggestions. Include a country, or press Enter to search.');
       } catch (error) {
-        if (error.name !== 'AbortError') this.renderSuggestions([]);
+        if (!controller.signal.aborted && this.elements['search-input'].value.trim() === query) {
+          this.renderSuggestions([]);
+          this.setSearchStatus('Suggestions unavailable. Press Enter to try a full search.', true);
+        }
       } finally {
-        if (!this.suggestionController.signal.aborted) this.setLoading(false);
+        if (this.suggestionController === controller && !controller.signal.aborted) this.setLoading(false);
       }
     }, 350);
   }
@@ -1216,10 +1258,15 @@ class CityExplorer {
   renderSuggestions(items) {
     const container = this.elements.suggestions;
     container.replaceChildren();
-    for (const item of items) {
+    this.suggestionIndex = -1;
+    this.elements['search-input'].removeAttribute('aria-activedescendant');
+    for (const [index, item] of items.entries()) {
       const button = document.createElement('button');
       button.type = 'button';
       button.role = 'option';
+      button.id = `city-suggestion-${index}`;
+      button.setAttribute('aria-selected', 'false');
+      button.tabIndex = -1;
       button.innerHTML = `<span class="location-swatch" aria-hidden="true"></span><span><strong></strong><small></small></span><b></b>`;
       button.querySelector('strong').textContent = item.shortName || item.name;
       button.querySelector('small').textContent = item.name.replace(`${item.shortName},`, '').trim();
@@ -1239,18 +1286,59 @@ class CityExplorer {
   }
 
   async resolveSearch(query, countryCode = '') {
+    clearTimeout(this.suggestionTimer);
+    this.suggestionController?.abort();
+    this.searchController?.abort();
+    const controller = new AbortController();
+    this.searchController = controller;
     this.renderSuggestions([]);
+    this.setSearchStatus('Searching...');
     this.setLoading(true);
     try {
       const params = new URLSearchParams({ q: query });
       if (countryCode) params.set('countryCode', countryCode);
-      const response = await jsonRequest(`/api/geocode?${params}`);
+      const response = await jsonRequest(`/api/geocode?${params}`, controller.signal);
+      if (controller.signal.aborted) return;
+      if (!response.result) throw new Error('No matching place. Try adding a city or country.');
       this.chooseLocation(response.result);
-    } catch {
-      // Leave the submitted location in the search field so it can be corrected or retried.
+    } catch (error) {
+      if (!controller.signal.aborted) this.setSearchStatus(`${error.message || 'Search unavailable.'} Edit your search or press Go to retry.`, true);
     } finally {
-      this.setLoading(false);
+      if (this.searchController === controller) this.setLoading(false);
     }
+  }
+
+  handleSearchKey(event) {
+    const options = [...this.elements.suggestions.querySelectorAll('[role="option"]')];
+    if (event.key === 'Escape') {
+      clearTimeout(this.suggestionTimer);
+      this.suggestionController?.abort();
+      this.setLoading(false);
+      this.renderSuggestions([]);
+      return;
+    }
+    if (!options.length) return;
+    if (event.key === 'Enter' && this.suggestionIndex >= 0) {
+      event.preventDefault();
+      options[this.suggestionIndex]?.click();
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+    event.preventDefault();
+    this.suggestionIndex = this.suggestionIndex < 0
+      ? event.key === 'ArrowDown' ? 0 : options.length - 1
+      : (this.suggestionIndex + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+    options.forEach((option, index) => option.setAttribute('aria-selected', String(index === this.suggestionIndex)));
+    const active = options[this.suggestionIndex];
+    this.elements['search-input'].setAttribute('aria-activedescendant', active.id);
+    active.scrollIntoView({ block: 'nearest' });
+  }
+
+  setSearchStatus(message, error = false) {
+    const status = document.getElementById('search-status');
+    status.textContent = message;
+    status.classList.toggle('is-hidden', !message);
+    status.classList.toggle('is-error', error);
   }
 
   applyIpLocation(detected, { immediate = false } = {}) {
@@ -1259,6 +1347,11 @@ class CityExplorer {
   }
 
   chooseLocation(location, { source = 'selected', immediate = false } = {}) {
+    this.searchController?.abort();
+    this.suggestionController?.abort();
+    clearTimeout(this.suggestionTimer);
+    this.setLoading(false);
+    this.setSearchStatus('');
     this.selected = location;
     if (location.countryCode) this.country = { country: location.country || '', countryCode: location.countryCode, method: source };
     this.geo.context = { ...this.geo.context, lat: location.lat, lon: location.lon, source, countryCode: location.countryCode || this.country.countryCode || '' };
@@ -1282,7 +1375,7 @@ class CityExplorer {
     this.applyTerrain();
     const camera = { center: [location.lon, location.lat], zoom: this.mapMode === 'terrain' ? 12 : 14, pitch: this.terrainEnabled ? 45 : 0, bearing: this.mapMode === 'route' ? 0 : -12 };
     if (immediate) this.map.jumpTo(camera);
-    else this.map.flyTo({ ...camera, duration: 1800, essential: true });
+    else this.map.flyTo({ ...camera, duration: 1800 });
     this.worker.postMessage({ type: 'reset', apiBaseUrl: API_BASE_URL, context: { region: location.id, lat: location.lat, lon: location.lon }, tiles: spiralTiles(location.lon, location.lat, 1) });
   }
 
@@ -1674,12 +1767,14 @@ class CityExplorer {
       field.append(input, suggestions);
       const up = document.createElement('button');
       up.type = 'button';
+      up.dataset.routeAction = 'up';
       up.textContent = '^';
       up.disabled = index === 0;
       up.setAttribute('aria-label', `Move stop ${this.routeStopLabel(index)} earlier`);
       up.addEventListener('click', () => this.moveRouteStop(index, -1));
       const down = document.createElement('button');
       down.type = 'button';
+      down.dataset.routeAction = 'down';
       down.textContent = 'v';
       down.disabled = index === plan.length - 1;
       down.setAttribute('aria-label', `Move stop ${this.routeStopLabel(index)} later`);
@@ -1688,6 +1783,7 @@ class CityExplorer {
       remove.type = 'button';
       remove.textContent = 'X';
       remove.setAttribute('aria-label', `Remove stop ${this.routeStopLabel(index)}`);
+      remove.dataset.routeAction = 'remove';
       remove.addEventListener('click', () => this.removeRouteStop(index));
       row.append(marker, field, up, down, remove);
       container.append(row);
@@ -1696,7 +1792,8 @@ class CityExplorer {
     const selectedCount = plan.filter((stop) => stop.place).length;
     const complete = selectedCount === plan.length && selectedCount >= 2;
     this.elements['route-stop-count'].textContent = `${selectedCount} STOP${selectedCount === 1 ? '' : 'S'}`;
-    this.elements['trace-route'].disabled = !complete;
+    this.elements['trace-route'].disabled = !complete || this.routeSubmitting;
+    this.elements['trace-route'].textContent = this.routeSubmitting ? 'Calculating...' : 'Trace route';
     this.elements['route-plan-hint'].textContent = !complete
         ? 'Type to reuse previously searched places. Press Enter to search OpenStreetMap first and show every match on the map.'
       : `${selectedCount} stops in order. Use ^ and v to rearrange the plan.`;
@@ -1751,7 +1848,7 @@ class CityExplorer {
     this.geo.route = null;
     this.renderGeography();
     const complete = this.routePlan().every((item) => item.place);
-    this.elements['trace-route'].disabled = !complete;
+    this.elements['trace-route'].disabled = !complete || this.routeSubmitting;
     this.elements['route-stop-count'].textContent = `${this.routePlan().filter((item) => item.place).length} STOPS`;
     this.queueRouteStopSuggestions(index, query);
   }
@@ -1846,7 +1943,7 @@ class CityExplorer {
     this.renderWorkspace();
     this.renderGeography();
     this.updateIntroCard();
-    this.map.flyTo({ center: [place.lon, place.lat], zoom: Math.max(14, this.map.getZoom()), duration: 600, essential: true });
+    this.map.flyTo({ center: [place.lon, place.lat], zoom: Math.max(14, this.map.getZoom()), duration: 600 });
     this.setGeoStatus(`Added ${place.name} to stop ${this.routeStopLabel(targetIndex)}.`);
   }
 
@@ -1915,7 +2012,7 @@ class CityExplorer {
         this.country = context.country || this.country;
         this.geo.context = { lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy, source: 'browser', countryCode: this.country.countryCode || '' };
         this.renderRegion();
-        this.map.flyTo({ center: [coords.longitude, coords.latitude], zoom: Math.max(14, this.map.getZoom()), duration: 800, essential: true });
+        this.map.flyTo({ center: [coords.longitude, coords.latitude], zoom: Math.max(14, this.map.getZoom()), duration: 800 });
         this.chooseRouteStop(this.activeRouteStopIndex, { id: `browser:${coords.latitude.toFixed(6)},${coords.longitude.toFixed(6)}`, name: 'My location', lat: coords.latitude, lon: coords.longitude, countryCode: this.country.countryCode || '' });
         this.setGeoStatus(`Added your location to the route plan${coords.accuracy ? ` (about ${Math.round(coords.accuracy)} m accuracy)` : ''}.`);
       } catch (error) {
@@ -1975,7 +2072,7 @@ class CityExplorer {
     const coordinates = geometryPositions(area.geometry).filter((position) => Array.isArray(position) && position.length >= 2);
     if (!coordinates.length) return;
     const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
-    this.map.fitBounds(bounds, { padding: 90, maxZoom: 16, duration: 600, essential: true });
+    this.map.fitBounds(bounds, { padding: 90, maxZoom: 16, duration: 600 });
   }
 
   async removeArea(areaId) {
@@ -2027,6 +2124,7 @@ class CityExplorer {
 
   async findRoute(event) {
     event.preventDefault();
+    if (this.routeSubmitting) return;
     const plan = this.routePlan();
     const stops = plan.map((stop) => stop.place);
     if (stops.length < 2 || stops.some((pin) => !pin)) {
@@ -2038,27 +2136,43 @@ class CityExplorer {
       return;
     }
     this.setGeoStatus(`Requesting a ${stops.length}-stop OSM road-network plan...`);
+    this.routeSubmitting = true;
+    this.elements['trace-route'].disabled = true;
+    this.elements['trace-route'].textContent = 'Calculating...';
     try {
       const response = await postJson('/api/routes', { profile: 'driving', waypoints: stops.map((pin) => [pin.lon, pin.lat]) });
+      if (this.routePlan().length !== stops.length || this.routePlan().some((stop, index) => stop.place !== stops[index])) {
+        this.setGeoStatus('The stops changed while calculating. Trace the updated plan to get a new route.');
+        return;
+      }
+      this.stopRouteAnimation(false);
       this.geo.route = response.route;
+      this.setWorkspaceView('routes');
       this.renderWorkspace();
       const { summary } = response.route;
       const note = summary.approximateGeometry ? ' External fallback distance shown with an endpoint connector.' : '';
-      const searchedEdges = this.routeSearchEdges(response.route).length;
       this.setGeoStatus(summary.approximateGeometry
         ? `${formatDistance(summary.distanceMeters)} / ${formatDuration(summary.durationSeconds)} for this ${stops.length}-stop plan.${note}`
-        : searchedEdges
-          ? `Replaying Dijkstra across ${searchedEdges.toLocaleString()} explored OSM road segments for this ${stops.length}-stop plan...`
-          : `${formatDistance(summary.distanceMeters)} / ${formatDuration(summary.durationSeconds)} from the OSRM fallback for this ${stops.length}-stop plan.`);
-      if (searchedEdges) this.animateRoute(response.route);
-      else this.renderGeography();
+        : `${formatDistance(summary.distanceMeters)} / ${formatDuration(summary.durationSeconds)} estimated driving time across ${stops.length} stops.`);
+      this.renderGeography();
       this.focusRoute();
     } catch (error) {
       this.setGeoStatus(error.message, true);
+    } finally {
+      this.routeSubmitting = false;
+      const complete = this.routePlan().length >= 2 && this.routePlan().every((stop) => stop.place);
+      this.elements['trace-route'].disabled = !complete;
+      this.elements['trace-route'].textContent = 'Trace route';
     }
   }
 
-  async clearAdditions() {
+  async clearAdditions(confirmed = false) {
+    if (!confirmed) {
+      const dialog = document.getElementById('clear-workspace-dialog');
+      dialog.returnValue = '';
+      dialog.showModal();
+      return;
+    }
     try {
       await deleteRequest('/api/workspace');
       this.clearWorkspaceLocal(false);
@@ -2072,6 +2186,11 @@ class CityExplorer {
     const target = event.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === 'Escape' && this.agentQuestionOpen) {
+      event.preventDefault();
+      this.cancelAgentRequest();
+      return;
+    }
     if (event.key === 'Escape' && this.pinMode) {
       event.preventDefault();
       this.setPinMode(false);

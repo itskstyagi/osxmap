@@ -13,9 +13,9 @@ python -m http.server 8080 --directory UI
 
 Open `http://127.0.0.1:8080`.
 
-The interface defaults to dark mode. Set `localStorage.theme` to `light` or
-`dark` before loading the page to store a theme preference; the UI intentionally
-does not expose a theme toggle.
+The interface defaults to dark mode. The toolbar theme toggle switches the
+controls between light and dark and stores the preference locally. Satellite
+and street cartography keep their dark appearance; terrain follows the theme.
 
 ## Local API Host
 
@@ -48,15 +48,17 @@ misspelled `counrty` parameter is accepted for links created with that spelling.
 
 ## Map Agent And Manual Controls
 
-The primary map control is the floating prompt at the bottom of the map. It can
-find places, construct routes, add interest-led detours, and ask a concise
-follow-up question when required information is missing. Agent progress stays
-visible in the lower-right map HUD. Results are drawn only from backend tool
-responses, not invented coordinates or route geometry.
+The map assistant sits at the bottom of the control rail. It can find places,
+construct routes, and ask a concise follow-up question. Progress, completion,
+errors, and clarification choices stay beside the prompt even when manual
+controls are collapsed. Detailed tool activity remains in the information
+drawer. Results use backend tool responses, not invented map geometry.
 
 City search, route planning, pins, areas, and location controls remain available
-inside the collapsed `MANUAL CONTROLS` sidebar. This keeps the map canvas clear
-without removing the direct workflow.
+inside `Map controls`. Explore focuses search; Routes opens the planner and
+street map; Workspace opens saved-pin and area tools without closing the rail
+on mobile. Search suggestions support arrows, Enter, and Escape, with inline
+no-result and failure feedback.
 
 ## Location And Geography Tools
 
@@ -92,14 +94,17 @@ under `More map tools` so they do not compete with routing.
 
 Pins, areas, the selected city, and the active route are restored from the
 local workspace on reload. Search-result markers remain transient. `Clear
-workspace` and an unambiguous agent request to clear the map both remove the
+workspace` asks for confirmation before removing local additions. An
+unambiguous agent request to clear the map also removes the
 persisted workspace state and reset the visible map; reusable provider caches
 and stored route records remain available locally.
 
 The backend fetches a bounded, cached OSM drivable-road graph and runs
 Dijkstra's distance-shortest-path search for each leg in order. Every road
-segment examined before a leg destination is settled is replayed on the map,
-then cleared before the full final path is drawn. One-way and basic
+segment examined before a leg destination is settled is available through the
+optional `Replay calculation` action. The final route appears immediately after
+calculation, with distance, estimated driving time, and source beneath the
+planner. Replay can be stopped at any time. One-way and basic
 vehicle-access tags are respected; this is not a full turn-cost or
 traffic-aware navigation model. OSRM is used only when the local OSM graph
 cannot be loaded or cannot form a route. `Clear workspace` removes all
