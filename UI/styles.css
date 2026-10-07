@@ -364,27 +364,32 @@ svg { flex-shrink: 0; }
 
 /* A single control rail leaves the map free of dashboard overlays. */
 .manual-sidebar {
-  --surface: rgba(30, 30, 31, .94);
-  --surface-solid: #272729;
-  --hud: rgba(39, 39, 41, .8);
+  --surface: rgba(24, 27, 27, .72);
+  --surface-solid: #252a28;
+  --hud: rgba(30, 35, 33, .68);
   --ink: #eeeef0;
   --muted: #a3a3a8;
-  --line: rgba(255, 255, 255, .1);
+  --line: rgba(255, 255, 255, .075);
   --accent: #c4d798;
   --accent-ink: #252b1e;
   color: var(--ink);
-  top: 16px; bottom: 16px; right: auto; left: 16px;
-  width: 350px; max-height: none;
+  top: 26px; bottom: 28px; right: auto; left: 26px;
+  width: 300px; max-height: none;
   display: flex; flex-direction: column;
-  background: linear-gradient(150deg, rgba(44, 44, 46, .96), rgba(24, 24, 26, .96));
-  border-radius: 18px; box-shadow: 0 18px 50px rgba(0, 0, 0, .25);
+  background: transparent; border: 0;
+  border-radius: 0; box-shadow: none; backdrop-filter: none;
 }
-.manual-sidebar .floating-toolbar { position: static; flex-shrink: 0; padding: 14px 12px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; backdrop-filter: none; gap: 8px; }
-.manual-sidebar .workspace-nav { gap: 16px; padding: 0 4px; }
-.manual-sidebar .workspace-nav button { font-size: 11px; }
+.manual-sidebar .floating-toolbar { position: static; flex-shrink: 0; padding: 6px; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); backdrop-filter: blur(28px); gap: 6px; }
+.manual-sidebar .workspace-nav { gap: 2px; padding: 0; flex: 1; }
+.manual-sidebar .workspace-nav button { font-size: 10px; padding: 0 9px; border-radius: 9px; }
+.manual-sidebar .workspace-nav button[aria-pressed="true"] { background: rgba(255,255,255,.09); }
+.manual-sidebar .workspace-nav button::after { display: none; }
+.manual-sidebar .icon-button { width: 28px; height: 30px; border: 0; }
+.manual-sidebar .icon-button svg { width: 16px; height: 16px; }
 .manual-sidebar .topbar-actions { margin-left: auto; }
-.manual-sidebar .manual-toggle { flex-shrink: 0; height: 46px; }
-.manual-sidebar .manual-controls-content { flex: 1; min-height: 0; max-height: none; padding: 0 16px 18px; overflow-y: auto; }
+.manual-sidebar .manual-toggle { flex-shrink: 0; height: 42px; padding: 0 14px; border: 1px solid var(--line); border-bottom: 0; border-radius: 14px 14px 0 0; background: var(--surface); backdrop-filter: blur(28px); font-size: 10px; }
+.manual-sidebar .manual-controls-content { flex: 0 1 auto; min-height: 0; max-height: calc(100dvh - 240px); padding: 2px 14px 14px; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 14px 14px; backdrop-filter: blur(28px); }
+.manual-sidebar.is-collapsed .manual-toggle { border-bottom: 1px solid var(--line); border-radius: 14px; }
 .manual-sidebar .map-mode-panel,
 .manual-sidebar .map-controls,
 .manual-sidebar .map-notice,
@@ -392,11 +397,16 @@ svg { flex-shrink: 0; }
 .manual-sidebar .route-summary,
 .manual-sidebar .agent-hud,
 .manual-sidebar .agent-question { position: static; width: 100%; max-width: none; transform: none; margin: 0 0 16px; }
-.manual-sidebar .map-modes { background: rgba(255, 255, 255, .035); box-shadow: none; }
+.manual-sidebar .map-modes { background: rgba(255, 255, 255, .025); box-shadow: none; border: 0; padding: 3px; }
+.manual-sidebar .map-modes button { height: 32px; font-size: 9px; gap: 5px; }
+.manual-sidebar .map-modes button[aria-pressed="true"] { background: rgba(197,215,160,.13); color: #d4e3b9; }
 .manual-sidebar .map-controls { display: flex; flex-direction: row; background: transparent; width: fit-content; box-shadow: none; }
 .manual-sidebar .map-controls button { width: 38px; height: 32px; border-bottom: 0; border-right: 1px solid var(--line); }
 .manual-sidebar .map-controls button:last-child { border-right: 0; }
-.manual-sidebar .search-panel { margin-bottom: 18px; }
+.manual-sidebar .search-panel { margin-bottom: 0; }
+.manual-sidebar .search-form { background: rgba(255,255,255,.025); border-radius: 9px; }
+.manual-sidebar .go-button { background: rgba(197,215,160,.16); color: #d4e3b9; }
+.manual-sidebar .geo-toggle { font-size: 10px; }
 .manual-sidebar .route-summary,
 .manual-sidebar .workspace-metrics,
 .manual-sidebar .agent-hud { padding: 14px; background: var(--hud); box-shadow: none; border-radius: 12px; }
@@ -406,22 +416,26 @@ svg { flex-shrink: 0; }
 .manual-sidebar .route-metrics strong { font-size: 20px; }
 .manual-sidebar .route-metrics .metric-unit { display: inline; font-size: 10px; letter-spacing: 0; }
 .manual-sidebar .route-metrics > div:last-child strong { font: 10px var(--mono); }
-.manual-sidebar .agent-composer { position: static; flex-shrink: 0; width: auto; transform: none; margin: 12px; background: var(--surface-solid); box-shadow: none; }
+.manual-sidebar .agent-composer { position: static; flex-shrink: 0; width: auto; transform: none; margin: auto 0 0; background: var(--surface); box-shadow: 0 8px 30px rgba(0,0,0,.1); border-radius: 14px; }
+.manual-sidebar .agent-composer button { background: rgba(197,215,160,.16); color: #d4e3b9; }
 .manual-sidebar .agent-composer input { font-size: 11px; }
 .manual-sidebar .agent-composer button { padding: 0 12px; }
 .manual-sidebar .agent-question { max-height: none; }
 .manual-sidebar .agent-hud-heading { margin: 0; }
 .manual-sidebar .agent-hud[open] .agent-hud-heading { margin-bottom: 12px; }
 @media (min-width: 901px) {
-  .map-region { left: 382px; right: 0; }
+  .map-region { left: 0; right: 0; }
+  .map-canvas::after { background: linear-gradient(90deg, rgba(8,13,12,.62), rgba(8,13,12,.16) 32%, transparent 58%), linear-gradient(0deg, rgba(8,13,12,.3), transparent 40%); }
+  :root[data-theme="light"][data-map-mode="terrain"] .map-canvas::after { background: linear-gradient(90deg, rgba(30,35,30,.12), transparent 40%); }
   .manual-sidebar.is-collapsed .agent-composer { margin-top: auto; }
 }
 @media (max-width: 900px) {
   .manual-sidebar,
-   .manual-sidebar.is-open { top: 12px; left: 12px; right: auto; bottom: auto; width: min(350px, calc(100vw - 24px)); max-height: min(70dvh, 650px); }
+   .manual-sidebar.is-open { top: 12px; left: 12px; right: auto; bottom: auto; width: min(300px, calc(100vw - 24px)); max-height: min(70dvh, 650px); }
   .manual-sidebar .floating-toolbar { justify-content: space-between; padding: 10px; }
   .manual-sidebar.is-open .manual-controls-content { max-height: none; }
   .manual-sidebar .agent-composer input { font-size: 16px; }
+  .manual-sidebar .agent-composer { margin-top: 12px; }
   .app-shell:has(.manual-sidebar.is-open) .manual-sidebar .map-mode-panel,
   .app-shell:has(.manual-sidebar.is-open) .manual-sidebar .map-notice,
   .app-shell:has(.manual-sidebar.is-open) .manual-sidebar .agent-hud { visibility: visible; }

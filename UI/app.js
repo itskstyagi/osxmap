@@ -261,11 +261,12 @@ function applyMonochrome(map, theme, mode = 'route') {
       }
       if (layer.type === 'line') {
         map.setPaintProperty(layer.id, 'line-color', satellite ? '#d3d5c6' : colors.line);
-        map.setPaintProperty(layer.id, 'line-opacity', satellite ? 0.18 : terrain ? 0.45 : 0.85);
+        map.setPaintProperty(layer.id, 'line-opacity', satellite ? 0.08 : terrain ? 0.45 : 0.85);
       }
       if (layer.type === 'symbol') {
-        map.setPaintProperty(layer.id, 'text-color', colors.text);
-        map.setPaintProperty(layer.id, 'text-halo-color', colors.halo);
+        map.setPaintProperty(layer.id, 'text-color', satellite ? '#d6d9cd' : colors.text);
+        map.setPaintProperty(layer.id, 'text-halo-color', satellite ? '#151d1b' : colors.halo);
+        map.setPaintProperty(layer.id, 'text-opacity', satellite ? 0.65 : 1);
       }
       if (layer.type === 'circle') map.setPaintProperty(layer.id, 'circle-color', colors.text);
     } catch {
@@ -994,7 +995,7 @@ class CityExplorer {
       type: 'raster', tiles: ['https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 19,
       attribution: 'Imagery &copy; <a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9">Esri, Vantor, Earthstar Geographics, GIS User Community</a>',
     });
-    this.map.addLayer({ id: 'local-satellite', type: 'raster', source: 'local-imagery', layout: { visibility: this.mapMode === 'satellite' ? 'visible' : 'none' }, paint: { 'raster-saturation': -0.65, 'raster-brightness-max': 0.72, 'raster-contrast': 0.12, 'raster-fade-duration': 300 } }, firstLayer);
+    this.map.addLayer({ id: 'local-satellite', type: 'raster', source: 'local-imagery', layout: { visibility: this.mapMode === 'satellite' ? 'visible' : 'none' }, paint: { 'raster-saturation': -0.2, 'raster-brightness-max': 0.85, 'raster-contrast': 0.16, 'raster-fade-duration': 250 } }, firstLayer);
     this.map.addLayer({ id: 'local-hillshade', type: 'hillshade', source: TERRAIN_SOURCE, layout: { visibility: 'none' }, paint: { 'hillshade-exaggeration': 0.7, 'hillshade-illumination-direction': 315 } }, firstLine);
     if (!this.contourDem) return;
     this.map.addSource('local-contour-source', {
@@ -1091,7 +1092,7 @@ class CityExplorer {
     if (coordinates.length < 2) return;
     const bounds = coordinates.reduce((result, point) => result.extend(point), new window.maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
     const desktop = window.innerWidth > 900;
-    this.map.fitBounds(bounds, { padding: desktop ? 60 : { top: 40, right: 30, bottom: 260, left: 30 }, pitch: 0, maxZoom: 16, duration: 800 });
+    this.map.fitBounds(bounds, { padding: desktop ? { top: 70, left: 360, right: 70, bottom: document.querySelector('.info-drawer').classList.contains('is-open') ? 260 : 70 } : { top: 220, right: 30, bottom: 100, left: 30 }, pitch: 0, maxZoom: 16, duration: 800 });
   }
 
   addTerrainSource() {
