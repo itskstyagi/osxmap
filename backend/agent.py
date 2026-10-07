@@ -231,6 +231,11 @@ class MapAgentService:
         if not 1 <= len(prompt) <= 2_000:
             raise ServiceError("Map requests must be between 1 and 2000 characters.", 400)
         context = self.tools.new_context(map_context if isinstance(map_context, dict) else None)
+        context.research_intent = bool(re.search(r"\b(?:heat\s*map|choropleth|population|demograph\w*|density|rainfall|temperature|poverty|dataset|geotiff)\b", prompt, re.I))
+        context.population_requested = bool(re.search(r"\bpopulation\b", prompt, re.I) and re.search(r"\b(?:heat\s*map|map|plot|visuali[sz]e|density|show|create|draw|make|generate)\b", prompt, re.I))
+        years = set(re.findall(r"\b(?:18|19|20|21)\d{2}\b", prompt))
+        if context.population_requested and len(years) == 1:
+            context.requested_population_year = int(next(iter(years)))
         if not self._gate.acquire(blocking=False):
             raise ServiceError("The map agent is busy. Try again shortly.", 503, 2)
         run = None
@@ -307,6 +312,7 @@ class MapAgentService:
             final_message = ""
             tool_count = 0
             presentation_reminders = 0
+            acquisition_reminders = 0
             for _ in range(8):
                 self._check_cancelled(run)
                 assistant = self.client.complete(messages, AGENT_TOOL_SCHEMAS)
@@ -314,12 +320,23 @@ class MapAgentService:
                 tool_calls = assistant.get("tool_calls")
                 content = str(assistant.get("content") or "").strip()
                 if not isinstance(tool_calls, list) or not tool_calls:
+                    if (context.population_requested and self.tools.dependencies.load_population
+                            and not context.loaded_datasets and not context.population_attempts
+                            and context.map_context.get("scope", {}).get("type") != "layer"):
+                        if acquisition_reminders < 1:
+                            acquisition_reminders += 1
+                            messages.extend([
+                                {"role": "assistant", "content": content or ""},
+                                {"role": "user", "content": "The requested population map has not been acquired. Resolve the requested city with find_city, then call the available load_population tool with its verified cityRef and the explicitly requested year, if any. It reads real WorldPop GeoTIFF cells automatically; do not stop at source links or manual-import instructions. If this source cannot meet the request, try a relevant alternative and report the specific issue honestly."},
+                            ])
+                            continue
+                        raise ServiceError("The population reader was not used, so no population layer was created.", 503)
                     if context.requires_presentation:
                         if presentation_reminders < 1:
                             presentation_reminders += 1
                             messages.extend([
                                 {"role": "assistant", "content": content or ""},
-                                {"role": "user", "content": "Geographic results were found but have not been presented. For an achievable geographic request, call present_map using only returned references. If a required dataset, general web access, or analysis is unavailable, call report_limitation with the corresponding reason. Do not substitute place-search points for the requested observations or claim an uncreated heatmap."},
+                                {"role": "user", "content": "Geographic results were found but the requested output is not complete. For statistics, use load_population, load_raster_dataset, or load_web_dataset with real source values. For a place/route request, call present_map using only returned references. After relevant acquisition fails, call report_limitation. Do not substitute place-search points for the requested observations or claim an uncreated heatmap."},
                             ])
                             continue
                         raise ServiceError("The agent did not apply a map update or report a capability limitation. Your previous map was retained. For a heatmap, import a geographic dataset with numeric values in Studio > Data.", 503)
@@ -345,7 +362,7 @@ class MapAgentService:
                             self._finish(run, prompt, result["message"])
                         else:
                             self._remember(run.session_id, prompt, result["message"])
-                        self._emit(run, "agent.limitation", reason=result["reason"], message=result["message"], sources=self._source_citations(context), reversible=False, **(rollback or {}))
+                        self._emit(run, "agent.limitation", reason=result["reason"], message=result["message"], sources=self._source_citations(context), contextOnly=bool(result.get("contextOnly") and not run.mapped), reversible=False, **(rollback or {}))
                         return
                     if name == "ask_user" and "question" in result:
                         reversible = self._finish(run, prompt, result["question"])
@@ -356,6 +373,18 @@ class MapAgentService:
                         "tool_call_id": str(call.get("id") or "tool-call") if isinstance(call, dict) else "tool-call",
                         "content": json.dumps(self._model_tool_result(result), separators=(",", ":")),
                     })
+            if context.presented and not context.requires_presentation:
+                final_message = "Queued the sourced map layer for browser validation and display. Source and coverage details are attached." if context.loaded_datasets else "The requested map updates are ready."
+                reversible = self._finish(run, prompt, final_message)
+                self._emit(run, "agent.completed", message=final_message, sources=self._source_citations(context), reversible=reversible)
+                return
+            if context.research_area and not run.mapped:
+                final_message = f"Located {context.research_area['name']} and retained its study extent as geographic context. The research budget ended before usable numeric observations were obtained; no statistical layer was invented."
+                if context.research_errors:
+                    final_message += " Last source issue: " + context.research_errors[-1]
+                self._finish(run, prompt, final_message)
+                self._emit(run, "agent.limitation", reason="dataset_unavailable", message=final_message, contextOnly=True, sources=self._source_citations(context), reversible=False)
+                return
             raise ServiceError("The map agent reached its tool limit. Please make the request more specific.", 503)
         except AgentCancelled:
             self._emit(run, "agent.cancelled", **self._rollback(run))
@@ -384,13 +413,15 @@ class MapAgentService:
         if not isinstance(arguments, dict):
             return {"error": "Tool arguments must be a JSON object (e.g. {\"query\": \"Paris\"}), not a " + type(arguments).__name__ + "."}
         self._emit(run, "agent.status", stage=name, label=self.tools.stage_label(name))
-        if name in {"search_web", "read_web_source", "load_web_dataset", "map_source_table", "report_limitation"}:
+        if name in {"search_web", "read_web_source", "load_web_dataset", "load_population", "load_raster_dataset", "map_source_table", "report_limitation"}:
             try:
                 return self._execute_research_tool(run, context, name, arguments)
             except ServiceError as error:
                 if error.status == 409:
                     raise
-                return {"error": str(error)[:700], "status": error.status, "retryAfter": error.retry_after, "message": "This tool did not produce a valid map update. Try another already-discovered source within the run budget, or honestly report the unsupported source/data capability."}
+                if name != "report_limitation":
+                    context.research_errors = [*context.research_errors[-2:], str(error)[:500]]
+                return {"error": str(error)[:700], "status": error.status, "retryAfter": error.retry_after, "message": "This tool did not produce a valid statistical layer. Use the relevant direct population/raster reader or another matching discovered source within the run budget. Preserve truthful study-area context, never invent substitute observations."}
         if name in {"present_map", "clear_map", "studio_operation"}:
             def mutation() -> dict[str, Any]:
                 self._check_cancelled(run)
@@ -402,6 +433,13 @@ class MapAgentService:
         return self.tools.execute(context, name, arguments)
 
     def _execute_research_tool(self, run: AgentRun, context: AgentRunContext, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name in {"load_population", "load_raster_dataset"}:
+            # Network/decoding work must not hold the shared workspace's mutation lock.
+            result = self.tools.execute(context, name, arguments)
+            self._check_cancelled(run)
+            _, run.expected = self.tools.dependencies.mutate_workspace(run.expected, lambda: None)
+            run.mapped = run.mapped or "mapUpdate" in result
+            return result
         if name in {"load_web_dataset", "map_source_table"}:
             result, run.expected = self.tools.dependencies.mutate_workspace(run.expected, lambda: self.tools.execute(context, name, arguments))
             run.mapped = run.mapped or "mapUpdate" in result
@@ -477,7 +515,7 @@ class MapAgentService:
 
     @staticmethod
     def _source_citations(context: AgentRunContext) -> list[dict[str, Any]]:
-        sources = sorted(context.sources.values(), key=lambda source: not bool(source.get("readAt")))
+        sources = sorted(context.sources.values(), key=lambda source: (not bool(source.get("usedForMap")), not bool(source.get("readAt"))))
         return [{key: source.get(key, "") for key in ("sourceRef", "title", "url", "publisher", "date", "readAt", "retrievedAt", "stored")} for source in sources[:12]]
 
     def _emit(self, run: AgentRun, event_type: str, **payload: Any) -> None:

@@ -101,6 +101,7 @@ class AgentRunContext:
     loaded_datasets: int = 0
     research_intent: bool = False
     population_requested: bool = False
+    requested_population_year: int | None = None
     research_city_ref: str = ""
     research_area: dict[str, Any] | None = None
     population_attempts: int = 0
@@ -670,9 +671,11 @@ class AgentTools:
         city, extent = self._raster_extent(context, arguments.get("cityRef"))
         if not city or city.get("kind") != "city" or not re.fullmatch(r"[A-Z]{2}", city.get("countryCode", "")):
             raise ServiceError("Use find_city to obtain a verified city and its country before loading population.", 400)
-        year = arguments.get("year")
+        year = arguments.get("year", context.requested_population_year)
         if year is not None and (type(year) is not int or not 1800 <= year <= 2200):
             raise ServiceError("The population reference year must be an integer; omit it to use the cited archive's latest available year.", 400)
+        if context.requested_population_year is not None and year != context.requested_population_year:
+            raise ServiceError("Use the reference year explicitly requested by the user; do not silently substitute another population year.", 400)
         context.population_attempts += 1
         if not self.dependencies.load_population:
             raise ServiceError("The population raster reader is not installed in this service.", 503)
@@ -914,7 +917,7 @@ class AgentTools:
         if reason in {"dataset_unavailable", "web_search_unavailable"} and context.loaded_datasets:
             raise ServiceError("A real sourced dataset has already been queued. Describe its actual coverage and caveats instead of declaring that no data was obtained.", 400)
         if (reason in {"dataset_unavailable", "web_search_unavailable"} and context.population_requested
-                and self.dependencies.load_population and not context.population_attempts):
+                and context.research_city_ref and self.dependencies.load_population and not context.population_attempts):
             raise ServiceError("A direct WorldPop population reader is available. Resolve the requested city and call load_population before concluding that population data cannot be obtained.", 400)
         if reason in {"dataset_unavailable", "web_search_unavailable"} and self.dependencies.search_web and not context.web_searches:
             raise ServiceError("Web research is available. Use search_web to find sources before concluding that the requested dataset cannot be obtained.", 400)
@@ -986,6 +989,8 @@ class AgentTools:
         self.dependencies.clear_workspace()
         context.entities.clear()
         context.routes.clear()
+        context.research_area = None
+        context.research_city_ref = ""
         context.presented = True
         context.requires_presentation = False
         return {
