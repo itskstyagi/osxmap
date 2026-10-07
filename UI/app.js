@@ -1304,7 +1304,7 @@ class CityExplorer {
     } catch (error) {
       if (!controller.signal.aborted) this.setSearchStatus(`${error.message || 'Search unavailable.'} Edit your search or press Go to retry.`, true);
     } finally {
-      if (this.searchController === controller) this.setLoading(false);
+      if (this.searchController === controller && !controller.signal.aborted) this.setLoading(false);
     }
   }
 

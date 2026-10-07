@@ -13,6 +13,16 @@ python -m http.server 8080 --directory UI
 
 Open `http://127.0.0.1:8080`.
 
+Run the dependency-free interaction regression suite with Node:
+
+```powershell
+node --test UI/app.test.cjs
+```
+
+These tests use DOM doubles, not a rendering engine. Browser layout, screen
+reader behavior, satellite contrast, and mobile keyboard behavior require
+separate live checks.
+
 The interface defaults to dark mode. The toolbar theme toggle switches the
 controls between light and dark and stores the preference locally. Satellite
 and street cartography keep their dark appearance; terrain follows the theme.
