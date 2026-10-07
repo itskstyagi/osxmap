@@ -18,7 +18,10 @@ from email.message import Message
 from html.parser import HTMLParser
 from urllib.parse import parse_qsl, quote, urljoin, urlsplit, urlunsplit
 
-from backend.errors import ServiceError
+try:
+    from .errors import ServiceError
+except ImportError:  # Supports direct execution through `python backend/server.py`.
+    from errors import ServiceError
 
 MAX_RAW_BYTES = 4 * 1024 * 1024
 MAX_TEXT_CHARS = 24000
