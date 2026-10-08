@@ -1,7 +1,8 @@
-# Monument Python Backend
+# Meridian Python Backend
 
 This is a Python 3.11+ local API server. Its map/cache HTTP layer uses the
-standard library, while the agent WebSocket bridge uses one pinned dependency.
+standard library. WebSockets provides the agent bridge; Rasterio and pycountry
+support bounded population/raster extraction and verified country-code lookup.
 It replaces the original Express/Mongo service while retaining its user-visible
 behavior:
 
@@ -12,6 +13,9 @@ behavior:
 - Map-ready GeoJSON tile streaming with building geometry plus categorized public-place markers.
 - OSM-first place lookup, durable local pins/areas/routes, and animated local Dijkstra driving routes over OSM road data.
 - An OpenAI-compatible map agent that turns natural-language requests into validated city, place, and route map updates.
+- Scoped Studio operations over already-loaded datasets and revision-guarded workspace rollback/undo.
+- Source-backed city/road highlights and a declarative client map API for geometry,
+  styling, visibility, labels, camera, basemap, and terrain controls.
 
 ## Run
 
@@ -51,12 +55,128 @@ The HTTP API listens on `PORT` and the agent event socket listens on `PORT + 1`
 map updates, errors, and cancellation events on the loopback WebSocket. Socket
 origin checks allow only local browser origins even when `ALLOWED_ORIGINS=*`.
 
-Agent requests use a fixed tool allowlist over existing city, place, route, and
+Agent requests use a fixed tool allowlist over existing city, place, route, geometry, and
 workspace services. They cannot make arbitrary HTTP requests, read files, run
 SQL, or receive provider credentials. Model prompts and responses are not
 persisted. Agent-created pins, areas, selected-city context, and active routes
 use the same local workspace store as manual controls. `clear map` is an
 explicit workspace mutation that clears these items and the visible map state.
+
+`highlight_city(cityRef, style?)` retrieves the verified OSM city polygon and queues
+an explicit filled/outlined geographic overlay. `highlight_roads(query, nearRef?,
+classes?, style?)` retrieves actual bounded highway line geometry. City lookup
+revalidates OSM identity, country, name, and settlement classification; road queries
+are generated from escaped literal names and reviewed classes. Neither reader
+substitutes a bbox, route, or randomly generated point distribution.
+
+The read-only endpoints are `GET /api/map/city-boundary?query=Noida&countryCode=IN`
+and `GET /api/map/roads?query=roads&west=...&south=...&east=...&north=...&classes=primary,residential`.
+They share existing public-service queues, cache and cooldown policy. Road results
+state their extent and partial coverage; OSM administrative geometry is not a
+legally certified municipal boundary. Crops exceeding provider limits are reported
+explicitly, not silently sampled or transformed into a rectangular replacement.
+
+`plot_points` and `draw_geometry` use verified place references or explicit user
+annotation coordinates. `map_action` controls existing geographic layer styles,
+visibility, filtering, ordering, removal, view, basemap, terrain and display groups.
+Updates contain typed `actions` with inline GeoJSON, never executable code or model
+URLs. The browser validates a batch atomically and retains source metadata. Its
+bounded `mapContext.mapActions` inventory is available in Explore and Studio, so
+later requests can restyle an existing highlight. Colors are bounded literal
+hex/basic CSS names and numeric styles are finite. A camera-only update cannot
+complete a highlight request, and geographic overlays never count as population
+observations. Cancellation/undo use the existing guarded workspace transaction.
+
+Studio adds `studio_operation` for validated visualization, filtering, summary,
+high-value selection, scenario duplication, comparison, exact-color styling,
+visibility, removal, and reordering. Requests identify
+an existing loaded layer and an explicit viewport, selection, layer, or workspace
+scope. The service passes a bounded context inventory as data to the model and
+queues a validated operation for browser-side computation; it does not claim to
+have measured statistics or supply missing datasets. Categorical filters retain
+JSON scalar types, including booleans.
+
+Web research uses the existing configured SerpApi transport/cache through
+`search_web` (`google`, `google_news`, or `google_scholar`). Google Maps remains in
+the existing OSM-first place lookup. Search metadata is bounded and credential
+redacted; citation URLs and acquisition date are separate from publication/date
+of observations. Cached responses may be historical, not live/latest.
+Research localization follows a resolved target city/`nearRef`, not an unrelated
+map or Geo-IP country. Relevant readable sources are ranked before the result cap;
+challenge-only pages and duplicate citations are excluded.
+
+`read_web_source` accepts only opaque sources returned by search or discovered
+page links. It reads bounded public HTML/text/GeoJSON/CSV, validates and pins
+public DNS addresses on each request and redirect, verifies TLS hostnames, and
+blocks credentials/private hosts/binary formats/oversize responses. Retrieved
+text and tables are untrusted evidence, never executable instructions. No
+cookies, authentication state, proxies, or arbitrary model-supplied URLs are used.
+
+`load_web_dataset` transfers actual parsed GeoJSON or coordinate CSV to Studio.
+`map_source_table` joins numeric source cells to exact provider settlement names
+inside geographic scope, or using an actual source administrative-region column.
+Schools/businesses/unknown POIs cannot represent a census settlement. Values
+cannot be supplied or overridden by model arguments. Source tables produce
+partial settlement-point heatmaps, not a continuous census population grid.
+Quantitative heatmaps require original Point observations or extracted raster
+cell centers; regional polygon or
+shared MultiPoint totals are not redistributed. Datasets containing several
+census years/dates require an actual source `timeField`/`timeValue` selection;
+table joins can use `timeColumn`/`timeValue`. Source row/header/context provenance
+and the selected observation are retained rather than combining populations
+across years. No valid numeric observations in scope is an explicit rejection.
+Data is capped to 4 MB per agent transfer and validated again in the browser.
+Model context contains field/count metadata, not the transferred feature data.
+
+`load_population(cityRef, year?)` discovers official WorldPop country metadata
+and 1 km population-count GeoTIFFs, then extracts genuine cell-center values for
+the verified city extent or frozen geographic scope. It does not need SerpApi.
+The available collection covers 2000-2020: the default is its latest available
+year, not a claim of current population. Explicit years are never silently
+substituted. Observation year, resolution, units, license, and attribution travel
+with the layer. A bounding-box crop is not an administrative population total.
+
+`load_raster_dataset(sourceRef, cityRef?, band?)` also extracts numeric observations
+from discovered public GeoTIFFs. Downloads are DNS-pinned and limited to 64 MiB;
+decoding uses memory-only GTiff input, supported verified CRS, and at most 10,000
+cells in the cropped window. NoData is masked and zero retained. Oversized crops
+are rejected rather than silently sampled. PDF, authenticated portals, and
+arbitrary API engines still need another supported source or reviewed extraction.
+
+For statistical research, a unique `find_city` result immediately emits a labeled
+study-extent preview. `report_limitation` requires relevant available acquisition
+paths to be tried and emits citations plus the specific source issue. A
+`contextOnly` limitation retains that truthful preview, never an invented heatmap.
+Other earlier map mutations are rolled back when safe; rollback/conflict metadata
+accompanies the event. Cancellation still restores the guarded prior state.
+For omitted geographic presentation, the model gets one bounded recovery turn
+to present returned references or report a limitation, not an unbounded retry.
+
+Each run checkpoints pins, areas, and active state. Cancellation/failure restores
+that checkpoint only when SQLite revision and fingerprint guards confirm there
+were no intervening writes. Provider calls occur outside the short write
+transactions. Reusable provider caches and stored route records are retained.
+Terminal events include `rolledBack` and conflict details, or `reversible` on
+successful completion/clarification. `POST /api/agent/undo` takes `sessionId` and
+`runId` and returns `{workspace, undone: true}`. Tokens are single-use, bounded to
+20 process-wide, expire on socket disconnect/restart, and cannot overwrite later
+manual edits. Purely browser-side operations use the frontend's undo mechanism.
+
+## Safe Tests
+
+From the repository root:
+
+```powershell
+python -B -m backend.test_isolated
+```
+
+This runner bypasses `.env` loading, uses temporary databases, and blocks outbound
+HTTP. It covers both `python backend/server.py` and module startup, public source
+reader fixtures, Serp cache/engine/error handling, sourced/table-matched dataset
+transfers, existing geographic services, scoped tools, additive revision
+migration, CORS metadata, cancellation, concurrent writes, and owned undo. Avoid
+importing `backend.server` directly merely to run tests against a real configured
+workspace: module initialization opens its configured SQLite cache.
 
 ## UI Deployment
 
@@ -76,6 +196,7 @@ or user accounts.
 | --- | --- |
 | `GET /api/health` | Service configuration status. |
 | `POST /api/agent/runs` | Start an AI map run for an active browser socket session. |
+| `POST /api/agent/undo` | Undo an owned completed run when no later workspace edits conflict. |
 | `GET /api/suggest?q=&countryCode=` | Debounced city suggestions. |
 | `GET /api/geocode?q=&countryCode=` | Exact city lookup. |
 | `GET /api/country?lat=&lon=` | Browser coordinate or IP-country lookup. |
@@ -84,8 +205,10 @@ or user accounts.
 | `GET /api/places/suggest?q=` | Local-only suggestions from previously stored places; never calls an external provider. |
 | `GET /api/places/stored?west=&south=&east=&north=` | Canonical locally stored places in the visible map bounds. |
 | `GET /api/workspace` | Current single-machine pins, areas, and route selection state. |
+| `POST /api/workspace/state` | Persist active route and selected-city context. |
 | `POST /api/pins` | Add a durable local workspace pin. |
 | `POST /api/areas` | Store a validated local GeoJSON polygon. |
+| `POST /api/areas/{areaId}` | Rebuild an existing measured area. |
 | `POST /api/routes` | Calculate or retrieve a local OSM-road shortest driving route. |
 | `GET /api/routes/{routeId}` | Retrieve a stored OSM-road route for workspace restoration. |
 | `DELETE /api/pins/{pinId}` / `DELETE /api/areas/{areaId}` | Remove a workspace addition. |
@@ -95,7 +218,8 @@ or user accounts.
 Tile data is GeoJSON rather than FlatGeobuf because the static browser UI no
 longer requires a JavaScript binary decoder. It retains the z14-only contract,
 `204` empty tiles, cache/source/height response headers, raw-source caching,
-and transient (never persisted) inferred heights.
+and transient (never persisted) inferred heights. Tile metadata and `Retry-After`
+headers are explicitly exposed to the local cross-origin browser UI.
 
 ## Data Sources
 
