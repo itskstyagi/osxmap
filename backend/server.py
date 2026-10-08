@@ -25,26 +25,33 @@ import urllib.parse
 import urllib.request
 import uuid
 import zlib
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 try:
     from .agent import MapAgentService
     from .agent_tools import AgentDependencies, AgentTools
     from .config import BACKEND_DIR, Config, is_loopback_host
     from .errors import ServiceError
+    from .map_geometry import load_city_geometry as fetch_city_geometry, load_road_geometry as fetch_road_geometry, validate_geometry_query
     from .openai_client import OpenAIChatClient
+    from .raster_sources import load_population_grid, load_raster_grid
     from .realtime import RealtimeHub
+    from .web_sources import fetch_public_bytes, fetch_web_document, validate_web_url
 except ImportError:  # Supports `python server.py` from the backend directory.
     from agent import MapAgentService
     from agent_tools import AgentDependencies, AgentTools
     from config import BACKEND_DIR, Config, is_loopback_host
     from errors import ServiceError
+    from map_geometry import load_city_geometry as fetch_city_geometry, load_road_geometry as fetch_road_geometry, validate_geometry_query
     from openai_client import OpenAIChatClient
+    from raster_sources import load_population_grid, load_raster_grid
     from realtime import RealtimeHub
+    from web_sources import fetch_public_bytes, fetch_web_document, validate_web_url
 
 
 EARTH_RADIUS = 6_371_008.8
@@ -237,6 +244,19 @@ class Cache:
                     """
                 )
                 self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (3, int(time.time())))
+            if 4 not in applied:
+                self.connection.executescript(
+                    "CREATE TABLE workspace_revision (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL);"
+                    "INSERT INTO workspace_revision(id, version) VALUES (1, 0);"
+                )
+                # Track even same-value/ABA edits, including edits through another SQLite connection.
+                for table in ("workspace_pins", "workspace_areas", "workspace_state"):
+                    for operation in ("INSERT", "UPDATE", "DELETE"):
+                        self.connection.execute(
+                            f"CREATE TRIGGER {table}_{operation.lower()}_revision AFTER {operation} ON {table} "
+                            "BEGIN UPDATE workspace_revision SET version = version + 1 WHERE id = 1; END"
+                        )
+                self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (4, int(time.time())))
             self._deduplicate_places()
 
     @staticmethod
@@ -320,6 +340,14 @@ class Cache:
                 (provider, request_key),
             ).fetchone()
         return json.loads(row["response_json"]) if row else None
+
+    def provider_received_at(self, provider: str, request_key: str) -> int | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT received_at FROM provider_responses WHERE provider = ? AND request_key = ? ORDER BY received_at DESC, response_id DESC LIMIT 1",
+                (provider, request_key),
+            ).fetchone()
+        return int(row["received_at"]) if row else None
 
     def put_provider_response(self, provider: str, request_key: str, request: dict[str, Any], response: Any) -> None:
         response_id = f"provider-response-{uuid.uuid4().hex}"
@@ -479,7 +507,11 @@ class Cache:
                     canonical_places.append(place)
         return canonical_places
 
-    def search_places(self, normalized_query: str, limit: int | None = None, provider: str = "", country_code: str = "") -> list[dict[str, Any]]:
+    def get_place(self, place_id: str, include_payload: bool = False) -> dict[str, Any] | None:
+        with self.lock:
+            return self._canonical_place(place_id, include_payload=include_payload)
+
+    def search_places(self, normalized_query: str, limit: int | None = None, provider: str = "", country_code: str = "", include_payload: bool = False) -> list[dict[str, Any]]:
         """Return stored places whose normalized name contains the query substring."""
         pattern = f"%{normalized_query}%"
         statement = (
@@ -499,7 +531,7 @@ class Cache:
             parameters.append(limit)
         with self.lock:
             rows = self.connection.execute(statement, parameters).fetchall()
-        return [self._place_from_row(row) for row in rows]
+        return [self._place_from_row(row, include_payload=include_payload) for row in rows]
 
     def list_places_in_bounds(self, west: float, south: float, east: float, north: float, limit: int = 1_000) -> tuple[list[dict[str, Any]], bool]:
         base = (
@@ -523,7 +555,7 @@ class Cache:
         return [{"id": row["pin_id"], "label": row["label"], "name": row["name"], "placeId": row["place_id"], "lat": row["latitude"], "lon": row["longitude"], "source": row["source"], "createdAt": row["created_at"]} for row in rows]
 
     def add_pin(self, name: str, lat: float, lon: float, place_id: str | None, source: str) -> dict[str, Any]:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             count = self.connection.execute("SELECT COUNT(*) AS count FROM workspace_pins").fetchone()["count"]
             label = pin_label(count)
             pin_id = f"pin-{uuid.uuid4().hex}"
@@ -535,7 +567,7 @@ class Cache:
         return {"id": pin_id, "label": label, "name": name[:160], "placeId": place_id, "lat": lat, "lon": lon, "source": source, "createdAt": created_at}
 
     def delete_pin(self, pin_id: str) -> bool:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             deleted = self.connection.execute("DELETE FROM workspace_pins WHERE pin_id = ?", (pin_id,)).rowcount > 0
             if not deleted:
                 return False
@@ -563,7 +595,7 @@ class Cache:
     def add_area(self, label: str, geometry: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
         area_id = f"area-{uuid.uuid4().hex}"
         created_at = int(time.time())
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             self.connection.execute(
                 "INSERT INTO workspace_areas(area_id, label, geometry_json, summary_json, created_at) VALUES (?, ?, ?, ?, ?)",
                 (area_id, label[:160], json.dumps(geometry, separators=(",", ":")), json.dumps(summary, separators=(",", ":")), created_at),
@@ -571,7 +603,7 @@ class Cache:
         return {"id": area_id, "label": label[:160], "geometry": geometry, "summary": summary, "createdAt": created_at}
 
     def update_area(self, area_id: str, label: str, geometry: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any] | None:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             row = self.connection.execute("SELECT created_at FROM workspace_areas WHERE area_id = ?", (area_id,)).fetchone()
             if not row:
                 return None
@@ -582,7 +614,7 @@ class Cache:
         return {"id": area_id, "label": label[:160], "geometry": geometry, "summary": summary, "createdAt": row["created_at"]}
 
     def delete_area(self, area_id: str) -> bool:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             return self.connection.execute("DELETE FROM workspace_areas WHERE area_id = ?", (area_id,)).rowcount > 0
 
     def get_route(self, request_key: str) -> dict[str, Any] | None:
@@ -623,7 +655,7 @@ class Cache:
         return json.loads(row["value_json"]) if row else {}
 
     def put_workspace_state(self, value: dict[str, Any]) -> None:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             self.connection.execute(
                 "INSERT INTO workspace_state(state_key, value_json, updated_at) VALUES ('active', ?, ?) "
                 "ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
@@ -631,10 +663,69 @@ class Cache:
             )
 
     def clear_workspace(self) -> None:
-        with self.lock, self.connection:
+        with self._workspace_transaction():
             self.connection.execute("DELETE FROM workspace_pins")
             self.connection.execute("DELETE FROM workspace_areas")
             self.connection.execute("DELETE FROM workspace_state")
+
+    @contextmanager
+    def _workspace_transaction(self, write: bool = True) -> Iterator[None]:
+        """Keep checkpoint checks and local writes atomic, without locking during provider calls."""
+        with self.lock:
+            if self.connection.in_transaction:
+                yield
+            else:
+                with self.connection:
+                    self.connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                    yield
+
+    def workspace_snapshot(self) -> dict[str, Any]:
+        with self._workspace_transaction(write=False):
+            return {"pins": self.list_pins(), "areas": self.list_areas(), "state": self.get_workspace_state()}
+
+    def capture_workspace(self) -> dict[str, Any]:
+        with self._workspace_transaction(write=False):
+            workspace = self.workspace_snapshot()
+            version = self.connection.execute("SELECT version FROM workspace_revision WHERE id = 1").fetchone()["version"]
+            return {"workspace": workspace, "version": version, "fingerprint": request_hash(workspace)}
+
+    def _check_workspace(self, expected: dict[str, Any]) -> dict[str, Any]:
+        current = self.capture_workspace()
+        if any(current[key] != expected.get(key) for key in ("version", "fingerprint")):
+            raise ServiceError("The workspace changed after the agent snapshot. Later edits were preserved; automatic restore is unsafe.", 409)
+        return current
+
+    def mutate_workspace(self, expected: dict[str, Any], mutation: Callable[[], Any]) -> tuple[Any, dict[str, Any]]:
+        with self._workspace_transaction():
+            self._check_workspace(expected)
+            result = mutation()
+            return result, self.capture_workspace()
+
+    def restore_workspace(self, before: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
+        """Restore an in-process checkpoint, never provider caches, places, or reusable routes."""
+        try:
+            with self._workspace_transaction():
+                current = self._check_workspace(expected)
+                workspace = before["workspace"]
+                if current["workspace"] == workspace:
+                    return current
+                self.connection.execute("DELETE FROM workspace_pins")
+                self.connection.execute("DELETE FROM workspace_areas")
+                self.connection.execute("DELETE FROM workspace_state WHERE state_key = 'active'")
+                for pin in workspace["pins"]:
+                    self.connection.execute(
+                        "INSERT INTO workspace_pins(pin_id, label, name, place_id, latitude, longitude, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (pin["id"], pin["label"], pin["name"], pin["placeId"], pin["lat"], pin["lon"], pin["source"], pin["createdAt"]),
+                    )
+                for area in workspace["areas"]:
+                    self.connection.execute(
+                        "INSERT INTO workspace_areas(area_id, label, geometry_json, summary_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                        (area["id"], area["label"], json.dumps(area["geometry"], separators=(",", ":")), json.dumps(area["summary"], separators=(",", ":")), area["createdAt"]),
+                    )
+                self.put_workspace_state(workspace["state"])
+                return self.capture_workspace()
+        except (KeyError, TypeError, sqlite3.IntegrityError) as error:
+            raise ServiceError("The saved workspace can no longer be restored safely. No restore was applied.", 409) from error
 
     def close(self) -> None:
         with self.lock:
@@ -684,6 +775,10 @@ def serp_request_key(params: dict[str, Any]) -> str:
 
 def redact_provider_payload(value: Any) -> Any:
     """Preserve useful provider data without retaining credentials in local storage."""
+    if isinstance(value, str):
+        if CONFIG.serp_api_key:
+            value = value.replace(CONFIG.serp_api_key, "[redacted]")
+        value = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|authorization|token)\s*[:=]\s*)[^\s&,;]+", r"\1[redacted]", value)
     if isinstance(value, str) and value.startswith(("http://", "https://")):
         parsed = urllib.parse.urlsplit(value)
         params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -737,17 +832,178 @@ def fetch_serp_response(params: dict[str, Any]) -> Any:
     def task() -> Any:
         stored = CACHE.get_provider_response("serpapi", key)
         if stored is not None:
-            return stored
+            validate_serp_payload(stored)
+            return redact_provider_payload(stored)
         if not CONFIG.serp_api_key:
             raise ServiceError("SerpApi is not configured and this request is not stored locally.", 503)
-        payload = fetch_json(
+        payload = fetch_serp_json(
             "https://serpapi.com/search.json?" + urllib.parse.urlencode({**request, "api_key": CONFIG.serp_api_key}),
-            {"Accept": "application/json"}, 20,
         )
+        validate_serp_payload(payload)
         CACHE.put_provider_response("serpapi", key, request, payload)
-        return payload
+        return redact_provider_payload(payload)
 
     return SERP_QUEUE.run(task)
+
+
+def validate_serp_payload(payload: Any) -> None:
+    if not isinstance(payload, dict) or not isinstance(payload.get("search_metadata", {}), dict):
+        raise ServiceError("SerpApi returned an invalid search response.", 503)
+    error = payload.get("error")
+    status = payload.get("search_metadata", {}).get("status")
+    if error or status not in {None, "Success"}:
+        if isinstance(error, str) and "hasn't returned any results" in error.casefold():
+            return
+        raise ServiceError("SerpApi could not complete this search. Check provider configuration and quota, then retry.", 503)
+
+
+def fetch_serp_json(url: str) -> dict[str, Any]:
+    """Read only a fixed SerpApi endpoint with bounded JSON and safe errors."""
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "Accept-Encoding": "identity"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            final = urllib.parse.urlsplit(response.geturl())
+            if final.scheme != "https" or final.hostname != "serpapi.com" or final.username or final.password:
+                raise ServiceError("SerpApi redirected to an unsupported endpoint.", 503)
+            raw = response.read(4 * 1024 * 1024 + 1)
+            if len(raw) > 4 * 1024 * 1024:
+                raise ServiceError("SerpApi response exceeded the 4 MB limit.", 503)
+            payload = json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code == 429:
+            raise ServiceError("SerpApi is rate limiting requests.", 503, retry_after_seconds(error.headers.get("Retry-After"))) from None
+        raise ServiceError(f"SerpApi returned HTTP {error.code}.", 503) from None
+    except (urllib.error.URLError, OSError, UnicodeError, ValueError):
+        raise ServiceError("SerpApi returned invalid data or could not be reached.", 503) from None
+    if not isinstance(payload, dict):
+        raise ServiceError("SerpApi returned an invalid search response.", 503)
+    return payload
+
+
+def rank_serp_web_sources(query: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rank discovery evidence, not verified coverage or measurements."""
+    def terms(value: str) -> set[str]:
+        value = unicodedata.normalize("NFKD", urllib.parse.unquote(value)).casefold()
+        value = "".join(character for character in value if not unicodedata.combining(character))
+        return set(re.findall(r"[^\W_]+", value))
+
+    stopwords = set("a an and are as at be by for from in is it of on or the to with".split())
+    discovery_words = set("data dataset datasets download downloads source sources official open file files format csv tsv json geojson geotiff tif tiff gpkg kml kmz shp zip".split())
+    query_terms = terms(query) - stopwords
+    substantive = query_terms - discovery_words
+    population_query = bool(query_terms & {"population", "populations", "census", "demographic", "demographics", "worldpop"})
+    data_query = population_query or bool(query_terms & {"data", "dataset", "datasets", "geodata", "raster", "csv", "geojson", "geotiff"})
+    population_hosts = {"worldpop.org", "censusindia.gov.in", "census.gov", "sedac.ciesin.columbia.edu", "ghsl.jrc.ec.europa.eu"}
+    challenge = re.compile(
+        r"\b(?:javascript is (?:disabled|required)|(?:enable|requires?) javascript|"
+        r"verify (?:that )?you(?: are|'re|\u2019re) (?:not a robot|(?:a )?human)|"
+        r"checking (?:your browser|if the site connection is secure)|"
+        r"(?:complete|solve) (?:the |this |a )?(?:captcha|security check)|"
+        r"unusual traffic from your (?:computer|network)|security verification|"
+        r"just a moment|please wait|cloudflare ray id)\b", re.IGNORECASE,
+    )
+    placeholders = {"untitled", "just a moment", "please wait", "access denied", "attention required", "captcha", "security check", "human verification", "robot check"}
+    sources = []
+    for item in candidates:
+        # Keep real citations even when a page also includes challenge boilerplate.
+        snippet = " ".join(part for part in re.split(r"(?<=[.!?])\s+|\n+", item["snippet"]) if not challenge.search(part))
+        useful_title = normalize_query(item["title"]).strip(" .!?:") not in placeholders and not challenge.match(item["title"])
+        if not useful_title and not terms(snippet):
+            continue
+        item = {**item, "snippet": snippet}
+        sources.append((item, terms(" ".join((item["title"], snippet, item["url"])))))
+
+    # Rare query terms often carry the locality/topic; no gazetteer or country exclusion is needed.
+    weights = {term: 1 + math.log((len(sources) + 1) / (1 + sum(term in words for _, words in sources))) for term in substantive}
+    ranked = []
+    for item, words in sources:
+        matched = substantive & words
+        score = sum(weights[term] for term in sorted(matched))
+        score += min(0.5, 0.1 * len(query_terms & discovery_words & words))
+        url = urllib.parse.urlsplit(item["url"])
+        host = url.hostname or ""
+        population_source = population_query and any(host == domain or host.endswith("." + domain) for domain in population_hosts)
+        if population_source:
+            score += 1.5  # Global/country grids can cover a city without naming it.
+        if data_query and (matched or population_source) and (
+            re.search(r"\.(?:csv|tsv|geojson|tif|tiff|gpkg|fgb|shp|kml|kmz|zip)$", url.path, re.IGNORECASE)
+            or words & {"geotiff", "geojson", "geopackage", "gridded", "raster"}
+        ):
+            score += 0.25  # File hints never outweigh a substantive query match.
+        ranked.append((score, item))
+
+    results = []
+    seen = set()
+    for _, item in sorted(ranked, key=lambda entry: entry[0], reverse=True):
+        if item["url"] not in seen:
+            results.append(item)
+            seen.add(item["url"])
+    return results
+
+
+def search_serp_web(query: str, engine: str, country_code: str) -> dict[str, Any]:
+    """Expose cited web research separately from geographic place discovery."""
+    if engine not in {"google", "google_news", "google_scholar"} or not isinstance(query, str) or not 2 <= len(query.strip()) <= 500:
+        raise ServiceError("Web research requires a supported engine and a query of 2-500 characters.", 400)
+    params = {"engine": engine, "q": query.strip(), "hl": "en"}
+    if engine != "google_scholar" and country_param(country_code):
+        params["gl"] = country_param(country_code)
+    if engine == "google_scholar":
+        params["num"] = "8"
+    request_key = serp_request_key(params)
+    stored = CACHE.provider_received_at("serpapi", request_key) is not None
+    payload = fetch_serp_response(params)
+    validate_serp_payload(payload)
+    received = CACHE.provider_received_at("serpapi", request_key)
+    results: list[dict[str, Any]] = []
+
+    def text(value: Any, maximum: int) -> str:
+        value = value if isinstance(value, str) else ""
+        if CONFIG.serp_api_key:
+            value = value.replace(CONFIG.serp_api_key, "[redacted]")
+        return re.sub(r"(?i)(?:api[_-]?key|access[_-]?token|authorization|token)\s*[:=]\s*[^\s&,;]+", "[redacted]", value)[:maximum]
+
+    def add(item: Any, kind: str) -> None:
+        if not isinstance(item, dict):
+            return
+        url = item.get("link")
+        title = text(item.get("title"), 200)
+        if not title or not isinstance(url, str):
+            return
+        try:
+            url = validate_web_url(url)
+        except ServiceError:
+            return
+        source = item.get("source")
+        publisher = source.get("name", "") if isinstance(source, dict) else source
+        publication = item.get("publication_info")
+        date = item.get("iso_date") or item.get("date")
+        results.append({
+            "title": title, "url": url, "snippet": text(item.get("snippet") or item.get("description"), 1200),
+            "publisher": text(publisher, 160), "date": text(date, 100), "kind": kind,
+            "publication": text(publication.get("summary", "") if isinstance(publication, dict) else "", 300),
+        })
+
+    root = payload.get("news_results" if engine == "google_news" else "organic_results", [])
+    if not isinstance(root, list):
+        raise ServiceError("SerpApi returned an invalid web result list.", 503)
+    for item in root[:40]:
+        add(item, "news" if engine == "google_news" else "publication" if engine == "google_scholar" else "web")
+        if engine == "google_news" and isinstance(item, dict) and isinstance(item.get("stories"), list):
+            for story in item["stories"][:8]:
+                add(story, "news")
+    if engine == "google":
+        graph = payload.get("knowledge_graph")
+        if isinstance(graph, dict) and isinstance(graph.get("source"), dict):
+            add({"title": graph.get("title"), "link": graph["source"].get("link"), "description": graph.get("description"), "source": graph["source"].get("name")}, "knowledge-source")
+        answer = payload.get("answer_box")
+        if isinstance(answer, dict):
+            add(answer, "answer-source")
+    return {
+        "results": rank_serp_web_sources(query, results)[:8], "provider": "serpapi", "engine": engine, "query": params["q"], "stored": stored,
+        "retrievedAt": datetime.fromtimestamp(received, timezone.utc).isoformat() if received else None,
+        "caveat": "Search snippets are discovery evidence, not verified numeric observations or a population dataset. Cached searches may be historical; publication date, dataset year, and retrieval time are distinct.",
+    }
 
 
 def country_param(value: str) -> str:
@@ -804,6 +1060,7 @@ def location_result(item: dict[str, Any]) -> dict[str, Any] | None:
         "id": f"{item.get('osm_type') or 'place'}:{item.get('osm_id') or f'{lat},{lon}'}",
         "name": name,
         "shortName": short_name,
+        "placeType": str(item.get("addresstype") or item.get("type") or "")[:80],
         "country": address.get("country") or "",
         "countryCode": (address.get("country_code") or "").upper(),
         "lat": lat,
@@ -829,14 +1086,23 @@ def resolve_location(query: str, country_code: str) -> dict[str, Any] | None:
     normalized = normalize_query(query)
     country = country_param(country_code)
     key = f"{normalized}|{country}"
+    place_name = normalized.split(",", 1)[0].strip()
+    exact = [place for place in saved_place_matches(query, country_code) if normalize_query(place["name"]) == place_name]
+    if len(exact) == 1:
+        result = map_location(exact[0], cached=True)
+        CACHE.put_geocode(key, result)
+        return result
     cached = CACHE.get_geocode(key)
     if cached:
         return {**cached, "cached": True}
     results = nominatim_search(query, country, 1)
     if not results:
-        return None
+        discovery = lookup_places(query, country_code, None, None)
+        results = [map_location(CACHE.get_place(place["id"], include_payload=True) or place, cached=discovery["stored"]) for place in discovery["results"]]
+        if not results:
+            return None
     CACHE.put_geocode(key, results[0])
-    return {**results[0], "cached": False}
+    return {**results[0], "cached": bool(results[0].get("cached"))}
 
 
 def suggest_locations(query: str, country_code: str) -> list[dict[str, Any]]:
@@ -960,7 +1226,59 @@ def search_serp_places(query: str, lat: float | None, lon: float | None, country
 
 
 def public_place(place: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in place.items() if key != "providerPayload"}
+    result = {key: value for key, value in place.items() if key != "providerPayload"}
+    payload = place.get("providerPayload")
+    if isinstance(payload, dict):
+        tags = payload.get("tags")
+        if isinstance(tags, dict) and tags.get("place"):
+            result["placeType"] = str(tags["place"])[:80]
+        elif place.get("provider") == "openstreetmap":
+            result["placeType"] = str(payload.get("addresstype") or payload.get("type") or "")[:80]
+        else:
+            types = payload.get("types")
+            if isinstance(types, list) and "locality" in types:
+                result["placeType"] = "locality"
+            elif payload.get("type") in {"City", "Town", "Village", "Locality"}:
+                result["placeType"] = str(payload["type"]).lower()
+    return result
+
+
+def saved_place_matches(query: str, country_code: str) -> list[dict[str, Any]]:
+    parts = [normalize_query(part) for part in query.split(",") if part.strip()]
+    if not parts or len(parts[0]) < 2:
+        return []
+    country = country_param(country_code).upper() if len(parts) == 1 else ""
+    matches = []
+    for place in CACHE.search_places(parts[0], include_payload=True):
+        if country and place.get("countryCode") and place["countryCode"].upper() != country:
+            continue
+        payload = place.get("providerPayload") or {}
+        address = payload.get("address")
+        country_name = address.get("country", "") if isinstance(address, dict) else payload.get("country", "")
+        label = normalize_query(f"{place['name']} {place.get('address', '')} {country_name} {place.get('countryCode', '')}")
+        if all(part in label for part in parts[1:]):
+            matches.append(place)
+    return sorted(matches, key=lambda place: (
+        normalize_query(place["name"]) != parts[0],
+        bool(country) and place.get("countryCode", "").upper() != country,
+        place.get("provider") != "openstreetmap",
+    ))
+
+
+def map_location(place: dict[str, Any], cached: bool = False) -> dict[str, Any]:
+    short_name = place["name"]
+    address = str(place.get("address") or "")
+    name = address if normalize_query(address).startswith(normalize_query(short_name)) else ", ".join(part for part in (short_name, address) if part)
+    payload = place.get("providerPayload") or {}
+    details = payload.get("address")
+    country = details.get("country", "") if isinstance(details, dict) else payload.get("country", "")
+    return {**public_place(place), "name": name, "shortName": short_name, "country": country, "cached": cached}
+
+
+def suggest_map_locations(query: str, country_code: str) -> list[dict[str, Any]]:
+    # Saved landmarks must not be hidden by a previously cached empty city search.
+    saved = saved_place_matches(query, country_code)
+    return [map_location(place, cached=True) for place in saved[:8]] if saved else suggest_locations(query, country_code)
 
 
 PLACE_LOOKUP_POLICY_VERSION = "osm-first-v2"
@@ -1115,6 +1433,11 @@ def lookup_places(query: str, country_code: str, lat: float | None, lon: float |
         CACHE.put_place_lookup(lookup_key, context, results)
         return place_discovery(results, "openstreetmap", "nominatim-search")
     fallback_reason = "no-usable-osm-result"
+    saved_serp = [place for place in saved_place_matches(query, country_code) if place.get("provider") == "serpapi-google-maps"]
+    if saved_serp:
+        saved_serp = rank_places_by_context(saved_serp, country_code, lat, lon)[:8]
+        CACHE.put_place_lookup(lookup_key, context, saved_serp)
+        return place_discovery(saved_serp, "serpapi", "local-serp-cache", stored=True, fallback_reason=fallback_reason, serp_eligible=True)
     places = search_serp_places(query, lat, lon, country_code)
     CACHE.put_place_lookup(lookup_key, context, places)
     return place_discovery(places, "serpapi", "serp-fallback", fallback_reason=fallback_reason, serp_eligible=True)
@@ -1547,7 +1870,7 @@ def get_route(waypoints: list[list[float]], profile: str) -> dict[str, Any]:
 
 
 def workspace_snapshot() -> dict[str, Any]:
-    return {"pins": CACHE.list_pins(), "areas": CACHE.list_areas(), "state": CACHE.get_workspace_state()}
+    return CACHE.workspace_snapshot()
 
 
 def safe_workspace_state(state: Any) -> dict[str, Any]:
@@ -1592,6 +1915,56 @@ def save_workspace_state(state: Any) -> dict[str, Any]:
     return safe
 
 
+def _map_geometry_cache_key(kind: str, request: Any) -> str:
+    try:
+        payload = json.dumps(request, sort_keys=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("Geometry request is invalid.", 400) from None
+    return f"map-geometry-{kind}-v1:" + hashlib.sha256(payload).hexdigest()
+
+
+def load_city_geometry(city: dict[str, Any]) -> dict[str, Any]:
+    key = _map_geometry_cache_key("city", {name: value for name, value in city.items() if name != "cached"}) if isinstance(city, dict) else ""
+    cached = CACHE.get_geocode(key) if key else None
+    if cached is not None:
+        return {**cached, "cached": True}
+    document = fetch_city_geometry(city, fetch_bytes=lambda url, **limits: NOMINATIM_QUEUE.run(lambda: fetch_public_bytes(url, **limits)))
+    CACHE.put_geocode(key, document)
+    return {**document, "cached": False}
+
+
+def _fetch_map_road_bytes(url: str, **limits: Any) -> dict[str, Any]:
+    def task() -> dict[str, Any]:
+        cooldown = overpass_cooldown_seconds()
+        if cooldown:
+            raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, cooldown)
+        try:
+            return fetch_public_bytes(url, **limits)
+        except ServiceError as error:
+            if error.retry_after or "(HTTP 429)" in str(error):
+                retry_after = pause_overpass(max(error.retry_after or 0, CONFIG.overpass_backoff_seconds))
+                raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, retry_after) from error
+            raise
+
+    cooldown = overpass_cooldown_seconds()
+    if cooldown:
+        raise ServiceError("OpenStreetMap data is temporarily rate limited.", 503, cooldown)
+    return OVERPASS_QUEUE.run(task)
+
+
+def load_road_geometry(query: str, bounds: list[float], classes: list[str] | None = None) -> dict[str, Any]:
+    key = _map_geometry_cache_key("roads", {"query": query, "bounds": bounds, "classes": classes,
+                                          "endpoint": CONFIG.overpass_endpoint})
+    cached = CACHE.get_geocode(key)
+    if cached is not None:
+        return {**cached, "cached": True}
+    document = fetch_road_geometry(query, bounds, classes, fetch_bytes=_fetch_map_road_bytes,
+                                   overpass_endpoint=CONFIG.overpass_endpoint)
+    if not document["coverage"]["truncated"]:
+        CACHE.put_geocode(key, document)
+    return {**document, "cached": False}
+
+
 REALTIME = RealtimeHub(CONFIG)
 AGENT_TOOLS = AgentTools(AgentDependencies(
     suggest_cities=suggest_locations,
@@ -1602,6 +1975,15 @@ AGENT_TOOLS = AgentTools(AgentDependencies(
     clear_workspace=CACHE.clear_workspace,
     add_pin=CACHE.add_pin,
     save_workspace_state=save_workspace_state,
+    capture_workspace=CACHE.capture_workspace,
+    mutate_workspace=CACHE.mutate_workspace,
+    restore_workspace=CACHE.restore_workspace,
+    search_web=search_serp_web,
+    read_web_source=fetch_web_document,
+    load_population=load_population_grid,
+    read_raster_source=load_raster_grid,
+    load_city_geometry=load_city_geometry,
+    load_road_geometry=load_road_geometry,
 ))
 AGENT = MapAgentService(OpenAIChatClient(CONFIG), AGENT_TOOLS, REALTIME)
 
@@ -2675,6 +3057,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", self.cors_origin())
             self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Expose-Headers", "X-Cache, X-Data-Source, X-Data-Stale, X-Height-Prediction, X-Feature-Count, X-Building-Count, X-Place-Count, X-Inferred-Building-Count, X-Height-Model-Sample-Size, Retry-After")
             self.send_header("Vary", "Origin")
             if body is not None:
                 self.send_header("Content-Type", "application/geo+json" if response_headers.pop("geojson", None) else "application/json; charset=utf-8")
@@ -2718,23 +3101,54 @@ class ApiHandler(BaseHTTPRequestHandler):
     @limited_request
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        query = urllib.parse.parse_qs(parsed.query)
+        query = {}
         try:
+            if parsed.path in {"/api/map/city-boundary", "/api/map/roads"}:
+                try:
+                    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True, max_num_fields=16)
+                except ValueError:
+                    raise ServiceError("Geometry request has too many query fields.", 400) from None
+            else:
+                query = urllib.parse.parse_qs(parsed.query)
             if parsed.path == "/api/health":
                 self.send_json(200, {"ok": True, "cache": "sqlite", "tileZoom": TILE_ZOOM, "overtureRelease": CONFIG.overture_release, "openBuildingMap": bool(CONFIG.openbuildingmap_api_url), "agent": {"available": AGENT.available, "socketPort": CONFIG.socket_port}, "routing": {"provider": "openstreetmap-dijkstra", "profile": CONFIG.osm_router_profile, "osrmFallback": True, "serpFallbackEnabled": CONFIG.enable_serp_directions_fallback}})
                 return
             if parsed.path == "/api/suggest":
                 value = query.get("q", [""])[0].strip()[:160]
-                self.send_json(200, {"results": suggest_locations(value, query.get("countryCode", [""])[0]) if len(value) >= 2 else []})
+                self.send_json(200, {"results": suggest_map_locations(value, query.get("countryCode", [""])[0]) if len(value) >= 2 else []})
                 return
             if parsed.path == "/api/geocode":
                 value = query.get("q", [""])[0].strip()[:160]
                 if not value:
-                    raise ServiceError("Enter a city name.", 400)
+                    raise ServiceError("Enter a city or place name.", 400)
                 result = resolve_location(value, query.get("countryCode", [""])[0])
                 if not result:
                     raise ServiceError("Location not found.", 404)
                 self.send_json(200, {"result": result})
+                return
+            if parsed.path == "/api/map/city-boundary":
+                if any(key not in {"query", "countryCode"} or len(values) != 1 for key, values in query.items()):
+                    raise ServiceError("City boundary accepts only one query and optional countryCode.", 400)
+                value = validate_geometry_query(query.get("query", [""])[0])
+                country = query.get("countryCode", [""])[0]
+                if country and not country_param(country):
+                    raise ServiceError("City countryCode must be an ISO two-letter code.", 400)
+                city = resolve_agent_city(value, country)
+                if not city:
+                    raise ServiceError("No unambiguous city was found for boundary lookup.", 404)
+                document = load_city_geometry(city)
+                self.send_json(200, document, {"Cache-Control": "no-store", "X-Cache": "HIT" if document["cached"] else "MISS"})
+                return
+            if parsed.path == "/api/map/roads":
+                if any(key not in {"query", "west", "south", "east", "north", "classes"} or len(values) != 1 for key, values in query.items()):
+                    raise ServiceError("Road geometry accepts only query, west, south, east, north and optional classes.", 400)
+                value = validate_geometry_query(query.get("query", [""])[0])
+                bounds = [parse_number(query.get(key, [None])[0]) for key in ("west", "south", "east", "north")]
+                if any(number is None for number in bounds):
+                    raise ServiceError("Road geometry needs valid west, south, east and north bounds.", 400)
+                classes = query["classes"][0].split(",") if "classes" in query else None
+                document = load_road_geometry(value, bounds, classes)
+                self.send_json(200, document, {"Cache-Control": "no-store", "X-Cache": "HIT" if document["cached"] else "MISS"})
                 return
             if parsed.path == "/api/country":
                 self.send_json(200, detect_country(parse_number(query.get("lat", [None])[0]), parse_number(query.get("lon", [None])[0])))
@@ -2815,6 +3229,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/agent/runs":
                 run_id = AGENT.start_run(str(body.get("sessionId") or ""), body.get("message"), body.get("mapContext"))
                 self.send_json(202, {"accepted": True, "runId": run_id})
+                return
+            if parsed.path == "/api/agent/undo":
+                self.send_json(200, AGENT.undo_run(body.get("sessionId"), body.get("runId")))
                 return
             if parsed.path == "/api/pins":
                 point = valid_coordinate(body.get("lon"), body.get("lat"))

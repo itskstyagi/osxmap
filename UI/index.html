@@ -1,122 +1,284 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" data-product-mode="explore" data-workspace-view="explore" data-has-route="false" data-studio-pane="left" data-studio-legacy="false">
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#181c1b">
-    <meta name="description" content="Explore places, trace routes, and discover the landscape with an open-data map workspace.">
-    <title>Monument / City Explorer</title>
+    <meta name="theme-color" content="#171B18">
+    <meta name="description" content="Meridian: a geographic instrument for exploring places, planning routes, and understanding the landscape.">
+    <title>Meridian / The Open Map</title>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css?v=20261007-7">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css?v=20261007-map-actions-1">
     <script defer src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
     <script defer src="https://unpkg.com/maplibre-contour@0.0.5/dist/index.min.js"></script>
-    <script type="module" src="./app.js?v=20261007-6"></script>
+    <script type="module" src="./app.js?v=20261007-map-actions-1"></script>
   </head>
   <body>
     <main class="app-shell">
-      <div class="floating-toolbar">
-        <nav class="workspace-nav" aria-label="Workspace navigation">
-          <button type="button" data-workspace-view="explore" aria-pressed="true">Explore</button>
-          <button type="button" data-workspace-view="routes" aria-pressed="false">Routes</button>
-          <button type="button" data-workspace-view="workspace" aria-pressed="false">Workspace</button>
+      <header class="floating-toolbar">
+        <span class="brand" role="img" aria-label="Meridian, the open map">
+          <img class="brand-mark" src="./assets/logo.png" alt="" width="36" height="36">
+          <span class="brand-wordmark"><span class="brand-name">Meridian</span><span class="brand-tagline">The Open Map</span></span>
+        </span>
+        <nav class="workspace-nav" aria-label="Product navigation">
+          <button type="button" data-product-mode="explore" aria-pressed="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12C22 17.5228 17.5228 22 12 22ZM12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20ZM7 11.5L16 8L12.5 17.0021L11 13L7 11.5Z"></path></svg>Explore</button>
+          <button type="button" data-product-mode="studio" aria-pressed="false"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6.23509 6.45329C4.85101 7.89148 4 9.84636 4 12C4 16.4183 7.58172 20 12 20C13.0808 20 14.1116 19.7857 15.0521 19.3972C15.1671 18.6467 14.9148 17.9266 14.8116 17.6746C14.582 17.115 13.8241 16.1582 12.5589 14.8308C12.2212 14.4758 12.2429 14.2035 12.3636 13.3943L12.3775 13.3029C12.4595 12.7486 12.5971 12.4209 14.4622 12.1248C15.4097 11.9746 15.6589 12.3533 16.0043 12.8777C16.0425 12.9358 16.0807 12.9928 16.1198 13.0499C16.4479 13.5297 16.691 13.6394 17.0582 13.8064C17.2227 13.881 17.428 13.9751 17.7031 14.1314C18.3551 14.504 18.3551 14.9247 18.3551 15.8472V15.9518C18.3551 16.3434 18.3168 16.6872 18.2566 16.9859C19.3478 15.6185 20 13.8854 20 12C20 8.70089 18.003 5.8682 15.1519 4.64482C14.5987 5.01813 13.8398 5.54726 13.575 5.91C13.4396 6.09538 13.2482 7.04166 12.6257 7.11976C12.4626 7.14023 12.2438 7.12589 12.012 7.11097C11.3905 7.07058 10.5402 7.01606 10.268 7.75495C10.0952 8.2232 10.0648 9.49445 10.6239 10.1543C10.7134 10.2597 10.7307 10.4547 10.6699 10.6735C10.59 10.9608 10.4286 11.1356 10.3783 11.1717C10.2819 11.1163 10.0896 10.8931 9.95938 10.7412C9.64554 10.3765 9.25405 9.92233 8.74797 9.78176C8.56395 9.73083 8.36166 9.68867 8.16548 9.64736C7.6164 9.53227 6.99443 9.40134 6.84992 9.09302C6.74442 8.8672 6.74488 8.55621 6.74529 8.22764C6.74529 7.8112 6.74529 7.34029 6.54129 6.88256C6.46246 6.70541 6.35689 6.56446 6.23509 6.45329ZM12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12C22 17.5228 17.5228 22 12 22Z"></path></svg>Studio</button>
         </nav>
-        <div class="topbar-actions">
-          <button id="theme-toggle" class="icon-button" type="button" aria-label="Toggle light and dark theme" aria-pressed="false" title="Toggle theme"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 14.1A8.4 8.4 0 0 1 9.9 4a8.4 8.4 0 1 0 10.2 10.1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>
-          <button id="fullscreen-toggle" class="icon-button" type="button" aria-label="Toggle fullscreen" aria-pressed="false" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
-        </div>
+      </header>
+      <div class="app-actions" role="group" aria-label="Appearance and display">
+        <button id="theme-toggle" class="icon-button" type="button" aria-label="Toggle light and dark theme" aria-pressed="false" title="Toggle theme"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 14.1A8.4 8.4 0 0 1 9.9 4a8.4 8.4 0 1 0 10.2 10.1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>
+        <button id="fullscreen-toggle" class="icon-button" type="button" aria-label="Toggle fullscreen" aria-pressed="false" title="Fullscreen"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+        <button id="view-mode-toggle" class="icon-button" type="button" aria-label="Enter view mode" aria-pressed="false" title="View mode: hide controls"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/><path class="view-mode-slash" d="m4 4 16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
       </div>
-      <aside class="manual-sidebar" aria-label="Manual map controls">
-        <button id="toggle-manual-controls" class="manual-toggle" type="button" aria-expanded="true" aria-controls="manual-controls-content"><span><i class="panel-icon" aria-hidden="true"></i>Map controls</span><b>Close</b></button>
-        <div id="manual-controls-content" class="manual-controls-content">
-          <section class="search-panel" aria-label="City search">
-          <form id="search-form" class="search-form">
-            <span class="search-icon" aria-hidden="true"></span>
-            <input id="search-input" placeholder="Find a place..." aria-label="Search city and country" aria-autocomplete="list" aria-expanded="false" aria-controls="suggestions" autocomplete="off">
-            <span id="search-loader" class="mini-loader is-hidden" aria-label="Loading"></span>
-            <button type="submit" class="go-button" aria-label="Explore city">Go</button>
-          </form>
-          <div id="suggestions" class="suggestions is-hidden" role="listbox"></div>
-          <div class="search-meta"><span id="status-dot" class="status-dot pulse"></span><span id="region-label">Finding your search region</span></div>
-          <section class="geo-panel" aria-label="Route planner and map tools">
-            <button id="toggle-geo-tools" class="geo-toggle" type="button" aria-expanded="false" aria-controls="geo-content"><span>Plan a journey</span><b>Open</b></button>
-            <div id="geo-content" class="geo-content">
+
+      <section class="floating-search search-panel" aria-label="Search and map instructions">
+        <form id="search-form" class="search-form">
+          <button id="search-command-toggle" class="search-command-toggle" type="button" aria-label="Ask Meridian instead of searching for a place" aria-pressed="false" title="Ask Meridian"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m10 2 2.2 5.8L18 10l-5.8 2.2L10 18l-2.2-5.8L2 10l5.8-2.2L10 2Z" stroke="currentColor" stroke-width="1.2"/></svg></button>
+          <input id="search-input" maxlength="2000" placeholder="Search places, coordinates, or ask Meridian..." aria-label="Search places, latitude and longitude, or ask Meridian" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="suggestions" aria-describedby="search-status search-help" autocomplete="off">
+          <kbd class="search-shortcut" aria-hidden="true">/</kbd>
+          <span id="search-loader" class="mini-loader is-hidden" aria-label="Working"></span>
+          <button id="search-submit" type="submit" aria-label="Search map" title="Search map"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 10h12m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button id="agent-cancel" class="agent-cancel is-hidden" type="button" aria-label="Stop map instruction">Stop</button>
+        </form>
+        <div id="studio-command-context" class="studio-command-context" hidden>
+          <label for="studio-scope">Scope</label>
+          <select id="studio-scope"><option value="viewport">Current view</option><option value="selection">Selection</option><option value="layer">Selected layer</option><option value="workspace">Workspace</option></select>
+        </div>
+        <p id="search-help" class="sr-only">Enter a place, latitude and longitude, or an instruction. Use the arrow keys to select a suggestion. Press Escape to dismiss.</p>
+        <p id="search-status" class="search-status is-hidden" role="status"></p>
+        <div id="suggestions" class="suggestions is-hidden" role="listbox"></div>
+        <div id="search-discovery" class="search-discovery" hidden>
+          <div class="discovery-heading"><span>Ask Meridian</span><span>One map. Any starting point.</span></div>
+          <button type="button" data-search-example="Find parks near Golden Gate Bridge"><span>Find parks near Golden Gate Bridge</span><small>Discover places</small></button>
+          <button type="button" data-search-example="San Francisco to Oakland"><span>San Francisco to Oakland</span><small>Plan a driving route</small></button>
+          <button type="button" data-search-example="Show terrain"><span>Show terrain</span><small>Understand the landscape</small></button>
+          <button type="button" data-search-example="37.7749, -122.4194"><span class="mono">37.7749, -122.4194</span><small>Latitude, longitude</small></button>
+        </div>
+        <section id="agent-panel" class="agent-panel" aria-label="Meridian map result" hidden>
+          <div class="assistant-heading"><span>Meridian</span><button id="agent-dismiss-result" type="button" aria-label="Dismiss map result">&#215;</button></div>
+          <p id="agent-feedback" class="agent-feedback" role="status"></p>
+          <p id="agent-result-summary" class="agent-result-summary" hidden></p>
+          <section id="agent-sources" class="agent-sources" aria-label="Researched sources" hidden></section>
+          <details id="agent-result-details" class="agent-result-details" hidden>
+            <summary>Result details</summary>
+            <div id="agent-response" class="agent-response" role="region" aria-label="Meridian result details" aria-live="polite" tabindex="0" hidden></div>
+          </details>
+          <section id="agent-question" class="agent-question is-hidden" aria-label="Map instruction clarification" tabindex="-1">
+            <strong id="agent-question-text"></strong>
+            <div id="agent-question-choices" class="agent-question-choices"></div>
+            <button id="agent-dismiss-question" type="button">Dismiss</button>
+          </section>
+        </section>
+      </section>
+
+      <aside class="manual-sidebar" aria-label="Contextual map controls">
+        <button id="toggle-manual-controls" class="manual-toggle" type="button" aria-expanded="false" aria-controls="manual-controls-content"><span><i class="panel-icon" aria-hidden="true"></i><span id="controls-label">Map controls</span></span><b aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 15.0006L7.75732 10.758L9.17154 9.34375L12 12.1722L14.8284 9.34375L16.2426 10.758L12 15.0006Z"></path></svg></b></button>
+        <section class="map-mode-panel" aria-label="Map layers">
+          <div class="map-modes">
+            <button type="button" data-map-mode="satellite" aria-pressed="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12.5065 3.62326L11.4835 5.39501C8.57378 4.51629 5.96968 4.94531 5.07207 6.50001C3.89477 8.53915 5.86239 12.1524 9.75027 14.3971C13.6382 16.6418 17.7512 16.5392 18.9285 14.5C19.8261 12.9453 18.8956 10.4756 16.6797 8.39501L17.7026 6.62326C20.7847 9.33196 22.1654 12.8934 20.6605 15.5C18.8003 18.7221 13.4717 18.8551 8.75027 16.1292C4.0289 13.4033 1.47976 8.72208 3.34002 5.50001C4.84492 2.89344 8.61964 2.30849 12.5065 3.62326ZM15.8842 1.77277L17.6163 2.77277L12.6163 11.433L10.8842 10.433L15.8842 1.77277ZM6.73233 20H17.0003V22H5.01761C4.94008 22.0014 4.86194 21.9938 4.78481 21.9768C4.77025 21.9735 4.7558 21.97 4.74147 21.9662C4.6589 21.944 4.57784 21.9108 4.50028 21.866C4.47106 21.8492 4.44301 21.831 4.41616 21.8118C4.30161 21.7292 4.20524 21.623 4.1342 21.5003C4.06328 21.3772 4.01939 21.2404 4.00518 21.0997C4.00446 21.0924 4.00381 21.085 4.00325 21.0777C3.98786 20.883 4.02924 20.6819 4.13425 20.5L6.38425 16.6029L8.1163 17.6029L6.73233 20Z"></path></svg>Satellite</button>
+            <button type="button" data-map-mode="route" aria-pressed="false"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M4 6.14286V18.9669L9.06476 16.7963L15.0648 19.7963L20 17.6812V4.85714L21.303 4.2987C21.5569 4.18992 21.8508 4.30749 21.9596 4.56131C21.9862 4.62355 22 4.69056 22 4.75827V19L15 22L9 19L2.69696 21.7013C2.44314 21.8101 2.14921 21.6925 2.04043 21.4387C2.01375 21.3765 2 21.3094 2 21.2417V7L4 6.14286ZM16.2426 11.2426L12 15.4853L7.75736 11.2426C5.41421 8.89949 5.41421 5.10051 7.75736 2.75736C10.1005 0.414214 13.8995 0.414214 16.2426 2.75736C18.5858 5.10051 18.5858 8.89949 16.2426 11.2426ZM12 12.6569L14.8284 9.82843C16.3905 8.26633 16.3905 5.73367 14.8284 4.17157C13.2663 2.60948 10.7337 2.60948 9.17157 4.17157C7.60948 5.73367 7.60948 8.26633 9.17157 9.82843L12 12.6569Z"></path></svg>Streets</button>
+            <button type="button" data-map-mode="terrain" aria-pressed="false"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M22.1034 19L12.8659 3.00017C12.7782 2.84815 12.6519 2.72191 12.4999 2.63414C12.0216 2.358 11.41 2.52187 11.1339 3.00017L1.89638 19H1V21C8.33333 21 15.6667 21 23 21V19H22.1034ZM7.59991 19.0002H4.20568L11.9999 5.50017L19.7941 19.0002H16.4001L12 11L7.59991 19.0002ZM12 15.1501L14.1175 19H9.88254L12 15.1501Z"></path></svg>Terrain</button>
+          </div>
+          <span id="view-mode-label" class="sr-only">Satellite imagery</span>
+        </section>
+        <nav class="map-controls" aria-label="Camera and location">
+          <button type="button" data-map-action="in" aria-label="Zoom in" title="Zoom in (+)">+</button>
+          <button type="button" data-map-action="out" aria-label="Zoom out" title="Zoom out (-)">&#8722;</button>
+          <button type="button" data-map-action="pitch" aria-label="Enable 3D terrain view" aria-pressed="false" title="3D terrain (3)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 1L21.5 6.5V17.5L12 23L2.5 17.5V6.5L12 1ZM5.49388 7.0777L12.0001 10.8444L18.5062 7.07774L12 3.311L5.49388 7.0777ZM4.5 8.81329V16.3469L11.0001 20.1101V12.5765L4.5 8.81329ZM13.0001 20.11L19.5 16.3469V8.81337L13.0001 12.5765V20.11Z"></path></svg></button>
+          <button type="button" data-map-action="reset" aria-label="Reset bearing to north" title="North bearing (R)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12C22 17.5228 17.5228 22 12 22ZM12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20ZM15.5 8.5L13.5 13.5L8.5 15.5L10.5 10.5L15.5 8.5Z"></path></svg></button>
+          <button id="use-location" type="button" aria-label="Locate me" title="My location"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M7.13173 20.7371C4.07023 19.0275 2 15.7555 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12C22 15.7555 19.9298 19.0275 16.8683 20.7371L15.9724 18.9457C18.3788 17.5664 20 14.9725 20 12C20 7.58172 16.4183 4 12 4C7.58172 4 4 7.58172 4 12C4 14.9725 5.62119 17.5664 8.02763 18.9457L7.13173 20.7371ZM8.92427 17.1528C7.17271 16.105 6 14.1894 6 12C6 8.68629 8.68629 6 12 6C15.3137 6 18 8.68629 18 12C18 14.1894 16.8273 16.105 15.0757 17.1528L14.1772 15.3561C15.2744 14.6429 16 13.4062 16 12C16 9.79086 14.2091 8 12 8C9.79086 8 8 9.79086 8 12C8 13.4062 8.72559 14.6429 9.82279 15.3561L8.92427 17.1528ZM12 16L15 22H9L12 16Z"></path></svg></button>
+        </nav>
+        <div id="manual-controls-content" class="manual-controls-content" hidden>
+          <button class="context-link context-back" type="button" data-workspace-view="explore"><span aria-hidden="true">&#8592;</span>Back to map controls</button>
+          <section class="explore-context" aria-label="Map command surface">
+            <div class="command-group"><h2>Visualization</h2><button type="button" data-layer-toggle="labels" aria-pressed="true"><span>Labels</span><i class="layer-switch" aria-hidden="true"></i></button><button type="button" data-layer-toggle="buildings" aria-pressed="true"><span>Buildings</span><i class="layer-switch" aria-hidden="true"></i></button></div>
+            <div id="regional-imagery-control" class="command-group" hidden><h2>Satellite overview</h2><button id="regional-overview-toggle" type="button" aria-pressed="true"><span>Coherent regional scene</span><i class="layer-switch" aria-hidden="true"></i></button><p id="regional-imagery-note" class="context-hint">Bay Area / Sentinel-2 / 2026-09-30 / 30 m</p></div>
+            <div class="command-group"><h2>Data</h2><button type="button" data-layer-toggle="roads" aria-pressed="true"><span>Roads</span><i class="layer-switch" aria-hidden="true"></i></button><button type="button" data-layer-toggle="places" aria-pressed="true"><span>Places of interest</span><i class="layer-switch" aria-hidden="true"></i></button><button type="button" data-layer-toggle="boundaries" aria-pressed="true"><span>Boundaries</span><i class="layer-switch" aria-hidden="true"></i></button></div>
+          </section>
+          <section id="terrain-controls" class="terrain-context" aria-label="Topographic controls" hidden>
+            <div class="command-group"><h2>Terrain</h2><button type="button" data-layer-toggle="contours" aria-pressed="true"><span>Contours</span><i class="layer-switch" aria-hidden="true"></i></button><label class="contour-strength" for="contour-strength"><span>Line strength</span><input id="contour-strength" type="range" min="10" max="100" value="55" aria-label="Contour line strength"></label><button type="button" data-layer-toggle="hillshade" aria-pressed="true"><span>Relief shading</span><i class="layer-switch" aria-hidden="true"></i></button><button type="button" data-layer-toggle="labels" aria-pressed="true"><span>Labels</span><i class="layer-switch" aria-hidden="true"></i></button></div>
+            <div class="elevation-legend"><div><span>Sampled elevation</span><strong id="terrain-center-elevation">--</strong></div><div class="elevation-ramp" aria-hidden="true"></div><div class="legend-range"><span id="terrain-range-low">--</span><span id="terrain-range-high">--</span></div><p id="terrain-interval">Contours in meters</p></div>
+            <p class="context-hint">Click the landscape to inspect a coordinate and its sampled elevation.</p>
+          </section>
+          <nav class="explore-utilities" aria-label="Explore tools"><button class="context-link" type="button" data-workspace-view="routes">Route planner <span aria-hidden="true">&#8599;</span></button><button class="context-link" type="button" data-workspace-view="workspace">Saved places <span aria-hidden="true">&#8599;</span></button></nav>
+          <section class="geo-panel" aria-label="Route and workspace workflow">
+            <button id="toggle-geo-tools" class="geo-toggle" type="button" aria-expanded="false" aria-controls="geo-content" hidden><span>Route and workspace tools</span><b>Open</b></button>
+            <div id="geo-content" class="geo-content" hidden>
               <form id="route-form" class="route-form">
-                <div class="route-planner-heading"><span>Your stops</span><b id="route-stop-count">0 stops</b></div>
-                <div id="route-stops" class="route-stops" aria-label="Ordered route stops"></div>
-              <div class="route-actions"><button id="add-route-stop" type="button">+ Add stop</button><button id="trace-route" type="submit">Trace route</button></div>
-              <p id="route-plan-hint" class="route-plan-hint">Find a saved place, or press Enter to search OpenStreetMap.</p>
+                <div class="route-planner-heading"><span>Driving / Road network</span><b id="route-stop-count">0 stops</b></div>
+                <div id="route-stops" class="route-stops" aria-label="From, destination, and ordered waypoints"></div>
+                <div class="route-actions"><button id="add-route-stop" type="button">+ Waypoint</button><button id="trace-route" type="submit">Plan route</button></div>
+                <p id="route-plan-hint" class="route-plan-hint">Press Enter to find a place, then choose a match.</p>
+                <div class="geo-actions"><button id="pin-mode" type="button" aria-pressed="false">Pick on map</button><button id="use-approximate-location" type="button">Approx. location</button></div>
               </form>
-              <div class="geo-actions"><button id="pin-mode" type="button" aria-pressed="false">Pin on map</button><button id="use-location" type="button">My location</button><button id="use-approximate-location" type="button">Approx. location</button></div>
               <details class="utility-tools">
-                <summary>Workspace &amp; map tools</summary>
+                <summary>Saved places &amp; areas</summary>
                 <div class="utility-content">
-                  <div class="geo-actions"><button id="show-area" type="button">Measure pin area</button><button id="clear-additions" type="button">Clear workspace</button></div>
-                  <div class="tool-heading">Saved pins</div>
-                  <div id="pin-list" class="pin-list" aria-label="Saved pins"></div>
-                  <div class="tool-heading">Measured areas</div>
-                  <div id="area-list" class="area-list" aria-label="Saved areas"></div>
+                  <section class="workspace-metrics" aria-label="Workspace metrics"><div class="metrics-grid"><div><strong id="metric-pins">0</strong><span>Places</span></div><div><strong id="metric-areas">0</strong><span>Areas</span></div><div><strong id="metric-buildings">0</strong><span>Buildings</span></div></div></section>
+                  <div class="tool-heading">Saved places</div><div id="pin-list" class="pin-list" aria-label="Saved places"></div>
+                  <div class="tool-heading">Measured areas</div><div id="area-list" class="area-list" aria-label="Saved areas"></div>
+                  <div class="geo-actions"><button id="workspace-pin-mode" type="button" aria-pressed="false">Save a map point</button><button id="show-area" type="button">Measure pin area</button><button id="clear-additions" type="button">Clear workspace</button></div>
+                  <button class="context-link" type="button" data-open-routes>Open route planner <span aria-hidden="true">&#8599;</span></button>
                 </div>
               </details>
-              <p id="geo-status" class="geo-status" aria-live="polite">Opening your approximate Geo-IP location.</p>
             </div>
           </section>
-          </section>
+          <div id="stream-card" class="stream-card is-hidden" aria-live="polite"><div class="stream-heading"><span id="stream-title">Loading map data</span><b id="stream-count">0/0</b></div><div class="stream-track"><i id="stream-progress"></i></div><div class="stream-detail"><span id="stream-buildings">0 buildings</span><span id="stream-source">Open data</span></div></div>
         </div>
       </aside>
 
-      <section class="map-region">
-        <div id="map" class="map-canvas" aria-label="Interactive 3D city map"></div>
-        <section class="map-mode-panel" aria-label="Map appearance">
-          <div class="section-subhead"><span>Perspective</span><span id="view-mode-label">Satellite relief</span></div>
-          <div class="map-modes">
-            <button type="button" data-map-mode="satellite" aria-pressed="true"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m3 12 4-7 4 7 3-4 3 7H3v-3Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>Satellite</button>
-            <button type="button" data-map-mode="route" aria-pressed="false"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 5h8a3 3 0 0 1 0 6H7a3 3 0 0 0 0 6h8" stroke="currentColor" stroke-width="1.3"/><circle cx="5" cy="5" r="2" stroke="currentColor" stroke-width="1.3"/></svg>Route</button>
-            <button type="button" data-map-mode="terrain" aria-pressed="false"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M2 15c3-7 5 3 8-5s5 1 8-5M2 10c3-7 5 3 8-5s5 1 8-3M2 19c3-7 5 3 8-5s5 1 8-5" stroke="currentColor" stroke-width="1.2"/></svg>Terrain</button>
-          </div>
-        </section>
-        <div id="map-notice" class="map-notice is-hidden" role="status" aria-live="polite"></div>
-        <div id="stream-card" class="stream-card is-hidden" aria-live="polite">
-          <div class="stream-heading"><span id="stream-title">Enriching city</span><b id="stream-count">0/0</b></div>
-          <div class="stream-track"><i id="stream-progress"></i></div>
-          <div class="stream-detail"><span id="stream-buildings">0 buildings</span><span id="stream-source">cache / open data</span></div>
+      <section class="map-region" aria-label="Geographic workspace">
+        <div id="map" class="map-canvas" aria-label="Interactive geographic map"></div>
+        <div id="studio-compare-map" class="studio-compare-map" aria-label="Reference map" hidden></div>
+        <div id="studio-compare-divider" class="studio-compare-divider" aria-hidden="true" hidden></div>
+        <span id="studio-compare-label" class="studio-compare-label" hidden>Before</span>
+        <header id="view-heading" class="view-heading"><h1 id="view-title">City Explorer</h1><p id="view-location">San Francisco Bay Area</p></header>
+        <div class="map-feedback-stack">
+          <div id="agent-task-chip" class="map-task-chip" hidden><span id="agent-task-label" role="status">Working</span><button id="agent-task-stop" type="button" aria-label="Stop current task">Stop</button></div>
+          <div id="action-history-chip" class="map-task-chip" hidden><span id="action-history-label" role="status">Last map action</span><button id="action-history-undo" type="button" aria-label="Undo last map action">Undo</button></div>
+          <details id="map-overlay-legend" class="map-overlay-legend" aria-label="Map overlays and sources" hidden><summary><i id="map-overlay-swatch" class="map-overlay-swatch" aria-hidden="true"></i><span id="map-overlay-summary">Map overlays</span><span class="map-overlay-expand" aria-hidden="true">Layers</span></summary><div id="map-overlay-list" class="map-overlay-list"></div><p id="map-overlay-storage" class="map-overlay-storage" role="status"></p></details>
         </div>
-        <nav class="map-controls" aria-label="Map controls"><button type="button" data-map-action="in" aria-label="Zoom in">+</button><button type="button" data-map-action="out" aria-label="Zoom out">-</button><button type="button" data-map-action="pitch" aria-label="Enable 3D terrain view" aria-pressed="false">3D</button><button type="button" data-map-action="reset" aria-label="Reset map view">R</button></nav>
-        <details id="agent-hud" class="agent-hud" aria-live="polite" aria-label="Map agent activity">
-          <summary class="agent-hud-heading"><span><i class="activity-icon" aria-hidden="true"></i>Live activity</span><b id="agent-connection">Connecting</b></summary>
-          <div class="agent-hud-stage"><span>Request</span><strong id="agent-request">Waiting for connection</strong></div>
-          <div class="agent-hud-stage"><span>Tool</span><strong id="agent-tool">No active tool</strong></div>
-          <div class="agent-hud-footnote">Your map. An open conversation.</div>
-        </details>
-        <section id="agent-question" class="agent-question is-hidden" aria-live="polite" aria-label="Map agent clarification">
-          <p>A little more detail</p>
-          <strong id="agent-question-text"></strong>
-          <div id="agent-question-choices" class="agent-question-choices"></div>
-        </section>
-        <form id="agent-composer" class="agent-composer" aria-label="Ask the map agent">
-          <span class="composer-symbol" aria-hidden="true">+</span>
-          <input id="agent-input" maxlength="2000" placeholder="Ask anything about this place..." aria-label="Map agent request" autocomplete="off">
-          <button id="agent-submit" type="submit">Send</button>
-          <button id="agent-cancel" class="agent-cancel is-hidden" type="button">Cancel</button>
-        </form>
-        <section class="workspace-metrics" aria-label="Workspace metrics">
-          <div class="section-subhead"><span>Your workspace</span><span class="metrics-mark" aria-hidden="true">+</span></div>
-          <div class="metrics-grid"><div><strong id="metric-pins">0</strong><span>Saved pins</span></div><div><strong id="metric-areas">0</strong><span>Areas</span></div><div><strong id="metric-buildings">0</strong><span>Buildings</span></div></div>
-        </section>
+        <div id="map-notice" class="map-notice is-hidden" role="status" aria-live="polite"></div>
+        <p id="geo-status" class="map-status is-hidden" role="status" aria-live="polite"></p>
         <section class="route-summary" aria-label="Current route summary">
-          <div class="route-summary-heading"><span><i class="route-line-icon" aria-hidden="true"></i>Journey overview</span><button id="focus-route" type="button" aria-label="Fit current route to map">View route <span aria-hidden="true">&#8599;</span></button></div>
-          <div class="route-metrics"><div><strong id="metric-distance">--</strong><span>Distance</span></div><div><strong id="metric-duration">--</strong><span>Travel time</span></div><div><strong id="metric-stops">0</strong><span>Stops</span></div><div><strong id="metric-provider">--</strong><span>Route source</span></div></div>
+          <div class="route-summary-heading"><span><i class="route-line-icon" aria-hidden="true"></i>Route on the map</span><button id="focus-route" type="button" aria-label="Fit current route to map">View route <span aria-hidden="true">&#8599;</span></button></div>
+          <div class="route-metrics"><div><strong id="metric-distance">--</strong><span>Distance</span></div><div><strong id="metric-duration">--</strong><span>Estimated time</span></div><div><strong id="metric-stops">0</strong><span>Stops</span></div><div><strong id="metric-provider">--</strong><span>Route source</span></div></div>
+          <p id="route-disclaimer" class="route-plan-hint">Driving plan. Not traffic-aware navigation.</p><button id="replay-route" type="button" hidden>Replay calculation</button>
         </section>
-        <section class="info-drawer" aria-label="Map information">
-          <button id="toggle-info-drawer" class="info-drawer-toggle" type="button" aria-label="Expand map information" aria-expanded="false" aria-controls="info-drawer-content"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 14 6-6 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <section class="info-drawer" aria-label="Map metadata">
+          <button id="toggle-info-drawer" class="info-drawer-toggle" type="button" aria-label="Expand map details" aria-expanded="false" aria-controls="info-drawer-content"><span>Map details</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 14 6-6 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <div id="info-drawer-content" class="info-drawer-content" hidden>
-            <section class="cache-info"><span class="section-subhead">Local map cache</span><strong id="cache-status">Starting cache...</strong><p>Viewed street and elevation tiles are stored locally. Satellite imagery uses the provider's browser cache.</p><button id="clear-map-cache" type="button">Clear map cache</button></section>
+            <section class="map-context" aria-label="Current map metadata">
+              <span class="section-subhead">Current view</span><strong id="context-place">San Francisco Bay Area</strong><span id="context-mode">Satellite imagery</span>
+              <dl><div><dt>Imagery</dt><dd id="context-imagery">Esri World Imagery</dd></div><div><dt>Acquisition</dt><dd id="context-imagery-date">Varies by source</dd></div><div><dt>Elevation</dt><dd id="context-elevation">Mapzen / Terrain Tiles</dd></div><div><dt>Center elevation</dt><dd id="context-center-elevation">--</dd></div><div><dt>Coordinates</dt><dd id="context-coordinates">--</dd></div><div><dt>Zoom</dt><dd id="context-zoom">--</dd></div><div><dt>Scale</dt><dd class="metadata-scale"><i id="context-scale-line" aria-hidden="true"></i><span id="context-scale">--</span></dd></div><div><dt>Projection</dt><dd>Web Mercator / WGS 84</dd></div></dl>
+              <button id="copy-coordinates" class="copy-coordinates" type="button">Copy coordinates</button>
+              <p id="context-guidance">Imagery is a composite, not a live or single-date capture. Elevations are sampled, not survey measurements.</p>
+              <div class="search-meta"><span id="status-dot" class="status-dot"></span><span id="region-label">Search region: worldwide</span></div>
+              <details class="cache-info"><summary>Storage &amp; performance</summary><strong id="cache-status">Starting cache...</strong><p>Viewed map resources are cached locally when supported. Imagery is periodically refreshed to avoid mixing stale tiles.</p><button id="clear-map-cache" type="button">Clear map cache</button></details>
+              <details class="cache-info map-api-info"><summary>Map capabilities</summary><p>Highlight supplied boundaries, roads and points with visible colors. Restyle, filter, reorder, hide, fit, remove or export overlays in Explore and Studio.</p><p>The client API <code>window.MeridianMap</code> uses declarative validated actions. Source links are citations, not remote data loaders. No custom code or expressions run.</p></details>
+              <details id="agent-hud" class="agent-hud" aria-label="Map instruction activity"><summary class="agent-hud-heading"><span>Instruction activity</span><b id="agent-connection">Connecting</b></summary><div class="agent-hud-stage"><span>Request</span><strong id="agent-request">Waiting for connection</strong></div><div class="agent-hud-stage"><span>Tool</span><strong id="agent-tool">No active tool</strong></div></details>
+            </section>
           </div>
         </section>
-        <footer class="attribution-note"><span>Overture / OpenStreetMap / Nominatim / Optional SerpAPI</span><span id="map-coordinates">--, --</span></footer>
+        <footer class="attribution-note"><span>OpenStreetMap / Overture / Nominatim</span><span id="map-coordinates">--</span></footer>
+      </section>
+
+      <section id="studio-shell" class="studio-shell" aria-label="Studio workspace" hidden>
+        <div class="studio-launchers" role="group" aria-label="Studio panels">
+          <button id="studio-controls-toggle" type="button" aria-expanded="true" aria-controls="studio-left-panel"><i class="panel-icon" aria-hidden="true"></i>Workspace</button>
+          <button id="studio-insights-toggle" type="button" aria-expanded="true" aria-controls="studio-right-panel">Insights<i class="panel-icon" aria-hidden="true"></i></button>
+        </div>
+
+        <aside id="studio-left-panel" class="studio-panel studio-left" aria-labelledby="studio-workspace-heading">
+          <header class="studio-panel-header"><h2 id="studio-workspace-heading">Workspace</h2><span id="studio-save-status" role="status">Local workspace</span></header>
+          <details class="studio-workspace-tools">
+            <summary>Workspace settings<span>On this device</span></summary>
+            <div class="studio-fields">
+              <label for="studio-workspace-select">Saved workspaces</label>
+              <select id="studio-workspace-select" aria-label="Saved workspaces"><option value="">No saved workspaces</option></select>
+              <label for="studio-workspace-name">Workspace name</label>
+              <input id="studio-workspace-name" type="text" maxlength="80" placeholder="Untitled workspace" autocomplete="off">
+              <label for="studio-workspace-description">Description (optional)</label><textarea id="studio-workspace-description" maxlength="500" rows="2" placeholder="What this workspace is for"></textarea>
+              <div class="studio-button-row"><button id="studio-workspace-new" type="button">New</button><button id="studio-workspace-duplicate" type="button">Duplicate</button><button id="studio-workspace-export" type="button">Export workspace</button><button id="studio-workspace-delete" type="button">Delete</button></div>
+            </div>
+          </details>
+          <div class="studio-history-controls" role="group" aria-label="Workspace history"><button id="studio-undo" type="button">&#8592; Undo</button><button id="studio-redo" type="button">Redo &#8594;</button></div>
+          <div class="studio-tablist" role="tablist" aria-label="Workspace tools">
+            <button id="studio-tab-layers" type="button" data-studio-tab="layers" role="tab" aria-selected="true" aria-controls="studio-panel-layers" tabindex="0">Layers</button>
+            <button id="studio-tab-data" type="button" data-studio-tab="data" role="tab" aria-selected="false" aria-controls="studio-panel-data" tabindex="-1">Data</button>
+            <button id="studio-tab-visualize" type="button" data-studio-tab="visualize" role="tab" aria-selected="false" aria-controls="studio-panel-visualize" tabindex="-1">Visualize</button>
+            <button id="studio-tab-filters" type="button" data-studio-tab="filters" role="tab" aria-selected="false" aria-controls="studio-panel-filters" tabindex="-1">Filters</button>
+          </div>
+
+          <section id="studio-panel-layers" class="studio-tab-panel" role="tabpanel" aria-labelledby="studio-tab-layers" tabindex="0">
+            <div class="studio-section-heading"><h3>Map layers</h3><span id="studio-layer-count" class="studio-count">No layers</span></div>
+            <div id="studio-layer-list" class="studio-layer-list"><p class="studio-empty">Add a data layer to begin. Your map stays in place.</p></div>
+            <button id="studio-open-data" class="studio-primary-button" type="button" data-studio-tab-target="data">Add data layer</button>
+          </section>
+
+          <section id="studio-panel-data" class="studio-tab-panel" role="tabpanel" aria-labelledby="studio-tab-data" tabindex="0" hidden>
+            <section class="studio-section" aria-labelledby="studio-import-heading">
+              <h3 id="studio-import-heading">Bring your data</h3>
+              <p class="studio-note">GeoJSON stays on this device. Asking Meridian sends your prompt and bounded map/layer metadata to the configured AI service.</p>
+              <label class="sr-only" for="studio-import">GeoJSON file</label><input id="studio-import" type="file" accept=".json,.geojson" hidden>
+              <div class="studio-fields">
+                <label for="studio-import-source">Source</label><input id="studio-import-source" type="text" placeholder="Source / organization">
+                <label for="studio-import-units">Units</label><input id="studio-import-units" type="text" placeholder="Unit, e.g. people / km2">
+              </div>
+              <button id="studio-import-trigger" class="studio-primary-button" type="button">Import GeoJSON</button>
+              <p id="studio-import-status" class="studio-note" role="status">Source and units help explain where a layer came from.</p>
+            </section>
+            <section class="studio-section" aria-labelledby="studio-map-data-heading">
+              <h3 id="studio-map-data-heading">From this map</h3>
+              <div class="studio-fields"><label for="studio-map-data-kind">Map data</label><select id="studio-map-data-kind"><option value="buildings">Buildings</option><option value="roads">Roads</option><option value="places">Places</option><option value="pins">Saved pins</option><option value="areas">Measured areas</option><option value="route">Current route</option></select></div>
+              <button id="studio-add-map-data" type="button">Add map data</button>
+            </section>
+            <section class="studio-section" aria-labelledby="studio-templates-heading">
+              <h3 id="studio-templates-heading">Illustrative examples</h3>
+              <p class="studio-note">Sample datasets for exploring tools. Not live conditions, measurements, or forecasts.</p>
+              <div class="studio-template-grid"><button type="button" data-studio-template="infrastructure">Infrastructure</button><button type="button" data-studio-template="logistics">Logistics</button><button type="button" data-studio-template="risk">Risk</button><button type="button" data-studio-template="movement">Movement</button></div>
+            </section>
+            <section class="studio-section" aria-labelledby="studio-workspace-import-heading">
+              <h3 id="studio-workspace-import-heading">Open a workspace file</h3>
+              <p class="studio-note">Restore an exported workspace with its layers and provenance.</p>
+              <label class="sr-only" for="studio-workspace-import">Workspace JSON file</label><input id="studio-workspace-import" type="file" accept=".json" hidden>
+              <button id="studio-workspace-import-trigger" type="button">Import workspace</button>
+            </section>
+          </section>
+
+          <section id="studio-panel-visualize" class="studio-tab-panel" role="tabpanel" aria-labelledby="studio-tab-visualize" tabindex="0" hidden>
+            <p id="studio-visualize-empty" class="studio-empty">Select a layer to choose how it appears on the map.</p>
+            <fieldset id="studio-viz-settings" class="studio-fields" hidden>
+              <legend>Selected layer</legend><strong id="studio-selected-name" class="studio-selected-name">No layer selected</strong>
+              <label for="studio-visualization">Visualization</label><select id="studio-visualization"><option value="points">Points</option><option value="density">Density</option><option value="heatmap">Heatmap</option><option value="choropleth">Choropleth</option><option value="contours">Contours</option><option value="extrusion">3D extrusion</option><option value="flow">Flow</option><option value="surface">Surface</option><option value="tactical">Tactical</option></select>
+              <label for="studio-value-field">Value field</label><select id="studio-value-field"><option value="">Choose a field</option></select>
+              <label for="studio-units">Units</label><input id="studio-units" type="text" placeholder="Unit of measurement">
+              <label for="studio-palette">Palette</label><select id="studio-palette"><option value="monochrome">Monochrome</option><option value="olive">Olive</option><option value="thermal">Thermal</option><option value="ocean">Ocean</option><option value="violet">Violet</option></select>
+              <div class="studio-range-label"><label for="studio-opacity">Opacity</label><output id="studio-opacity-value" for="studio-opacity">80%</output></div><input id="studio-opacity" type="range" min="0" max="100" value="80">
+              <label for="studio-category-field">Category field</label><select id="studio-category-field"><option value="">No category field</option></select>
+              <label for="studio-time-field">Observation time field</label><select id="studio-time-field"><option value="">No time field</option></select>
+              <p id="studio-viz-note" class="studio-note">Available visualizations depend on the layer geometry and its fields.</p>
+            </fieldset>
+          </section>
+
+          <section id="studio-panel-filters" class="studio-tab-panel" role="tabpanel" aria-labelledby="studio-tab-filters" tabindex="0" hidden>
+            <div class="studio-fields">
+              <label for="studio-filter-category">Category</label><select id="studio-filter-category"><option value="">All categories</option></select>
+              <div class="studio-field-grid"><div><label for="studio-filter-min">Minimum value</label><input id="studio-filter-min" type="number" step="any" placeholder="No minimum"></div><div><label for="studio-filter-max">Maximum value</label><input id="studio-filter-max" type="number" step="any" placeholder="No maximum"></div></div>
+              <label class="studio-check" for="studio-filter-viewport"><input id="studio-filter-viewport" type="checkbox">Only features in the current view</label>
+              <button id="studio-filters-reset" type="button">Reset filters</button>
+            </div>
+            <section class="studio-section" aria-labelledby="studio-region-heading"><h3 id="studio-region-heading">Region selection</h3><p class="studio-note">Choose two opposite corners on the map to select a rectangle.</p><div class="studio-button-row"><button id="studio-region-select" type="button">Select region</button><button id="studio-region-clear" type="button">Clear selection</button></div><p id="studio-selection-note" class="studio-note" role="status">No region selected.</p></section>
+          </section>
+
+          <footer class="studio-utility-footer">
+            <details class="studio-map-tools"><summary>Map &amp; terrain controls</summary><div id="studio-map-controls"></div></details>
+            <div class="studio-tool-row" role="group" aria-label="Map tools"><button type="button" data-studio-tool="annotate">Annotate</button><button type="button" data-studio-tool="region">Select region</button><button type="button" data-studio-tool="compare">Compare</button></div>
+            <button class="context-link" type="button" data-open-routes>Route planner<span aria-hidden="true">&#8599;</span></button>
+            <button class="context-link" type="button" data-workspace-view="workspace">Saved places<span aria-hidden="true">&#8599;</span></button>
+          </footer>
+        </aside>
+
+        <aside id="studio-right-panel" class="studio-panel studio-right" aria-labelledby="studio-insights-heading">
+          <header class="studio-panel-header"><h2 id="studio-insights-heading">Insights</h2><button id="studio-insights-close" class="studio-close" type="button" aria-label="Close insights">&#215;</button></header>
+          <section id="studio-inspector" class="studio-inspector" aria-labelledby="studio-inspector-title" hidden><div class="studio-section-heading"><h3><span id="studio-inspector-title">Selected feature</span></h3><button id="studio-inspector-close" class="studio-close" type="button" aria-label="Close feature inspector">&#215;</button></div><dl id="studio-inspector-properties" class="studio-feature-properties"></dl></section>
+          <div id="studio-insights" class="studio-insights"><p class="studio-empty">Add or select a layer to inspect its available data. Metrics are calculated from the features in your workspace.</p></div>
+          <div id="studio-provenance" class="studio-provenance"><p class="studio-note">Layer sources and transformations appear here.</p></div>
+          <div id="studio-analysis-actions" class="studio-analysis-actions" role="group" aria-label="Layer analysis"><button type="button" data-studio-analysis="summary">Summarize</button><button type="button" data-studio-analysis="hotspots">Find hotspots</button><button type="button" data-studio-analysis="duplicate">Duplicate layer</button></div>
+          <details class="studio-history"><summary>Action history</summary><div id="studio-history"><p class="studio-note">Workspace changes will appear here.</p></div></details>
+        </aside>
+
+        <div class="studio-map-overlays">
+          <div id="studio-legend" class="studio-legend" aria-label="Layer legend" hidden></div>
+          <div id="studio-timeline" class="studio-timeline" hidden><div class="studio-timeline-heading"><button id="studio-timeline-play" type="button" aria-label="Play observation timeline">Play</button><output id="studio-timeline-label" for="studio-timeline-range">No observation selected</output></div><label class="sr-only" for="studio-timeline-range">Observation time</label><input id="studio-timeline-range" type="range" min="0" max="0" step="1" value="0" aria-label="Observation time"><span id="studio-timeline-source" class="studio-note"></span></div>
+          <div id="studio-compare-toolbar" class="studio-compare-toolbar" hidden><span>Before / Current</span><label class="sr-only" for="studio-compare-range">Comparison split</label><input id="studio-compare-range" type="range" min="0" max="100" value="50" aria-label="Comparison split"><button id="studio-compare-close" type="button" aria-label="Close comparison">Close</button></div>
+        </div>
       </section>
     </main>
+    <dialog id="clear-workspace-dialog" aria-labelledby="clear-workspace-title" aria-describedby="clear-workspace-description"><form method="dialog"><h2 id="clear-workspace-title">Clear this workspace?</h2><p id="clear-workspace-description">This removes saved pins, measured areas, map overlays, the current route plan, and search markers. Map caches and reusable route records are kept. This cannot be undone.</p><div class="dialog-actions"><button value="cancel" autofocus>Keep workspace</button><button value="clear" class="danger-button">Clear workspace</button></div></form></dialog>
+    <dialog id="studio-annotation-dialog" aria-labelledby="studio-annotation-title" aria-describedby="studio-annotation-description"><form method="dialog"><h2 id="studio-annotation-title">Add annotation</h2><p id="studio-annotation-description">Add a note at the selected map point. It stays with this workspace.</p><div class="studio-fields"><label for="studio-annotation-name">Title</label><input id="studio-annotation-name" type="text" maxlength="120" required autofocus><label for="studio-annotation-note">Note (optional)</label><textarea id="studio-annotation-note" maxlength="1000" rows="4"></textarea></div><div class="dialog-actions"><button type="submit" value="cancel" formnovalidate>Cancel</button><button type="submit" value="save" class="studio-primary-button">Save annotation</button></div></form></dialog>
+    <dialog id="studio-delete-dialog" aria-labelledby="studio-delete-title"><form method="dialog"><h2 id="studio-delete-title">Delete this Studio workspace?</h2><p><strong id="studio-delete-name"></strong></p><p>This permanently removes its local layers, analyses, and history. Export a backup first. Explore pins and routes are not changed. This deletion cannot be undone.</p><div class="dialog-actions"><button value="cancel" autofocus>Keep workspace</button><button value="delete" class="danger-button">Delete workspace</button></div></form></dialog>
   </body>
 </html>

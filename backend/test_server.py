@@ -304,6 +304,160 @@ class OpenBuildingMapGeometryTests(unittest.TestCase):
         search.assert_called_once_with("exam", limit=8)
 
 
+class MapLocationSearchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.database_path = Path(directory.name) / "search.db"
+        self.cache = server.Cache(self.database_path)
+        self.addCleanup(self.cache.close)
+        patcher = mock.patch.object(server, "CACHE", self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.place = {
+            "id": "serpapi-google-maps:darma", "provider": "serpapi-google-maps", "providerId": "darma",
+            "name": "Darma valley", "address": "Darma, Uttarakhand 262545", "countryCode": "",
+            "lat": 30.2474577, "lon": 80.54799, "bbox": [80.54799, 30.2474577, 80.54799, 30.2474577],
+            "providerPayload": {"country": "India"},
+        }
+
+    def test_saved_landmark_resolves_without_city_or_internet_search(self) -> None:
+        self.cache.put_places([self.place])
+        with mock.patch.object(server, "nominatim_search") as city, mock.patch.object(server, "lookup_places") as discover:
+            result = server.resolve_location("Darma Valley", "IN")
+
+        self.assertEqual(result["shortName"], "Darma valley")
+        self.assertEqual(result["lat"], self.place["lat"])
+        self.assertEqual(result["country"], "India")
+        self.assertEqual(result["countryCode"], "")
+        self.assertTrue(result["cached"])
+        self.assertNotIn("providerPayload", result)
+        city.assert_not_called()
+        discover.assert_not_called()
+
+    def test_saved_places_override_previously_empty_city_suggestions(self) -> None:
+        self.cache.put_suggestions("darma valley", "in", [])
+        self.cache.put_places([self.place])
+        with mock.patch.object(server, "nominatim_search") as city, mock.patch.object(server, "search_serp_places") as serp:
+            results = server.suggest_map_locations("Darma Valley", "IN")
+
+        self.assertEqual([item["shortName"] for item in results], ["Darma valley"])
+        self.assertTrue(results[0]["cached"])
+        city.assert_not_called()
+        serp.assert_not_called()
+
+    def test_saved_landmarks_do_not_change_strict_agent_city_search(self) -> None:
+        self.cache.put_places([self.place])
+        with mock.patch.object(server, "nominatim_search", return_value=[]) as city, mock.patch.object(server, "search_serp_places") as serp:
+            result = server.resolve_agent_city("Darma Valley", "IN")
+
+        self.assertIsNone(result)
+        city.assert_called_once_with("Darma Valley", "in", 6)
+        serp.assert_not_called()
+
+    def test_qualified_saved_search_uses_address_and_provider_country(self) -> None:
+        self.cache.put_places([self.place])
+        with mock.patch.object(server, "nominatim_search") as city:
+            result = server.resolve_location("Darma Valley, Uttarakhand, India", "GB")
+
+        self.assertEqual(result["id"], self.place["id"])
+        self.assertEqual(server.saved_place_matches("Darma Valley, Nepal", ""), [])
+        city.assert_not_called()
+
+    def test_saved_places_exclude_a_known_different_country(self) -> None:
+        self.cache.put_places([{**self.place, "countryCode": "IN"}])
+        self.assertEqual(server.saved_place_matches("Darma Valley", "GB"), [])
+        self.assertEqual(len(server.saved_place_matches("Darma Valley", "IN")), 1)
+
+    def test_exact_saved_match_is_not_lost_behind_newer_substring_matches(self) -> None:
+        self.cache.put_places([self.place])
+        self.cache.put_places([
+            {**self.place, "id": f"serpapi-google-maps:other-{index}", "providerId": f"other-{index}",
+             "name": f"Darma Valley Lodge {index}", "countryCode": "GB", "lat": 51.0, "lon": float(index)}
+            for index in range(33)
+        ])
+        with mock.patch.object(server, "nominatim_search") as city:
+            result = server.resolve_location("Darma Valley", "IN")
+            suggestions = server.suggest_map_locations("Darma Valley", "IN")
+
+        self.assertEqual(result["id"], self.place["id"])
+        self.assertEqual(suggestions[0]["id"], self.place["id"])
+        city.assert_not_called()
+
+    def test_full_search_falls_back_to_google_and_reuses_persisted_places(self) -> None:
+        payload = {
+            "search_metadata": {"status": "Success"},
+            "place_results": {
+                "place_id": "darma", "title": "Darma valley", "address": self.place["address"], "country": "India",
+                "gps_coordinates": {"longitude": self.place["lon"], "latitude": self.place["lat"]},
+            },
+        }
+        with mock.patch.object(server, "nominatim_search", return_value=[]) as city, mock.patch.object(server, "search_osm_category_places", return_value=[]), mock.patch.object(server, "search_nominatim_places", return_value=[]) as osm, mock.patch.object(server, "fetch_serp_response", return_value=payload) as google:
+            first = server.resolve_location("Darma Valley", "IN")
+            reopened = server.Cache(self.database_path)
+            self.addCleanup(reopened.close)
+            with mock.patch.object(server, "CACHE", reopened):
+                second = server.resolve_location("Darma Valley", "IN")
+                suggestions = server.suggest_map_locations("Darma", "IN")
+
+        self.assertEqual(first["provider"], "serpapi-google-maps")
+        self.assertFalse(first["cached"])
+        self.assertEqual(first["country"], "India")
+        self.assertTrue(second["cached"])
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(suggestions[0]["id"], first["id"])
+        city.assert_called_once_with("Darma Valley", "in", 1)
+        osm.assert_called_once_with("Darma Valley", "IN", None, None)
+        google.assert_called_once()
+
+    def test_general_osm_result_is_persisted_without_google_lookup(self) -> None:
+        osm_place = {**self.place, "id": "openstreetmap:node:1", "provider": "openstreetmap", "providerId": "node:1", "countryCode": "IN"}
+        with mock.patch.object(server, "nominatim_search", return_value=[]), mock.patch.object(server, "search_osm_category_places", return_value=[]), mock.patch.object(server, "search_nominatim_places", return_value=[osm_place]), mock.patch.object(server, "search_serp_places") as google:
+            result = server.resolve_location("Darma Valley", "IN")
+
+        self.assertEqual(result["provider"], "openstreetmap")
+        self.assertEqual(self.cache.search_places("darma valley")[0]["id"], result["id"])
+        google.assert_not_called()
+
+    def test_place_discovery_reuses_google_record_after_empty_osm_search(self) -> None:
+        self.cache.put_places([self.place])
+        with mock.patch.object(server, "search_osm_category_places", return_value=[]) as category, mock.patch.object(server, "search_nominatim_places", return_value=[]) as osm, mock.patch.object(server, "search_serp_places") as google:
+            discovery = server.lookup_places("Darma Valley", "IN", 28.5, 77.5)
+
+        self.assertEqual(discovery["lookupStage"], "local-serp-cache")
+        self.assertTrue(discovery["stored"])
+        self.assertEqual(discovery["results"][0]["id"], self.place["id"])
+        category.assert_called_once()
+        osm.assert_called_once()
+        google.assert_not_called()
+
+    def test_saved_google_results_are_ranked_by_context_before_limiting(self) -> None:
+        self.cache.put_places([
+            {**self.place, "id": f"serpapi-google-maps:other-{index}", "providerId": f"other-{index}",
+             "name": "Darma valley", "lat": 10.0, "lon": float(index)}
+            for index in range(9)
+        ] + [self.place])
+        with mock.patch.object(server, "search_osm_category_places", return_value=[]), mock.patch.object(server, "search_nominatim_places", return_value=[]), mock.patch.object(server, "search_serp_places") as google:
+            result = server.lookup_places("Darma Valley", "IN", self.place["lat"], self.place["lon"])
+
+        self.assertEqual(result["results"][0]["id"], self.place["id"])
+        self.assertEqual(len(result["results"]), 8)
+        google.assert_not_called()
+
+    def test_normal_city_search_and_cached_autocomplete_still_work(self) -> None:
+        city = {"id": "city-delhi", "name": "Delhi, India", "shortName": "Delhi", "countryCode": "IN", "lat": 28.6, "lon": 77.2}
+        with mock.patch.object(server, "nominatim_search", return_value=[city]) as search:
+            first = server.resolve_location("Delhi", "IN")
+            second = server.resolve_location("Delhi", "IN")
+            suggestions = server.suggest_map_locations("Del", "IN")
+            cached_suggestions = server.suggest_map_locations("Del", "IN")
+
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(suggestions, cached_suggestions)
+        self.assertEqual(search.call_count, 2)
+
+
 class MapAgentToolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workspace = {"pins": [], "areas": [], "state": {}}
@@ -327,6 +481,9 @@ class MapAgentToolTests(unittest.TestCase):
             clear_workspace=self.clear_workspace,
             add_pin=self.add_pin,
             save_workspace_state=save_state,
+            capture_workspace=mock.Mock(),
+            mutate_workspace=mock.Mock(),
+            restore_workspace=mock.Mock(),
         ))
 
     def clear_workspace(self) -> None:
@@ -426,7 +583,7 @@ class MapAgentServiceTests(unittest.TestCase):
 
         def publish(self, session_id: str, event: dict) -> bool:
             self.events.append((session_id, event))
-            if event["type"] in {"agent.completed", "agent.failed", "agent.cancelled"}:
+            if event["type"] in {"agent.completed", "agent.limitation", "agent.failed", "agent.cancelled"}:
                 self.completed.set()
             return True
 
@@ -443,16 +600,20 @@ class MapAgentServiceTests(unittest.TestCase):
             return {"content": "The map is clear."}
 
     def test_agent_service_emits_validated_map_update_after_tool_loop(self) -> None:
-        workspace = {"pins": [], "areas": [], "state": {}}
+        cache = server.Cache(Path(":memory:"))
+        self.addCleanup(cache.close)
         tools = AgentTools(AgentDependencies(
             suggest_cities=lambda query, country: [],
             resolve_city=lambda query, country: None,
             search_places=lambda query, country, lat, lon: {"results": [], "source": "openstreetmap", "lookupStage": "local-osm-cache"},
             plan_route=lambda waypoints, profile: {},
-            workspace_snapshot=lambda: workspace,
-            clear_workspace=lambda: workspace.update({"pins": [], "areas": [], "state": {}}),
+            workspace_snapshot=cache.workspace_snapshot,
+            clear_workspace=cache.clear_workspace,
             add_pin=lambda name, lat, lon, place_id, source: {},
             save_workspace_state=lambda state: state,
+            capture_workspace=cache.capture_workspace,
+            mutate_workspace=cache.mutate_workspace,
+            restore_workspace=cache.restore_workspace,
         ))
         hub = self.Hub()
         service = MapAgentService(self.Client(), tools, hub)
@@ -478,16 +639,20 @@ class MapAgentServiceTests(unittest.TestCase):
                     return {"content": "", "tool_calls": [{"id": "city", "function": {"name": "find_city", "arguments": '{"query":"Delhi"}'}}]}
                 return {"content": "Delhi is ready."}
 
-        workspace = {"pins": [], "areas": [], "state": {}}
+        cache = server.Cache(Path(":memory:"))
+        self.addCleanup(cache.close)
         tools = AgentTools(AgentDependencies(
             suggest_cities=lambda query, country: [city],
             resolve_city=lambda query, country: city,
             search_places=lambda query, country, lat, lon: {"results": [], "source": "openstreetmap", "lookupStage": "local-osm-cache"},
             plan_route=lambda waypoints, profile: {},
-            workspace_snapshot=lambda: workspace,
-            clear_workspace=lambda: workspace.update({"pins": [], "areas": [], "state": {}}),
+            workspace_snapshot=cache.workspace_snapshot,
+            clear_workspace=cache.clear_workspace,
             add_pin=lambda name, lat, lon, place_id, source: {},
             save_workspace_state=lambda state: state,
+            capture_workspace=cache.capture_workspace,
+            mutate_workspace=cache.mutate_workspace,
+            restore_workspace=cache.restore_workspace,
         ))
         hub = self.Hub()
         service = MapAgentService(Client(), tools, hub)
